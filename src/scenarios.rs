@@ -58,6 +58,7 @@ impl World {
             },
         );
         world.runner.on("report-metadata", ok(r#"{"result":{}}"#));
+        world.runner.on("pane wait-output", ok(r#"{"result":{}}"#));
         world
     }
 
@@ -623,6 +624,7 @@ fn two_projects_in_two_sockets_sharing_a_pane_id_do_not_mix() {
         .runner
         .on("pane list", ok(r#"{"result":{"panes":[]}}"#));
     world2.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    world2.runner.on("pane wait-output", ok(r#"{"result":{}}"#));
     world2.runner.on("report-metadata", ok(r#"{"result":{}}"#));
 
     let ctx = world2.ctx();

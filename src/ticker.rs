@@ -1018,6 +1018,7 @@ mod tests {
         runner.on("agent list", ok(&with_cwd(AGENT_READY, &f)));
         runner.on("pane list", ok(&with_cwd(PANE, &f)));
         runner.on("agent prompt", ok(r#"{"result":{}}"#));
+        runner.on("pane wait-output", ok(r#"{"result":{}}"#));
         runner.on("report-metadata", ok("{}"));
         let ctx = Ctx {
             env: &f.env,

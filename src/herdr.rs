@@ -477,8 +477,24 @@ impl<'a> Herdr<'a> {
                 "10000",
             ],
             Duration::from_secs(15),
-        )
-        .map(|_| ())
+        )?;
+        // `agent prompt` can observe a stale startup transition before the
+        // agent UI has actually accepted the paste. The rendered prompt is
+        // the durable boundary: only clear `prompt_pending` after Herdr can
+        // see the exact initial instruction in the pane.
+        self.call(
+            &[
+                "pane",
+                "wait-output",
+                target,
+                "--match",
+                text,
+                "--timeout",
+                "5000",
+            ],
+            Duration::from_secs(7),
+        )?;
+        Ok(())
     }
 
     pub fn agent_focus(&self, target: &str) -> Result<(), HerdrError> {
@@ -644,6 +660,10 @@ mod tests {
     fn initial_prompt_waits_for_observed_work() {
         let runner = crate::runner::fake::FakeRunner::new();
         runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        runner.on(
+            "pane wait-output",
+            crate::runner::fake::ok(r#"{"result":{}}"#),
+        );
         let herdr = Herdr::new("herdr", "socket", &runner);
 
         herdr.agent_prompt_start("w1:p1", "read the brief").unwrap();
@@ -669,5 +689,44 @@ mod tests {
                 "10000",
             ]
         );
+        let wait = calls
+            .iter()
+            .find(|call| {
+                call.args
+                    .starts_with(&["pane".into(), "wait-output".into()])
+            })
+            .unwrap();
+        assert_eq!(
+            wait.args,
+            [
+                "pane",
+                "wait-output",
+                "w1:p1",
+                "--match",
+                "read the brief",
+                "--timeout",
+                "5000",
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_prompt_fails_when_the_text_never_reaches_the_pane() {
+        let runner = crate::runner::fake::FakeRunner::new();
+        runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        runner.on(
+            "pane wait-output",
+            crate::runner::fake::fail(
+                1,
+                r#"{"error":{"code":"timeout","message":"not rendered"}}"#,
+            ),
+        );
+        let herdr = Herdr::new("herdr", "socket", &runner);
+
+        let error = herdr
+            .agent_prompt_start("w1:p1", "read the brief")
+            .unwrap_err();
+
+        assert_eq!(error.code, "timeout");
     }
 }
