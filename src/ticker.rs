@@ -84,7 +84,9 @@ pub enum StartAction {
 pub fn decide_start(lock: &LockState, my_version: &str, stop_file_exists: bool) -> StartAction {
     match lock {
         LockState::Free => StartAction::Spawn,
-        LockState::Held(info) if info.version == my_version && !stop_file_exists => StartAction::Nothing,
+        LockState::Held(info) if info.version == my_version && !stop_file_exists => {
+            StartAction::Nothing
+        }
         LockState::Held(_) => StartAction::StopThenSpawn,
     }
 }
@@ -131,7 +133,13 @@ fn spawn(root: &Path) -> Result<()> {
         .stderr(Stdio::null());
     // Pane variables belong to whoever started us, not to the ticker: every
     // project carries its own recorded socket.
-    for key in ["HERDR_SOCKET_PATH", "HERDR_SESSION", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] {
+    for key in [
+        "HERDR_SOCKET_PATH",
+        "HERDR_SESSION",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+    ] {
         command.env_remove(key);
     }
     // SAFETY: setsid is async-signal-safe and touches no memory.
@@ -161,7 +169,10 @@ pub fn stop(root: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(250));
     }
     let _ = std::fs::remove_file(stop_path(root));
-    bail!("the ticker did not exit within {} seconds", STOP_WAIT.as_secs())
+    bail!(
+        "the ticker did not exit within {} seconds",
+        STOP_WAIT.as_secs()
+    )
 }
 
 pub fn status(root: &Path) -> Result<()> {
@@ -177,7 +188,10 @@ pub fn status(root: &Path) -> Result<()> {
                 println!("  {tool:<6} {path}");
             }
             if info.version != crate::VERSION {
-                println!("  note: this binary is {}; `ticker start` replaces the running one", crate::VERSION);
+                println!(
+                    "  note: this binary is {}; `ticker start` replaces the running one",
+                    crate::VERSION
+                );
             }
         }
     }
@@ -211,7 +225,9 @@ impl Log {
             && let Ok(mut reader) = File::open(&self.path)
         {
             let mut tail = Vec::new();
-            if reader.seek(SeekFrom::End(-((LOG_CAP / 2) as i64))).is_ok() && reader.read_to_end(&mut tail).is_ok() {
+            if reader.seek(SeekFrom::End(-((LOG_CAP / 2) as i64))).is_ok()
+                && reader.read_to_end(&mut tail).is_ok()
+            {
                 let start = tail.iter().position(|b| *b == b'\n').map_or(0, |i| i + 1);
                 let _ = project::write_atomic(&self.path, &tail[start..]);
             }
@@ -244,7 +260,11 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         tools: ["herdr", "git", "gh", "ssh", "scp", "rsync"]
             .iter()
             .map(|tool| {
-                let name = if *tool == "herdr" { ctx.env.herdr_bin() } else { tool.to_string() };
+                let name = if *tool == "herdr" {
+                    ctx.env.herdr_bin()
+                } else {
+                    tool.to_string()
+                };
                 (tool.to_string(), which(&name, &path_var))
             })
             .collect(),
@@ -253,8 +273,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     lock.write_all(serde_json::to_string_pretty(&info)?.as_bytes())?;
     lock.flush()?;
 
-    let log = Log { path: log_path(root) };
-    log.line(&format!("ticker {} started (pid {})", info.version, info.pid));
+    let log = Log {
+        path: log_path(root),
+    };
+    log.line(&format!(
+        "ticker {} started (pid {})",
+        info.version, info.pid
+    ));
     let mut last_reachable = Instant::now();
     let mut memory = Memory::new(ctx);
     loop {
@@ -352,10 +377,23 @@ struct Pass {
     error: Option<anyhow::Error>,
 }
 
-fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], agents: &[Agent], panes: &[Pane], hashes: Option<&std::collections::BTreeMap<String, String>>) -> Result<Pass> {
+fn thread_pass(
+    project: &Project,
+    herdr: &Herdr,
+    threads: &[thread::Thread],
+    agents: &[Agent],
+    panes: &[Pane],
+    hashes: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<Pass> {
     let slug = &project.slug;
+    let tree = crate::organizations::tree(project).unwrap_or_default();
     let now = jiff::Timestamp::now();
-    let mut pass = Pass { transitions: Vec::new(), recorded_panes: 0, missing_panes: 0, error: None };
+    let mut pass = Pass {
+        transitions: Vec::new(),
+        recorded_panes: 0,
+        missing_panes: 0,
+        error: None,
+    };
     for t in threads {
         if t.status == thread::Status::Starting {
             if thread::seconds_since(&t.created, now) >= thread::STARTING_TIMEOUT_SECS {
@@ -382,10 +420,19 @@ fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], age
         }
 
         let mut delivered = false;
-        if t.prompt_pending && live.agent_state.as_deref().is_some_and(crate::herdr::ready_state) {
+        if t.prompt_pending
+            && live
+                .agent_state
+                .as_deref()
+                .is_some_and(crate::herdr::ready_state)
+        {
             match herdr.agent_prompt(&t.pane_id, &thread::launch_prompt(slug, &t.id)) {
                 Ok(()) => delivered = true,
-                Err(error) => pass.error = pass.error.or(Some(anyhow::anyhow!("{}: brief prompt: {error}", t.id))),
+                Err(error) => {
+                    pass.error = pass
+                        .error
+                        .or(Some(anyhow::anyhow!("{}: brief prompt: {error}", t.id)))
+                }
             }
         }
 
@@ -397,13 +444,31 @@ fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], age
             None => thread::local_report_hash(t),
         };
         let report_hash = fresh_hash.unwrap_or_else(|| t.report_hash.clone());
-        let after = thread::Thread { prompt_pending: t.prompt_pending && !delivered, report_hash, ..t.clone() };
+        let after = thread::Thread {
+            prompt_pending: t.prompt_pending && !delivered,
+            report_hash,
+            ..t.clone()
+        };
         // In the tick that delivers a prompt the agent still reads as idle; it
         // has just been given work, so it is Working, not Idle.
-        let group = if delivered { thread::Group::Working } else { thread::group(&after, &live, now) };
+        let group = if delivered {
+            thread::Group::Working
+        } else {
+            thread::group(&after, &live, now)
+        };
         if !t.last_group.is_empty() && group.token() != t.last_group {
-            let note = if !live.pane_exists { "pane closed".to_string() } else if state.is_empty() { "no agent".to_string() } else { state.clone() };
-            pass.transitions.push(Transition { id: t.id.clone(), to: group, note });
+            let note = if !live.pane_exists {
+                "pane closed".to_string()
+            } else if state.is_empty() {
+                "no agent".to_string()
+            } else {
+                state.clone()
+            };
+            pass.transitions.push(Transition {
+                id: t.id.clone(),
+                to: group,
+                note,
+            });
         }
         if delivered || state != t.last_state || group.token() != t.last_group {
             thread::update(project, &t.id, |t| {
@@ -418,17 +483,35 @@ fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], age
             })?;
         }
         if live.pane_exists {
-            threads::report_thread_tokens(herdr, t, slug, group);
+            threads::report_thread_tokens_in_tree(herdr, t, slug, group, &tree);
         }
     }
     Ok(pass)
+}
+
+struct PassContext<'a, 'ctx, 'runner> {
+    ctx: &'a Ctx<'ctx>,
+    project: &'a Project,
+    herdr: &'a Herdr<'runner>,
+    agents: &'a [Agent],
+    panes: &'a [Pane],
 }
 
 /// Launches pending threads whose pane is at a shell prompt. At most one
 /// `agent start` per project per tick (`may_start`), and never a start and a
 /// prompt for the same pane in one tick: prompts only go to agents that were
 /// already listed before any start.
-fn launch_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, threads: &[thread::Thread], agents: &[Agent], panes: &[Pane], may_start: &mut bool, errors: &mut Vec<anyhow::Error>) {
+fn launch_pass(
+    context: &PassContext<'_, '_, '_>,
+    threads: &[thread::Thread],
+    may_start: &mut bool,
+    errors: &mut Vec<anyhow::Error>,
+) {
+    let ctx = context.ctx;
+    let project = context.project;
+    let herdr = context.herdr;
+    let agents = context.agents;
+    let panes = context.panes;
     let now = jiff::Timestamp::now();
     for t in threads {
         if t.status != thread::Status::Open || !t.prompt_pending {
@@ -441,7 +524,11 @@ fn launch_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, threads: &[thread::T
         if t.launch_attempts >= thread::MAX_LAUNCH_ATTEMPTS {
             let failed = thread::update(project, &t.id, |t| {
                 t.status = thread::Status::Failed;
-                t.error = format!("no `{}` agent appeared in the pane after {} launch attempts", t.agent, thread::MAX_LAUNCH_ATTEMPTS);
+                t.error = format!(
+                    "no `{}` agent appeared in the pane after {} launch attempts",
+                    t.agent,
+                    thread::MAX_LAUNCH_ATTEMPTS
+                );
             });
             errors.extend(failed.err());
             continue;
@@ -451,19 +538,37 @@ fn launch_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, threads: &[thread::T
         }
         *may_start = false;
         let launched = (|| -> Result<()> {
-            thread::update(project, &t.id, |t| t.launch_attempts += 1)?;
+            crate::organizations::validate_machine_spawn(t.role, t.can_spawn, &t.machine)?;
             let safety = project.safety(&ctx.config_dir)?;
-            herdr.on_machine(&t.machine).agent_start(&t.agent_name, &t.agent, &t.pane_id, &safety.thread_agent_args)?;
+            let profile = crate::agent_profile::AgentProfile {
+                harness: t.agent.clone(),
+                model: t.model.clone(),
+                reasoning_effort: t.reasoning_effort.clone(),
+                permission_profile: t.permission_profile.clone(),
+                raw_agent_args: t.raw_agent_args.clone(),
+            };
+            let argv = profile.argv(&safety.thread_agent_args)?;
+            thread::update(project, &t.id, |t| t.launch_attempts += 1)?;
+            herdr
+                .on_machine(&t.machine)
+                .agent_start(&t.agent_name, &t.agent, &t.pane_id, &argv)?;
             Ok(())
         })();
-        errors.extend(launched.err().map(|e| e.context(format!("{}: launch", t.id))));
+        errors.extend(
+            launched
+                .err()
+                .map(|e| e.context(format!("{}: launch", t.id))),
+        );
     }
 }
 
 fn open_threads(project: &Project, remote: bool) -> Vec<thread::Thread> {
     thread::list(project)
         .into_iter()
-        .filter(|t| t.is_remote() == remote && matches!(t.status, thread::Status::Open | thread::Status::Starting))
+        .filter(|t| {
+            t.is_remote() == remote
+                && matches!(t.status, thread::Status::Open | thread::Status::Starting)
+        })
         .collect()
 }
 
@@ -487,7 +592,9 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
     let mut first_error = None;
 
     // The coordinator: deliver a pending priming prompt, refresh its tokens.
-    let agent = agents.iter().find(|a| coordinator::agent_matches(&record, a));
+    let agent = agents
+        .iter()
+        .find(|a| coordinator::agent_matches(&record, a));
     if let Some(agent) = agent {
         if record.prime_pending && agent.ready() {
             let prefix = coordinator::current_prefix(&ctx.root)?;
@@ -501,10 +608,21 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
         coordinator::report_tokens(&herdr, slug, &record.pane_id);
     }
 
-    let pass = thread_pass(project, &herdr, &open_threads(project, false), &agents, &panes, None)?;
+    let pass = thread_pass(
+        project,
+        &herdr,
+        &open_threads(project, false),
+        &agents,
+        &panes,
+        None,
+    )?;
     first_error = first_error.or(pass.error);
     let coordinator_recorded = usize::from(!record.pane_id.is_empty());
-    let coordinator_missing = usize::from(coordinator_recorded == 1 && agent.is_none() && !panes.iter().any(|p| coordinator::pane_matches(&record, p)));
+    let coordinator_missing = usize::from(
+        coordinator_recorded == 1
+            && agent.is_none()
+            && !panes.iter().any(|p| coordinator::pane_matches(&record, p)),
+    );
     let recorded_panes = pass.recorded_panes + coordinator_recorded;
     let missing_panes = pass.missing_panes + coordinator_missing;
 
@@ -537,15 +655,33 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
 /// `herdr --machine`, one ssh call for every report hash, then the same thread
 /// pass, copies and launches as for local threads. If the machine cannot be
 /// reached nothing is read: no state, no group change, no copy, no inbox item.
-fn remote_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, machine: &str, threads: &[thread::Thread], may_start: &mut bool, copy_notes: &mut std::collections::BTreeMap<String, Vec<String>>, errors: &mut Vec<anyhow::Error>) -> Result<Vec<Transition>, String> {
+fn remote_pass(
+    context: &PassContext<'_, '_, '_>,
+    machine: &str,
+    threads: &[thread::Thread],
+    may_start: &mut bool,
+    copy_notes: &mut std::collections::BTreeMap<String, Vec<String>>,
+    errors: &mut Vec<anyhow::Error>,
+) -> Result<Vec<Transition>, String> {
+    let ctx = context.ctx;
+    let project = context.project;
+    let herdr = context.herdr;
     let remote = herdr.on_machine(machine);
     let agents = remote.agent_list().map_err(|e| e.to_string())?;
     let panes = remote.pane_list().map_err(|e| e.to_string())?;
-    let target = crate::remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, machine).map_err(|e| format!("{e:#}"))?;
-    let dirs: Vec<(String, String)> = threads.iter().filter(|t| !t.thread_dir.is_empty()).map(|t| (t.id.clone(), t.thread_dir.clone())).collect();
-    let hashes = crate::remote::report_hashes(ctx.runner, &target, &dirs).map_err(|e| format!("{e:#}"))?;
+    let target =
+        crate::remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, machine)
+            .map_err(|e| format!("{e:#}"))?;
+    let dirs: Vec<(String, String)> = threads
+        .iter()
+        .filter(|t| !t.thread_dir.is_empty())
+        .map(|t| (t.id.clone(), t.thread_dir.clone()))
+        .collect();
+    let hashes =
+        crate::remote::report_hashes(ctx.runner, &target, &dirs).map_err(|e| format!("{e:#}"))?;
 
-    let pass = thread_pass(project, &remote, threads, &agents, &panes, Some(&hashes)).map_err(|e| format!("{e:#}"))?;
+    let pass = thread_pass(project, &remote, threads, &agents, &panes, Some(&hashes))
+        .map_err(|e| format!("{e:#}"))?;
     errors.extend(pass.error);
 
     for t in threads {
@@ -554,20 +690,33 @@ fn remote_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, machine: &str, threa
         };
         let copied = thread::copy_home_remote(project, t, true, ctx.runner, &target);
         match copied.outcome {
-            thread::CopyOutcome::Failed(error) => errors.push(anyhow::anyhow!("{}: copy from {machine} failed: {error}", t.id)),
+            thread::CopyOutcome::Failed(error) => errors.push(anyhow::anyhow!(
+                "{}: copy from {machine} failed: {error}",
+                t.id
+            )),
             outcome => {
                 if let thread::CopyOutcome::Partial(notes) = outcome {
                     copy_notes.insert(t.id.clone(), notes);
                 }
                 let hash = copied.report_hash.unwrap_or_else(|| hash.clone());
-                errors.extend(thread::update(project, &t.id, |t| {
-                    t.report_hash = hash;
-                    t.last_report_change = project::now();
-                }).err());
+                errors.extend(
+                    thread::update(project, &t.id, |t| {
+                        t.report_hash = hash;
+                        t.last_report_change = project::now();
+                    })
+                    .err(),
+                );
             }
         }
     }
-    launch_pass(ctx, project, herdr, threads, &agents, &panes, may_start, errors);
+    let launch_context = PassContext {
+        ctx,
+        project,
+        herdr: &remote,
+        agents: &agents,
+        panes: &panes,
+    };
+    launch_pass(&launch_context, threads, may_start, errors);
     Ok(pass.transitions)
 }
 
@@ -582,7 +731,10 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
     let mut transitions = seen.transitions.clone();
 
     if let Some(record) = project.coordinator().filter(|c| c.prime_pending) {
-        let pane_alive = seen.panes.iter().any(|p| coordinator::pane_matches(&record, p));
+        let pane_alive = seen
+            .panes
+            .iter()
+            .any(|p| coordinator::pane_matches(&record, p));
         let pane_has_agent = seen.agents.iter().any(|a| a.pane_id == record.pane_id);
         if pane_alive && !pane_has_agent && record.launch_attempts < MAX_LAUNCH_ATTEMPTS {
             may_start = false;
@@ -590,7 +742,12 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
                 project.update_coordinator(|c| c.launch_attempts += 1)?;
                 let (settings, _) = project.read_project_md()?;
                 let safety = project.safety(&ctx.config_dir)?;
-                herdr.agent_start(&record.agent_name, &settings.coordinator_agent, &record.pane_id, &safety.coordinator_agent_args)?;
+                herdr.agent_start(
+                    &record.agent_name,
+                    &settings.coordinator_agent,
+                    &record.pane_id,
+                    &safety.coordinator_agent_args,
+                )?;
                 Ok(())
             })();
             errors.extend(started.err());
@@ -605,7 +762,9 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         {
             let copied = thread::copy_home_local(project, t, true, ctx.runner);
             match copied.outcome {
-                thread::CopyOutcome::Failed(error) => errors.push(anyhow::anyhow!("{}: copy failed: {error}", t.id)),
+                thread::CopyOutcome::Failed(error) => {
+                    errors.push(anyhow::anyhow!("{}: copy failed: {error}", t.id))
+                }
                 outcome => {
                     if let thread::CopyOutcome::Partial(notes) = outcome {
                         copy_notes.insert(t.id.clone(), notes);
@@ -619,7 +778,14 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
             }
         }
     }
-    launch_pass(ctx, project, &herdr, &local, &seen.agents, &seen.panes, &mut may_start, &mut errors);
+    let local_context = PassContext {
+        ctx,
+        project,
+        herdr: &herdr,
+        agents: &seen.agents,
+        panes: &seen.panes,
+    };
+    launch_pass(&local_context, &local, &mut may_start, &mut errors);
 
     // Remote threads, one machine at a time, every fourth tick.
     let mut state = steps::load_state(project);
@@ -632,9 +798,21 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         if !memory.machine_is_due(&machine) {
             continue;
         }
-        let threads: Vec<thread::Thread> = remote_threads.iter().filter(|t| t.machine == machine).cloned().collect();
-        let outcome = remote_pass(ctx, project, &herdr, &machine, &threads, &mut may_start, &mut copy_notes, &mut errors);
-        let event = memory.record_machine(&machine, outcome.as_ref().err().map(String::as_str), now);
+        let threads: Vec<thread::Thread> = remote_threads
+            .iter()
+            .filter(|t| t.machine == machine)
+            .cloned()
+            .collect();
+        let outcome = remote_pass(
+            &local_context,
+            &machine,
+            &threads,
+            &mut may_start,
+            &mut copy_notes,
+            &mut errors,
+        );
+        let event =
+            memory.record_machine(&machine, outcome.as_ref().err().map(String::as_str), now);
         match outcome {
             Ok(found) => transitions.extend(found),
             Err(error) => errors.push(anyhow::anyhow!("{machine}: unreachable this tick: {error}")),
@@ -642,19 +820,35 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         errors.extend(steps::write_machine_outage(project, &machine, event, memory).err());
     }
 
-    errors.extend(steps::write_thread_items(project, &mut state, &transitions, seen.session_lost, &copy_notes).err());
+    errors.extend(
+        steps::write_thread_items(
+            project,
+            &mut state,
+            &transitions,
+            seen.session_lost,
+            &copy_notes,
+        )
+        .err(),
+    );
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     let zoned = jiff::Zoned::now();
     match project.read_project_md() {
         Ok((settings, _)) => {
-            let commands = project.safety(&ctx.config_dir).map(|s| s.routine_commands).unwrap_or(false);
-            errors.extend(steps::routines(ctx, project, &mut state, commands, None, &zoned));
+            let commands = project
+                .safety(&ctx.config_dir)
+                .map(|s| s.routine_commands)
+                .unwrap_or(false);
+            errors.extend(steps::routines(
+                ctx, project, &mut state, commands, None, &zoned,
+            ));
             errors.extend(steps::auto_resolve(ctx, project, &settings, memory, now));
         }
         Err(error) => {
             let text = std::fs::read(project.project_md()).unwrap_or_default();
             let problem = Some((thread::sha256_hex(&text), format!("{error:#}")));
-            errors.extend(steps::routines(ctx, project, &mut state, false, problem, &zoned));
+            errors.extend(steps::routines(
+                ctx, project, &mut state, false, problem, &zoned,
+            ));
         }
     }
     inbox::prune_done(project, steps::DONE_RETENTION_DAYS);
@@ -679,12 +873,24 @@ mod tests {
 
     #[test]
     fn start_decisions() {
-        assert_eq!(decide_start(&LockState::Free, "v1", false), StartAction::Spawn);
-        assert_eq!(decide_start(&LockState::Free, "v1", true), StartAction::Spawn);
+        assert_eq!(
+            decide_start(&LockState::Free, "v1", false),
+            StartAction::Spawn
+        );
+        assert_eq!(
+            decide_start(&LockState::Free, "v1", true),
+            StartAction::Spawn
+        );
         assert_eq!(decide_start(&held("v1"), "v1", false), StartAction::Nothing);
-        assert_eq!(decide_start(&held("v0"), "v1", false), StartAction::StopThenSpawn);
+        assert_eq!(
+            decide_start(&held("v0"), "v1", false),
+            StartAction::StopThenSpawn
+        );
         // A stop in progress: finish it, then spawn.
-        assert_eq!(decide_start(&held("v1"), "v1", true), StartAction::StopThenSpawn);
+        assert_eq!(
+            decide_start(&held("v1"), "v1", true),
+            StartAction::StopThenSpawn
+        );
     }
 
     #[test]
@@ -693,7 +899,13 @@ mod tests {
         let missing = home.path().join("root");
         let env = Env::for_test(home.path(), &[]);
         let runner = FakeRunner::new();
-        let ctx = Ctx { env: &env, root: missing.clone(), config_dir: home.path().join("cfg"), runner: &runner, detached_ticker: true };
+        let ctx = Ctx {
+            env: &env,
+            root: missing.clone(),
+            config_dir: home.path().join("cfg"),
+            runner: &runner,
+            detached_ticker: true,
+        };
         start(&ctx).unwrap();
         assert!(!missing.exists());
         run(&ctx).unwrap();
@@ -709,7 +921,12 @@ mod tests {
     fn lock_probe_sees_a_holder_and_its_version() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(lock_state(root.path()), LockState::Free);
-        let mut file = File::options().create(true).write(true).truncate(false).open(lock_path(root.path())).unwrap();
+        let mut file = File::options()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path(root.path()))
+            .unwrap();
         file.lock().unwrap();
         file.write_all(br#"{"version":"v9","pid":1}"#).unwrap();
         match lock_state(root.path()) {
@@ -765,7 +982,12 @@ mod tests {
             })
             .unwrap();
         let env = Env::for_test(home.path(), &[]);
-        Fixture { _home: home, env, root, project }
+        Fixture {
+            _home: home,
+            env,
+            root,
+            project,
+        }
     }
 
     fn with_cwd(json: &str, fixture: &Fixture) -> String {
@@ -779,7 +1001,13 @@ mod tests {
         runner.on("agent list", ok(&with_cwd(AGENT_BLOCKED, &f)));
         runner.on("pane list", ok(&with_cwd(PANE, &f)));
         runner.on("report-metadata", ok("{}"));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(tick_project(&ctx, &f.project).unwrap());
         assert_eq!(runner.count("agent prompt"), 0);
         assert!(f.project.coordinator().unwrap().prime_pending);
@@ -789,14 +1017,25 @@ mod tests {
         runner.on("pane list", ok(&with_cwd(PANE, &f)));
         runner.on("agent prompt", ok(r#"{"result":{}}"#));
         runner.on("report-metadata", ok("{}"));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(tick_project(&ctx, &f.project).unwrap());
         assert_eq!(runner.count("agent prompt"), 1);
         assert!(!f.project.coordinator().unwrap().prime_pending);
         // The prompt went to the recorded socket.
         let calls = runner.calls.borrow();
-        let prompt = calls.iter().find(|c| c.display().contains("agent prompt")).unwrap();
-        assert!(prompt.env.iter().any(|(k, v)| k == "HERDR_SOCKET_PATH" && v == &f.project.coordinator().unwrap().socket));
+        let prompt = calls
+            .iter()
+            .find(|c| c.display().contains("agent prompt"))
+            .unwrap();
+        assert!(prompt.env.iter().any(
+            |(k, v)| k == "HERDR_SOCKET_PATH" && v == &f.project.coordinator().unwrap().socket
+        ));
     }
 
     #[test]
@@ -805,8 +1044,20 @@ mod tests {
         let runner = FakeRunner::new();
         runner.on("agent list", ok(&with_cwd(AGENT_READY, &f)));
         runner.on("pane list", ok(&with_cwd(PANE, &f)));
-        runner.on("agent prompt", fail(1, r#"{"error":{"code":"agent_blocked","message":"blocked"}}"#));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        runner.on(
+            "agent prompt",
+            fail(
+                1,
+                r#"{"error":{"code":"agent_blocked","message":"blocked"}}"#,
+            ),
+        );
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(tick_project(&ctx, &f.project).is_err());
         assert!(f.project.coordinator().unwrap().prime_pending);
     }
@@ -816,9 +1067,18 @@ mod tests {
         let f = fixture(true);
         let runner = FakeRunner::new();
         // Same ids, different working directory: not our pane.
-        runner.on("agent list", ok(&AGENT_READY.replace("CWD", "/somewhere/else")));
+        runner.on(
+            "agent list",
+            ok(&AGENT_READY.replace("CWD", "/somewhere/else")),
+        );
         runner.on("pane list", ok(&PANE.replace("CWD", "/somewhere/else")));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(tick_project(&ctx, &f.project).unwrap());
         assert_eq!(runner.count("agent prompt"), 0);
         assert_eq!(runner.count("agent start"), 0);
@@ -831,8 +1091,17 @@ mod tests {
         let runner = FakeRunner::new();
         runner.on("agent list", ok(NO_AGENTS));
         runner.on("pane list", ok(&with_cwd(PANE, &f)));
-        runner.on("agent start", fail(1, r#"{"error":{"code":"timeout","message":"no agent"}}"#));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        runner.on(
+            "agent start",
+            fail(1, r#"{"error":{"code":"timeout","message":"no agent"}}"#),
+        );
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         for _ in 0..5 {
             let _ = tick_project(&ctx, &f.project);
         }
@@ -845,13 +1114,25 @@ mod tests {
         let f = fixture(true);
         let runner = FakeRunner::new();
         runner.on("agent list", fail(1, "connection refused"));
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(!tick_project(&ctx, &f.project).unwrap());
 
         // A socket file that is gone is not even called.
         std::fs::remove_file(f.project.coordinator().unwrap().socket).unwrap();
         let runner = FakeRunner::new();
-        let ctx = Ctx { env: &f.env, root: f.root.clone(), config_dir: f.root.join("cfg"), runner: &runner, detached_ticker: false };
+        let ctx = Ctx {
+            env: &f.env,
+            root: f.root.clone(),
+            config_dir: f.root.join("cfg"),
+            runner: &runner,
+            detached_ticker: false,
+        };
         assert!(!tick_project(&ctx, &f.project).unwrap());
         assert!(runner.calls.borrow().is_empty());
     }
@@ -859,7 +1140,9 @@ mod tests {
     #[test]
     fn log_is_capped() {
         let dir = tempfile::tempdir().unwrap();
-        let log = Log { path: dir.path().join("log") };
+        let log = Log {
+            path: dir.path().join("log"),
+        };
         let long = "x".repeat(10_000);
         for _ in 0..150 {
             log.line(&long);

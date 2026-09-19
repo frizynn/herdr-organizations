@@ -3,15 +3,18 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
+use crate::agent_profile::ProfileOverrides;
 use crate::coordinator::{self, OpenOptions};
+use crate::organizations::NodeRequest;
 use crate::paths::{self, Ctx, Env, SessionFlags};
 use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
+use crate::thread::NodeRole;
 use crate::threads::{self, ResolveArgs, StartArgs};
 use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, ticker};
 
 #[derive(Parser)]
-#[command(name = "herdr-projects", version = crate::VERSION, about = "Projects for herdr")]
+#[command(name = env!("CARGO_BIN_NAME"), version = crate::VERSION, about = "Recursive organizations for herdr")]
 struct Cli {
     /// Projects root (default: $HERDR_PROJECTS_ROOT, then config.toml, then ~/.herdr-projects)
     #[arg(long, global = true, value_name = "DIR")]
@@ -99,6 +102,11 @@ enum Command {
     Thread {
         #[command(subcommand)]
         command: ThreadCommand,
+    },
+    /// Create and manage nodes in a recursive organization
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
     },
     /// Routines: scheduled prompts and watched commands
     Routine {
@@ -238,6 +246,95 @@ enum ThreadCommand {
     },
 }
 
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CliNodeRole {
+    Worker,
+    Coordinator,
+}
+
+impl From<CliNodeRole> for NodeRole {
+    fn from(value: CliNodeRole) -> Self {
+        match value {
+            CliNodeRole::Worker => NodeRole::Worker,
+            CliNodeRole::Coordinator => NodeRole::Coordinator,
+        }
+    }
+}
+
+#[derive(Args)]
+struct NodeStartArgs {
+    slug: String,
+    #[arg(long)]
+    title: String,
+    /// Parent node id, or `root` for a direct child of the project
+    #[arg(long, default_value = "root")]
+    parent: String,
+    /// Coordinators can create children; workers cannot
+    #[arg(long, value_enum, default_value_t = CliNodeRole::Worker)]
+    role: CliNodeRole,
+    /// Explicitly grant a coordinator permission to create children
+    #[arg(long, conflicts_with = "no_spawn")]
+    can_spawn: bool,
+    /// Create a leaf coordinator that cannot create children
+    #[arg(long = "no-spawn", conflicts_with = "can_spawn")]
+    no_spawn: bool,
+    #[arg(long, value_name = "HARNESS", visible_alias = "agent")]
+    harness: Option<String>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    reasoning_effort: Option<String>,
+    #[arg(long)]
+    permission_profile: Option<String>,
+    /// One argv component passed directly to the selected harness; repeatable
+    #[arg(long = "raw-agent-arg")]
+    raw_agent_args: Vec<String>,
+    #[arg(long, value_name = "PATH")]
+    repo: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    machine: Option<String>,
+    #[arg(long, value_name = "REF")]
+    base: Option<String>,
+    /// The task; `-` reads standard input
+    #[arg(long, value_name = "FILE")]
+    task_file: String,
+}
+
+#[derive(Subcommand)]
+enum NodeCommand {
+    /// Create and start a child node; `create` is an alias
+    #[command(alias = "create")]
+    Start(Box<NodeStartArgs>),
+    /// Bring back a node whose pane is gone or whose start failed
+    Restart { slug: String, id: String },
+    /// Send a follow-up to a node's agent
+    Prompt {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "FILE")]
+        text_file: String,
+    },
+    /// List nodes with live state, role and parent
+    List { slug: String },
+    /// Show one node's record
+    Show { slug: String, id: String },
+    /// Record that the user has seen the current report
+    Ack { slug: String, id: String },
+    /// Resolve a node, or reopen a resolved one
+    Resolve {
+        slug: String,
+        id: String,
+        #[arg(long, conflicts_with_all = ["remove_worktree", "skip_copy", "discard_uncopied"])]
+        reopen: bool,
+        #[arg(long)]
+        remove_worktree: bool,
+        #[arg(long)]
+        skip_copy: bool,
+        #[arg(long, requires = "remove_worktree")]
+        discard_uncopied: bool,
+    },
+}
+
 /// `-` is standard input; a relative path is relative to the caller's directory.
 fn read_text(file: &str) -> Result<String> {
     use std::io::Read;
@@ -292,10 +389,17 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Command::New { name, goal, repos } => {
-            let repos = repos.iter().map(|arg| project::parse_repo_arg(arg)).collect();
+            let repos = repos
+                .iter()
+                .map(|arg| project::parse_repo_arg(arg))
+                .collect();
             let project = project::create(&ctx.root, &name, &goal, repos)?;
             println!("created `{}` at {}", project.slug, project.dir().display());
-            println!("next: {} open {}", coordinator::current_prefix(&ctx.root)?, project.slug);
+            println!(
+                "next: {} open {}",
+                coordinator::current_prefix(&ctx.root)?,
+                project.slug
+            );
             Ok(())
         }
         Command::List { all } => {
@@ -307,14 +411,37 @@ pub fn run() -> Result<()> {
                 }
                 let mut counts = std::collections::BTreeMap::new();
                 for row in threads::rows(&ctx, &project) {
-                    *counts.entry(row.group.rank()).or_insert((row.group.label(), 0)) = (row.group.label(), counts.get(&row.group.rank()).map_or(0, |c: &(&str, usize)| c.1) + 1);
+                    *counts
+                        .entry(row.group.rank())
+                        .or_insert((row.group.label(), 0)) = (
+                        row.group.label(),
+                        counts
+                            .get(&row.group.rank())
+                            .map_or(0, |c: &(&str, usize)| c.1)
+                            + 1,
+                    );
                 }
-                let summary: Vec<String> = counts.values().map(|(label, n)| format!("{label}: {n}")).collect();
-                println!("{slug}\t{status}\t{}", if summary.is_empty() { "no threads".to_string() } else { summary.join(", ") });
+                let summary: Vec<String> = counts
+                    .values()
+                    .map(|(label, n)| format!("{label}: {n}"))
+                    .collect();
+                println!(
+                    "{slug}\t{status}\t{}",
+                    if summary.is_empty() {
+                        "no threads".to_string()
+                    } else {
+                        summary.join(", ")
+                    }
+                );
             }
             Ok(())
         }
-        Command::Open { slug, reprime, rebind, session } => coordinator::open(
+        Command::Open {
+            slug,
+            reprime,
+            rebind,
+            session,
+        } => coordinator::open(
             &ctx,
             &slug,
             &OpenOptions {
@@ -336,35 +463,199 @@ pub fn run() -> Result<()> {
             }
         },
         Command::Thread { command } => match command {
-            ThreadCommand::Start { slug, title, repo, machine, agent, base, task_file } => {
+            ThreadCommand::Start {
+                slug,
+                title,
+                repo,
+                machine,
+                agent,
+                base,
+                task_file,
+            } => {
                 let task = read_text(&task_file)?;
-                let thread = threads::start(&ctx, &slug, StartArgs { title, repo, machine, agent, base, task })?;
-                println!("{}", serde_json::json!({ "id": thread.id, "kind": thread.kind, "branch": thread.branch, "pane_id": thread.pane_id }));
+                let thread = threads::start(
+                    &ctx,
+                    &slug,
+                    StartArgs {
+                        title,
+                        repo,
+                        machine,
+                        agent,
+                        base,
+                        task,
+                        node: NodeRequest::default(),
+                    },
+                )?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "id": thread.id, "kind": thread.kind, "branch": thread.branch, "pane_id": thread.pane_id })
+                );
                 Ok(())
             }
             ThreadCommand::Restart { slug, id } => {
                 let thread = threads::restart(&ctx, &slug, &id)?;
-                println!("{} is back in pane {}; the ticker launches its agent", thread.id, thread.pane_id);
+                println!(
+                    "{} is back in pane {}; the ticker launches its agent",
+                    thread.id, thread.pane_id
+                );
                 Ok(())
             }
-            ThreadCommand::Prompt { slug, id, text_file } => {
+            ThreadCommand::Prompt {
+                slug,
+                id,
+                text_file,
+            } => {
                 let text = read_text(&text_file)?;
                 let state = threads::prompt(&ctx, &slug, &id, &text)?;
                 println!("sent to {id} (agent was {state})");
                 Ok(())
             }
-            ThreadCommand::Adopt { slug, pane, title, task_file } => {
+            ThreadCommand::Adopt {
+                slug,
+                pane,
+                title,
+                task_file,
+            } => {
                 let task = task_file.map(|file| read_text(&file)).transpose()?;
                 let thread = adopt::adopt(&ctx, &slug, &pane, &title, task)?;
-                println!("{}", serde_json::json!({ "id": thread.id, "kind": thread.kind, "pane_id": thread.pane_id, "prompt_pending": thread.prompt_pending }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "id": thread.id, "kind": thread.kind, "pane_id": thread.pane_id, "prompt_pending": thread.prompt_pending })
+                );
                 Ok(())
             }
             ThreadCommand::List { slug } => threads::print_list(&ctx, &slug),
             ThreadCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
             ThreadCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
-            ThreadCommand::Resolve { slug, id, reopen, remove_worktree, skip_copy, discard_uncopied } => {
-                threads::resolve(&ctx, &slug, &id, &ResolveArgs { reopen, remove_worktree, skip_copy, discard_uncopied })
+            ThreadCommand::Resolve {
+                slug,
+                id,
+                reopen,
+                remove_worktree,
+                skip_copy,
+                discard_uncopied,
+            } => threads::resolve(
+                &ctx,
+                &slug,
+                &id,
+                &ResolveArgs {
+                    reopen,
+                    remove_worktree,
+                    skip_copy,
+                    discard_uncopied,
+                },
+            ),
+        },
+        Command::Node { command } => match command {
+            NodeCommand::Start(args) => {
+                let NodeStartArgs {
+                    slug,
+                    title,
+                    parent,
+                    role,
+                    can_spawn,
+                    no_spawn,
+                    harness,
+                    model,
+                    reasoning_effort,
+                    permission_profile,
+                    raw_agent_args,
+                    repo,
+                    machine,
+                    base,
+                    task_file,
+                } = *args;
+                let task = read_text(&task_file)?;
+                let role = role.into();
+                let can_spawn = if can_spawn {
+                    Some(true)
+                } else if no_spawn {
+                    Some(false)
+                } else {
+                    None
+                };
+                let node = NodeRequest {
+                    parent_id: parent,
+                    role,
+                    can_spawn,
+                    profile: ProfileOverrides {
+                        harness,
+                        model,
+                        reasoning_effort,
+                        permission_profile,
+                        raw_agent_args,
+                    },
+                };
+                let node = threads::start(
+                    &ctx,
+                    &slug,
+                    StartArgs {
+                        title,
+                        repo,
+                        machine,
+                        agent: None,
+                        base,
+                        task,
+                        node,
+                    },
+                )?;
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": node.id,
+                        "kind": node.kind,
+                        "branch": node.branch,
+                        "pane_id": node.pane_id,
+                        "parent_id": node.parent_id,
+                        "role": node.role,
+                        "can_spawn": node.can_spawn,
+                        "harness": node.agent,
+                        "model": node.model,
+                        "reasoning_effort": node.reasoning_effort,
+                        "permission_profile": node.permission_profile,
+                    })
+                );
+                Ok(())
             }
+            NodeCommand::Restart { slug, id } => {
+                let node = threads::restart(&ctx, &slug, &id)?;
+                println!(
+                    "{} is back in pane {}; the ticker launches its agent",
+                    node.id, node.pane_id
+                );
+                Ok(())
+            }
+            NodeCommand::Prompt {
+                slug,
+                id,
+                text_file,
+            } => {
+                let text = read_text(&text_file)?;
+                let state = threads::prompt(&ctx, &slug, &id, &text)?;
+                println!("sent to {id} (agent was {state})");
+                Ok(())
+            }
+            NodeCommand::List { slug } => threads::print_node_list(&ctx, &slug),
+            NodeCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
+            NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
+            NodeCommand::Resolve {
+                slug,
+                id,
+                reopen,
+                remove_worktree,
+                skip_copy,
+                discard_uncopied,
+            } => threads::resolve(
+                &ctx,
+                &slug,
+                &id,
+                &ResolveArgs {
+                    reopen,
+                    remove_worktree,
+                    skip_copy,
+                    discard_uncopied,
+                },
+            ),
         },
         Command::Routine { command } => match command {
             RoutineCommand::Approve { slug, name } => {
@@ -388,9 +679,22 @@ pub fn run() -> Result<()> {
         Command::Archive { slug } => lifecycle::set_status(&ctx, &slug, Status::Archived),
         Command::Unarchive { slug } => lifecycle::set_status(&ctx, &slug, Status::Active),
         Command::Delete { slug, force } => lifecycle::delete(&ctx, &slug, force),
-        Command::AdoptWorkspace { name, goal, pane, workspace_cwd, session } => {
-            adopt::adopt_workspace(&ctx, &adopt::AdoptWorkspace { name, goal, pane, workspace_cwd, session: session.into() })
-        }
+        Command::AdoptWorkspace {
+            name,
+            goal,
+            pane,
+            workspace_cwd,
+            session,
+        } => adopt::adopt_workspace(
+            &ctx,
+            &adopt::AdoptWorkspace {
+                name,
+                goal,
+                pane,
+                workspace_cwd,
+                session: session.into(),
+            },
+        ),
         Command::Action { id } => actions::run_action(&ctx, &id),
         Command::Pane { id } => actions::run_pane(&ctx, &id),
         Command::Safety { command } => match command {
@@ -399,11 +703,17 @@ pub fn run() -> Result<()> {
                 let safety = project.safety(&ctx.config_dir)?;
                 println!("Effective safety settings for `{slug}`:");
                 println!("  start_threads = {:?}", safety.start_threads);
-                println!("  coordinator_agent_args = {:?}", safety.coordinator_agent_args);
+                println!(
+                    "  coordinator_agent_args = {:?}",
+                    safety.coordinator_agent_args
+                );
                 println!("  thread_agent_args = {:?}", safety.thread_agent_args);
                 println!("  routine_commands = {}", safety.routine_commands);
                 println!();
-                println!("To change one, edit {} by hand and add:", ctx.config_dir.join("config.toml").display());
+                println!(
+                    "To change one, edit {} by hand and add:",
+                    ctx.config_dir.join("config.toml").display()
+                );
                 println!();
                 println!("[safety.{:?}]", project.canonical_dir().to_string_lossy());
                 Ok(())

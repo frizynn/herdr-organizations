@@ -20,7 +20,9 @@ pub fn validate_slug(slug: &str) -> Result<()> {
         .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     let rest_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
     if !first_ok || !rest_ok || slug.len() > MAX_SLUG {
-        bail!("`{slug}` is not a valid slug (lower-case letters, digits and hyphens, at most {MAX_SLUG} characters)");
+        bail!(
+            "`{slug}` is not a valid slug (lower-case letters, digits and hyphens, at most {MAX_SLUG} characters)"
+        );
     }
     Ok(())
 }
@@ -64,7 +66,10 @@ pub fn humanize(slug: &str) -> String {
         .filter(|word| !word.is_empty())
         .map(|word| {
             let mut chars = word.chars();
-            chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                .unwrap_or_default()
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -77,8 +82,14 @@ pub fn humanize(slug: &str) -> String {
 pub fn display_name(name: &str, slug: &str) -> String {
     let name = name.trim();
     let base = if name.is_empty() { slug } else { name };
-    let slug_like = base.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-    if slug_like { humanize(base) } else { base.to_string() }
+    let slug_like = base
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if slug_like {
+        humanize(base)
+    } else {
+        base.to_string()
+    }
 }
 
 /// Writes through a temporary file in the same directory plus a rename. It never
@@ -163,7 +174,8 @@ pub fn parse_project_md(text: &str) -> Result<(Settings, String)> {
             .map(|front| (front, ""))
             .context("PROJECT.md front matter has no closing `+++` line")?,
     };
-    let settings: Settings = toml::from_str(front).context("PROJECT.md front matter does not parse")?;
+    let settings: Settings =
+        toml::from_str(front).context("PROJECT.md front matter does not parse")?;
     Ok((settings, body.trim_start_matches('\n').to_string()))
 }
 
@@ -305,7 +317,10 @@ impl Project {
 
     pub fn set_status(&self, status: Status) -> Result<()> {
         let _lock = self.lock()?;
-        write_json(&self.state_dir().join("project.json"), &ProjectState { status })
+        write_json(
+            &self.state_dir().join("project.json"),
+            &ProjectState { status },
+        )
     }
 
     pub fn coordinator(&self) -> Option<Coordinator> {
@@ -455,7 +470,16 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
 
     std::fs::create_dir_all(root)?;
     std::fs::create_dir(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-    for sub in ["memory", "scratch", "routines", "threads", "inbox", "inbox/done", "library", ".state"] {
+    for sub in [
+        "memory",
+        "scratch",
+        "routines",
+        "threads",
+        "inbox",
+        "inbox/done",
+        "library",
+        ".state",
+    ] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
     write_atomic(
@@ -463,7 +487,10 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
         b"# Memory\n\nOne line per memory file: `- [title](memory/file.md): what it holds`.\n",
     )?;
     write_atomic(&dir.join("TASKS.md"), TASKS_TEMPLATE.as_bytes())?;
-    write_json(&project.state_dir().join("project.json"), &ProjectState::default())?;
+    write_json(
+        &project.state_dir().join("project.json"),
+        &ProjectState::default(),
+    )?;
     // PROJECT.md last: a folder without it is not a project, so a half-made
     // skeleton is never picked up by `list` or the ticker.
     write_atomic(
@@ -495,7 +522,18 @@ mod tests {
         for good in ["a", "demo", "demo-2", "0x", &"a".repeat(40)] {
             assert!(validate_slug(good).is_ok(), "{good}");
         }
-        for bad in ["", "-a", "A", "a_b", "a/b", "../x", "a b", ".", "..", &"a".repeat(41)] {
+        for bad in [
+            "",
+            "-a",
+            "A",
+            "a_b",
+            "a/b",
+            "../x",
+            "a b",
+            ".",
+            "..",
+            &"a".repeat(41),
+        ] {
             assert!(validate_slug(bad).is_err(), "{bad}");
         }
     }
@@ -505,7 +543,10 @@ mod tests {
         assert_eq!(humanize("herdr-projects"), "Herdr Projects");
         assert_eq!(humanize("gtm_ai"), "Gtm Ai");
         assert_eq!(humanize("-v2--api-"), "V2 Api");
-        assert_eq!(display_name("herdr-projects", "herdr-projects"), "Herdr Projects");
+        assert_eq!(
+            display_name("herdr-projects", "herdr-projects"),
+            "Herdr Projects"
+        );
         assert_eq!(display_name("", "herdr-projects"), "Herdr Projects");
         assert_eq!(display_name("  ", "demo"), "Demo");
         for typed in ["GTM AI", "my project", "Demo", "herdr-Projects"] {
@@ -526,7 +567,10 @@ mod tests {
 
     #[test]
     fn slug_derivation_and_name_refusals() {
-        assert_eq!(slug_from_name("My Demo  Project!").unwrap(), "my-demo-project");
+        assert_eq!(
+            slug_from_name("My Demo  Project!").unwrap(),
+            "my-demo-project"
+        );
         assert_eq!(slug_from_name("  Ünï 42 ").unwrap(), "n-42");
         assert_eq!(slug_from_name(&"x".repeat(60)).unwrap().len(), 40);
         for bad in ["../x", "a/b", "a\\b", "..", "!!!", ""] {
@@ -542,11 +586,22 @@ mod tests {
             &root,
             "Demo",
             "Ship \"it\"",
-            vec![parse_repo_arg("/srv/app@box"), parse_repo_arg("/no/such/repo")],
+            vec![
+                parse_repo_arg("/srv/app@box"),
+                parse_repo_arg("/no/such/repo"),
+            ],
         )
         .unwrap();
         assert_eq!(project.slug, "demo");
-        for sub in ["memory", "scratch", "routines", "threads", "inbox/done", "library", ".state"] {
+        for sub in [
+            "memory",
+            "scratch",
+            "routines",
+            "threads",
+            "inbox/done",
+            "library",
+            ".state",
+        ] {
             assert!(project.dir().join(sub).is_dir(), "{sub}");
         }
         assert!(project.dir().join("MEMORY.md").is_file());
@@ -561,8 +616,14 @@ mod tests {
         assert_eq!(
             settings.repos,
             vec![
-                Repo { path: "/srv/app".into(), machine: Some("box".into()) },
-                Repo { path: "/no/such/repo".into(), machine: None },
+                Repo {
+                    path: "/srv/app".into(),
+                    machine: Some("box".into())
+                },
+                Repo {
+                    path: "/no/such/repo".into(),
+                    machine: None
+                },
             ]
         );
         assert!(body.starts_with("# Instructions"));
@@ -629,7 +690,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = create(root.path(), "demo", "", vec![]).unwrap();
         std::fs::remove_file(project.project_md()).unwrap();
-        assert!(project.update_coordinator(|c| c.pane_id = "w1:p1".into()).is_err());
+        assert!(
+            project
+                .update_coordinator(|c| c.pane_id = "w1:p1".into())
+                .is_err()
+        );
         assert!(project.coordinator().is_none());
 
         // A deleted folder is not recreated by taking the lock.
@@ -642,14 +707,20 @@ mod tests {
     fn coordinator_updates_keep_other_fields() {
         let root = tempfile::tempdir().unwrap();
         let project = create(root.path(), "demo", "", vec![]).unwrap();
-        project.update_coordinator(|c| c.socket = "/s".into()).unwrap();
-        project.update_coordinator(|c| c.prime_pending = true).unwrap();
+        project
+            .update_coordinator(|c| c.socket = "/s".into())
+            .unwrap();
+        project
+            .update_coordinator(|c| c.prime_pending = true)
+            .unwrap();
         let record = project.coordinator().unwrap();
         assert_eq!(record.socket, "/s");
         assert!(record.prime_pending);
-        assert!(std::fs::read_dir(project.state_dir())
-            .unwrap()
-            .flatten()
-            .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
+        assert!(
+            std::fs::read_dir(project.state_dir())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        );
     }
 }

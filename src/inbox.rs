@@ -27,7 +27,9 @@ fn inbox_dir(project: &Project) -> PathBuf {
 
 fn parse(text: &str) -> Option<Item> {
     let rest = text.strip_prefix("+++\n")?;
-    let (front, body) = rest.split_once("\n+++\n").or_else(|| Some((rest.strip_suffix("\n+++")?, "")))?;
+    let (front, body) = rest
+        .split_once("\n+++\n")
+        .or_else(|| Some((rest.strip_suffix("\n+++")?, "")))?;
     let mut item: Item = toml::from_str(front).ok()?;
     item.body = body.trim_matches('\n').to_string();
     Some(item)
@@ -37,22 +39,40 @@ fn parse(text: &str) -> Option<Item> {
 pub fn safe_subject(subject: &str) -> String {
     let cleaned: String = subject
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .take(40)
         .collect();
     let cleaned = cleaned.trim_matches('-').to_string();
-    if cleaned.is_empty() { "item".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "item".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Writes one item. The id is `<UTC timestamp>-<kind>-<subject>-<n>`, where
 /// `<n>` is a counter allocated under the project lock, so two events in one
 /// tick never share a name. `body` is empty except for `routine` items.
-pub fn write(project: &Project, kind: &str, subject: &str, summary: &str, body: &str) -> Result<String> {
+pub fn write(
+    project: &Project,
+    kind: &str,
+    subject: &str,
+    summary: &str,
+    body: &str,
+) -> Result<String> {
     let _lock = project.lock()?;
     let counter_path = project.state_dir().join("inbox-counter.json");
     let n: u64 = project::read_json::<u64>(&counter_path).unwrap_or(0) + 1;
     project::write_json(&counter_path, &n)?;
-    let stamp = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
+    let stamp = jiff::Timestamp::now()
+        .strftime("%Y%m%dT%H%M%SZ")
+        .to_string();
     let id = format!("{stamp}-{kind}-{}-{n}", safe_subject(subject));
     let item = Item {
         id: id.clone(),
@@ -60,7 +80,10 @@ pub fn write(project: &Project, kind: &str, subject: &str, summary: &str, body: 
         subject: subject.to_string(),
         created: project::now(),
         // One line, no control characters: summaries are printed in the digest.
-        summary: summary.chars().map(|c| if c.is_control() { ' ' } else { c }).collect(),
+        summary: summary
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect(),
         body: String::new(),
     };
     let mut text = format!("+++\n{}+++\n", toml::to_string(&item)?);
@@ -69,7 +92,10 @@ pub fn write(project: &Project, kind: &str, subject: &str, summary: &str, body: 
         text.push_str(body.trim_end());
         text.push('\n');
     }
-    project::write_atomic(&inbox_dir(project).join(format!("{id}.md")), text.as_bytes())?;
+    project::write_atomic(
+        &inbox_dir(project).join(format!("{id}.md")),
+        text.as_bytes(),
+    )?;
     Ok(id)
 }
 
@@ -190,7 +216,12 @@ mod tests {
 
         assert_eq!(done(&project, &[items[0].id.clone()], false).unwrap(), 1);
         assert_eq!(unhandled(&project).len(), 1);
-        assert!(inbox_dir(&project).join("done").join(format!("{}.md", items[0].id)).is_file());
+        assert!(
+            inbox_dir(&project)
+                .join("done")
+                .join(format!("{}.md", items[0].id))
+                .is_file()
+        );
         assert_eq!(done(&project, &[], true).unwrap(), 1);
         assert!(unhandled(&project).is_empty());
     }
@@ -218,8 +249,18 @@ mod tests {
         let project = project::create(root.path(), "demo", "", vec![]).unwrap();
         let id = write(&project, "outage", "Elias MacBook/../x", "down", "").unwrap();
         assert!(id.contains("-outage-elias-macbook----x-"), "{id}");
-        write(&project, "routine", "nightly", "due", "Check the build.\n\n```\nout\n```").unwrap();
-        let routine = unhandled(&project).into_iter().find(|i| i.kind == "routine").unwrap();
+        write(
+            &project,
+            "routine",
+            "nightly",
+            "due",
+            "Check the build.\n\n```\nout\n```",
+        )
+        .unwrap();
+        let routine = unhandled(&project)
+            .into_iter()
+            .find(|i| i.kind == "routine")
+            .unwrap();
         assert!(routine.body.starts_with("Check the build."));
         assert!(routine.body.ends_with("```"));
     }

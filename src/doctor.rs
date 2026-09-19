@@ -59,7 +59,10 @@ fn report(
             &mut out,
             Some(false),
             "herdr",
-            format!("{version} ({bin}); {} or later is required", herdr::MIN_VERSION),
+            format!(
+                "{version} ({bin}); {} or later is required",
+                herdr::MIN_VERSION
+            ),
         ),
         Err(error) => check(&mut out, Some(false), "herdr", format!("{error:#}")),
     }
@@ -91,12 +94,21 @@ fn report(
         let result = runner.run(&Cmd::new(tool, TOOL_TIMEOUT).args(args));
         match result {
             Ok(o) if o.success() => {
-                let text = if o.stdout.trim().is_empty() { &o.stderr } else { &o.stdout };
+                let text = if o.stdout.trim().is_empty() {
+                    &o.stderr
+                } else {
+                    &o.stdout
+                };
                 let line = text.lines().next().unwrap_or("").trim().to_string();
                 check(&mut out, Some(true), tool, line);
             }
             Ok(o) => check(&mut out, required.then_some(false), tool, o.error_text()),
-            Err(error) => check(&mut out, required.then_some(false), tool, format!("{error:#}")),
+            Err(error) => check(
+                &mut out,
+                required.then_some(false),
+                tool,
+                format!("{error:#}"),
+            ),
         }
     }
     match runner.run(&Cmd::new("gh", TOOL_TIMEOUT).args(["auth", "status"])) {
@@ -146,19 +158,39 @@ fn report(
         };
         let label = format!("project {slug}");
         let Some(record) = project.coordinator() else {
-            check(&mut out, Some(true), &label, format!("{}; never opened", project.status()));
+            check(
+                &mut out,
+                Some(true),
+                &label,
+                format!("{}; never opened", project.status()),
+            );
             continue;
         };
         if !Path::new(&record.socket).exists() {
-            check(&mut out, None, &label, format!("recorded socket {} no longer exists; `open --rebind` moves it", record.socket));
+            check(
+                &mut out,
+                None,
+                &label,
+                format!(
+                    "recorded socket {} no longer exists; `open --rebind` moves it",
+                    record.socket
+                ),
+            );
             continue;
         }
         let herdr = Herdr::new(&bin, &record.socket, runner);
         match herdr.pane_list() {
-            Err(error) => check(&mut out, None, &label, format!("session at {} unreachable: {error}", record.socket)),
+            Err(error) => check(
+                &mut out,
+                None,
+                &label,
+                format!("session at {} unreachable: {error}", record.socket),
+            ),
             Ok(panes) => {
                 let workspace = panes.iter().any(|p| p.workspace_id == record.workspace_id);
-                let pane = panes.iter().any(|p| crate::coordinator::pane_matches(&record, p));
+                let pane = panes
+                    .iter()
+                    .any(|p| crate::coordinator::pane_matches(&record, p));
                 check(
                     &mut out,
                     if pane { Some(true) } else { None },
@@ -170,7 +202,11 @@ fn report(
                         record.workspace_id,
                         if workspace { "exists" } else { "is gone" },
                         record.pane_id,
-                        if pane { "exists" } else { "is gone (run `open`)" },
+                        if pane {
+                            "exists"
+                        } else {
+                            "is gone (run `open`)"
+                        },
                     ),
                 );
             }
@@ -186,12 +222,27 @@ fn report(
         if let Ok((settings, _)) = project.read_project_md() {
             machines.extend(settings.repos.into_iter().filter_map(|r| r.machine));
         }
-        machines.extend(crate::thread::list(&project).into_iter().filter(|t| t.is_remote() && t.status != crate::thread::Status::Resolved).map(|t| t.machine));
+        machines.extend(
+            crate::thread::list(&project)
+                .into_iter()
+                .filter(|t| t.is_remote() && t.status != crate::thread::Status::Resolved)
+                .map(|t| t.machine),
+        );
     }
     for machine in machines {
         match crate::remote::ssh_target(runner, &bin, config_dir, &machine) {
-            Ok(target) => check(&mut out, Some(true), &format!("machine {machine}"), format!("ssh target {target}")),
-            Err(error) => check(&mut out, Some(false), &format!("machine {machine}"), format!("{error:#}")),
+            Ok(target) => check(
+                &mut out,
+                Some(true),
+                &format!("machine {machine}"),
+                format!("ssh target {target}"),
+            ),
+            Err(error) => check(
+                &mut out,
+                Some(false),
+                &format!("machine {machine}"),
+                format!("{error:#}"),
+            ),
         }
     }
 

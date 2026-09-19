@@ -1,116 +1,90 @@
-# Getting started: open your first project
+# Getting started
 
-Install the plugin, create a project, and let a coordinator agent start threads for you.
+Build or link the plugin, create a project and open its root coordinator. Local coordinators can create nested coordinator or worker nodes. Remote workers remain supported; remote recursive coordinators with child-spawn permission are refused until a remote CLI bridge is available.
 
-## 1. Check the prerequisites
+## Prerequisites
 
-- macOS or Linux, and [Herdr](https://herdr.dev) 0.9.1 or newer. Check with `herdr status`: both the client **and the running server** must be 0.9.1. After `herdr update`, a server that was already running stays on the old version until you restart it, and `herdr plugin link` or `install` then fails with `plugin_requires_newer_herdr`.
-- Rust/Cargo 1.89 or newer and a C compiler. Herdr builds the executable during installation. On macOS, `xcode-select --install` installs Apple's command-line build tools if missing. Install Rust using [rustup](https://rustup.rs).
-- Git and access to `eliasstravik/herdr-projects`. The repository is currently private. Authenticate Git for GitHub before installing; with GitHub CLI, use `gh auth login` and `gh auth setup-git`.
-- An agent CLI Herdr can start, on `PATH`. Only Claude Code has been exercised so far; `PROJECT.md` lets you pick any kind Herdr supports (`herdr agent start --help` lists them).
-- Optional: `gh`, logged in, for pull request follow-up; `ssh` and `rsync` for threads on other machines.
+- macOS or Linux
+- Herdr 0.9.1 or newer on both the client and server
+- Rust and Cargo 1.89 or newer
+- Git and an agent CLI kind supported by `herdr agent`
+- Optional: `gh` for pull request follow-up, plus `ssh` and `rsync` for remote machines
 
-No hosted service or separate API key is required by the plugin. Your agent CLI has its own prerequisites and account.
+## Link and build the plugin
 
-## 2. Install the plugin
+From the repository root, replace an existing upstream registration first, then build and link this checkout:
 
-```bash
-herdr plugin install eliasstravik/herdr-projects
+```sh
+herdr plugin uninstall herdr-projects
+cargo build --release --locked
+herdr plugin link .
 ```
 
-Review the install preview. Herdr clones the repository, runs its locked Cargo release build, and registers `herdr-projects` with nine actions and four popups. Its startup command starts a background ticker only when you have at least one project; until then it creates nothing.
+The plugin id remains `herdr-projects` to preserve its config and project store. Its visible name is **Herdr Organizations**. Herdr builds the plugin from its manifest when it links it. `herdr plugin list` confirms the `herdr-projects` registration. To run the CLI directly after the build, use `target/release/herdr-organizations`. A `herdr-projects` binary is also built for scripts that still use the old name.
 
-To run the binary from a terminal, create a symlink yourself. `herdr plugin list` prints the plugin's folder:
+## Create and open a project
 
-```bash
-ln -s <plugin root>/target/release/herdr-projects ~/.local/bin/herdr-projects
-herdr-projects doctor
+Run **Herdr Organizations: new project** from the Herdr action menu, or use the CLI:
+
+```sh
+target/release/herdr-organizations new "Billing" --goal "Ship the new billing page" --repo ~/dev/billing
+target/release/herdr-organizations open billing
 ```
 
-`doctor` prints the binary's absolute path, its version, the projects root and the config directory, so you can see exactly what is running.
+The project is created at `~/.herdr-projects/billing/` by default. `open` creates its Herdr workspace and root coordinator pane. The coordinator prints the CLI prefix and loads the coordinator skill. If your agent asks whether it can trust the project folder, answer in that pane. The ticker sends the initial prompt when the agent is ready.
 
-## 3. Create and open a project
+Project settings and root instructions live in `PROJECT.md`. `thread_agent` selects the default worker harness, `coordinator_agent` selects the root coordinator harness, and `max_parallel_threads` limits active project nodes. Existing settings in `~/.config/herdr-projects/config.toml` continue to work.
 
-From Herdr's action menu, run **Projects: new project**. It asks for a name and a goal, creates the project, and opens it. Or from a terminal inside Herdr:
+## Create nodes
 
-```bash
-herdr-projects new "Billing" --goal "Ship the new billing page" --repo ~/dev/app
-herdr-projects open billing
+The root coordinator is the virtual parent `root`. A worker is a leaf. A local coordinator can create workers or more coordinators beneath itself. A local child coordinator brief gives it the project CLI prefix and tells it to use its own node id as parent. A remote coordinator cannot receive child-spawn permission because its brief cannot safely launch the local CLI from the remote machine.
+
+Create a worker under the root:
+
+```sh
+target/release/herdr-organizations node start billing \
+  --parent root \
+  --role worker \
+  --title "Add billing validation" \
+  --repo ~/dev/billing \
+  --task-file - <<'TASK'
+Add server-side validation for billing addresses. Run the relevant tests and report the changes.
+TASK
 ```
 
-`new` creates `~/.herdr-projects/billing/`. `open` creates a Herdr workspace in that folder with a `coordinator` tab, starts your agent there, and sends it one priming line that tells it to print and follow the coordinator skill. The first time, your agent asks whether you trust the folder: answer it in the coordinator's pane. The ticker sends the priming line as soon as the agent is ready.
+Create a coordinator to plan a large subproject:
 
-Edit `PROJECT.md` in the project folder to write your standing instructions and to change the agent kind, `max_parallel_threads`, or the listed repos.
-
-## 4. Tell the coordinator what you want
-
-Type in the coordinator's pane, for example: "Add a billing page: API endpoint, the page itself, and end-to-end tests."
-
-You can also ask it to add, assign, delegate and show tasks. It keeps them in `TASKS.md`.
-
-By default it lists the threads it suggests and waits. Reply with a go-ahead that names them ("start all three"). Your agent then asks permission to run `thread start` for each one, unless you've allow-listed it (see [Operations](operations.md#the-allow-list-for-your-coordinator)).
-
-## 5. Confirm the threads appear
-
-Each code thread opens as its own workspace on a branch named `hp/<project>/<id>-<title>`; a task with no repository opens as a tab in the project's workspace. Expand Herdr's agent sidebar to see `project`, `thread` and `review` beside each one, or run **Projects: overview**.
-
-Expect one interruption per thread under the default settings: **a new worktree folder is a folder your agent hasn't trusted yet**, so each code thread starts with your agent's trust dialog and shows under Waiting on you until you press Enter in its pane. After that come your agent's ordinary first-edit and first-command prompts. Tab threads live inside the project folder you already trusted, so they skip the dialog. To reduce the prompts, set `thread_agent_args` for the project (see [Operations](operations.md#safety-settings)).
-
-When a thread finishes it writes a report. The report is copied to `threads/<id>.md` in the project folder and the thread moves to Ready for review. Tell the coordinator you've looked (it runs `thread ack`), or resolve the thread:
-
-```bash
-herdr-projects thread resolve billing t-0001                     # keep the worktree
-herdr-projects thread resolve billing t-0001 --remove-worktree   # remove it; the branch is kept
+```sh
+target/release/herdr-organizations node start billing \
+  --parent root \
+  --role coordinator \
+  --title "Billing API" \
+  --repo ~/dev/billing \
+  --task-file - <<'TASK'
+Plan the billing API. Delegate implementation tasks to children beneath your own node id.
+TASK
 ```
 
-## Check your setup
+`--repo` creates a worktree. Without it, the node runs in a tab in the project workspace. Add `--machine <label>` for a repository on a saved SSH machine and `--base <ref>` for a specific base branch. Use `--no-spawn` when creating a coordinator that should not create children.
 
-```bash
-herdr-projects doctor
-herdr-projects ticker status
-```
+Profile fields inherit from the parent unless they are specified on node creation. Choose `--harness`, `--model`, `--reasoning-effort` and `--permission-profile`. Codex and Claude have separate CLI adapters. Use repeatable `--raw-agent-arg` options for harness-specific argv components that do not have a built-in adapter. Project-wide `thread_agent_args` remain separate argv values; permission and sandbox override flags are rejected when they conflict with a selected profile. This is argv validation, not OS isolation.
 
-- **`open` says the session is not reachable**: run it inside Herdr, or pass `--session <name>`. A project belongs to the session it was first opened in; opening it from another one is refused.
-- **A thread stays at "no agent"**: the ticker launches agents, one per project per tick (about 15 seconds). `ticker status` shows whether it runs and which `herdr`, `git`, `gh`, `ssh` and `rsync` it resolves from its own environment, which may differ from your shell. After three failed launches the thread is marked failed with the reason; `thread restart` tries again.
-- **Herdr was restarted**: panes are gone but records, reports and branches are not. Run `open <project>` for a new coordinator and `thread restart <project> <id>` for each thread you want back. The coordinator starts with no chat history; it works from memory, thread records and the inbox. To keep your agent's own history, set `coordinator_agent_args = ["--continue"]` (for Claude Code).
-- **The coordinator forgot how to behave** after a long conversation: `herdr-projects open <project> --reprime`.
+The existing `thread start` command remains a worker-under-root alias. Use `node restart`, `node prompt`, `node list`, `node show`, `node ack` and `node resolve` for hierarchy-aware names. `node create` is an alias for `node start`.
 
-## Optional configuration
+## Browse and focus the tree
 
-User-level settings live in `~/.config/herdr-projects/config.toml`, which you edit by hand. No agent works in that folder.
+Run **Herdr Organizations: organization tree** from Herdr's action menu. The popup first lists projects, then renders the selected project root and all descendants with role and state.
 
-```toml
-# Where projects live (default ~/.herdr-projects). HERDR_PROJECTS_ROOT and --root win over this.
-root = "~/projects"
+- Up and Down or `k` and `j` move the selection.
+- Enter opens a project's tree or focuses the selected live pane.
+- Esc or `q` goes back or closes the popup.
+- `r` refreshes the current tree.
+- A mouse click selects a row. A double-click opens or focuses it when the Herdr client forwards terminal mouse events.
 
-# Only needed when `herdr machine list --json` shows no SSH target for a machine.
-[machines.buildbox]
-ssh = "me@buildbox.local"
-```
+Keyboard support is the baseline. The tree is rendered inside the popup process because Herdr's native sidebar is a flat agent list.
 
-Safety settings are per project, in the same file. `herdr-projects safety show <project>` prints the effective values and the exact table header to add.
+## Preserve existing projects
 
-## Upgrade
+The binary continues to read projects from `~/.herdr-projects/`, settings from `~/.config/herdr-projects/`, and `HERDR_PROJECTS_ROOT`. Legacy thread records are loaded as workers below `root` without rewriting them. Existing reports, worktrees, routines, ticker state, inbox items and remote settings remain in their current paths.
 
-```bash
-herdr plugin install eliasstravik/herdr-projects
-herdr-projects ticker start
-```
-
-A rebuilt binary has a new build identifier. `ticker start` (also run by `open` and `thread start`) stops a ticker of another version and starts the new one; it never replaces a healthy ticker of the same version.
-
-## Remove
-
-```bash
-herdr-projects ticker stop
-herdr plugin uninstall herdr-projects      # or: herdr plugin unlink herdr-projects
-```
-
-Your projects stay in `~/.herdr-projects/` and your settings in `~/.config/herdr-projects/`; delete them yourself if you no longer want them. Worktrees and branches that threads created are yours: nothing removes them for you.
-
-## Troubleshooting
-
-- **`plugin_requires_newer_herdr` although `herdr --version` says 0.9.1**: the running server is older than the CLI. Restart it (`herdr status` shows `server_binary_stale`).
-- **`thread restart` says a half-made worktree needs a human look**: a failed `git worktree add` can leave the branch behind. Run `thread resolve`, delete or reuse the branch yourself, and start a new thread.
-- **`thread resolve --remove-worktree` refuses**: either the worktree has uncommitted changes (Herdr's refusal is shown unchanged; nothing is ever forced), or part of the thread's files could not be copied home first. The message lists what was not copied; `--discard-uncopied` accepts that loss.
-- **No nudge reaches the coordinator**: that is the default. See [Operations](operations.md#nudges-and-notifications).
+For operational details and agent permission guidance, see [Operations](operations.md). Use the [manual test guide](manual-test.md) for the keyboard, mouse and live-pane checks that require a Herdr client.

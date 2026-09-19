@@ -161,11 +161,15 @@ impl Runner for RealRunner {
 
         // Readers and the writer run on their own threads so a full pipe in
         // either direction cannot deadlock against the deadline loop below.
-        let stdin_thread = child.stdin.take().zip(cmd.stdin.clone()).map(|(mut pipe, text)| {
-            std::thread::spawn(move || {
-                let _ = pipe.write_all(text.as_bytes());
-            })
-        });
+        let stdin_thread = child
+            .stdin
+            .take()
+            .zip(cmd.stdin.clone())
+            .map(|(mut pipe, text)| {
+                std::thread::spawn(move || {
+                    let _ = pipe.write_all(text.as_bytes());
+                })
+            });
         let stdout_thread = child.stdout.take().map(read_all);
         let stderr_thread = child.stderr.take().map(read_all);
 
@@ -259,12 +263,13 @@ pub mod fake {
     use std::cell::RefCell;
 
     type Matcher = Box<dyn Fn(&Cmd) -> bool>;
+    type Answer = Box<dyn Fn(&Cmd) -> Result<Output>>;
 
     /// A scripted runner: the first rule whose matcher accepts the command
     /// answers it. Every command is recorded, matched or not.
     #[derive(Default)]
     pub struct FakeRunner {
-        rules: RefCell<Vec<(Matcher, Box<dyn Fn(&Cmd) -> Result<Output>>)>>,
+        rules: RefCell<Vec<(Matcher, Answer)>>,
         pub calls: RefCell<Vec<Cmd>>,
         /// (socket, request line) of every socket request.
         pub socket_requests: RefCell<Vec<(PathBuf, String)>>,
@@ -340,7 +345,9 @@ pub mod fake {
         }
 
         fn socket_request(&self, socket: &Path, line: &str, _timeout: Duration) -> Result<String> {
-            self.socket_requests.borrow_mut().push((socket.to_path_buf(), line.to_string()));
+            self.socket_requests
+                .borrow_mut()
+                .push((socket.to_path_buf(), line.to_string()));
             Ok(r#"{"id":"hp","result":{"type":"agent_view","active":true}}"#.to_string())
         }
     }
@@ -353,7 +360,10 @@ mod tests {
     #[test]
     fn captures_output_and_exit_code() {
         let out = RealRunner
-            .run(&Cmd::new("sh", Duration::from_secs(5)).args(["-c", "echo hi; echo err >&2; exit 3"]))
+            .run(
+                &Cmd::new("sh", Duration::from_secs(5))
+                    .args(["-c", "echo hi; echo err >&2; exit 3"]),
+            )
             .unwrap();
         assert_eq!(out.code, Some(3));
         assert_eq!(out.stdout, "hi\n");
@@ -367,6 +377,29 @@ mod tests {
             .run(&Cmd::new("cat", Duration::from_secs(5)).stdin("hello"))
             .unwrap();
         assert_eq!(out.stdout, "hello");
+    }
+
+    #[test]
+    fn real_runner_preserves_metacharacters_as_one_argv_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("injected");
+        let hostile = format!(
+            "$(touch '{}'); `touch '{}'`; \"quoted\" 'single'",
+            marker.display(),
+            marker.display()
+        );
+        let out = RealRunner
+            .run(&Cmd::new("sh", Duration::from_secs(5)).args([
+                "-c",
+                "printf '%s' \"$1\"",
+                "argv-probe",
+                hostile.as_str(),
+            ]))
+            .unwrap();
+
+        assert!(out.success());
+        assert_eq!(out.stdout, hostile);
+        assert!(!marker.exists());
     }
 
     #[test]

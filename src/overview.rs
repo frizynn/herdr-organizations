@@ -29,7 +29,9 @@ pub fn project_for_workspace(ctx: &Ctx, workspace_id: &str, socket: &str) -> Opt
         }
         record.workspace_id == workspace_id
             || thread::list(&project).iter().any(|t| {
-                !t.is_remote() && t.status != thread::Status::Resolved && t.workspace_id == workspace_id
+                !t.is_remote()
+                    && t.status != thread::Status::Resolved
+                    && t.workspace_id == workspace_id
             })
     })
 }
@@ -98,10 +100,13 @@ pub fn pick(ctx: &Ctx) -> Result<String> {
 /// Threads grouped by state, in the one display order.
 pub fn render(project: &Project, rows: &[Row]) -> String {
     let mut out = String::new();
-    let goal = project.read_project_md().map(|(s, _)| s.goal).unwrap_or_default();
+    let goal = project
+        .read_project_md()
+        .map(|(s, _)| s.goal)
+        .unwrap_or_default();
     let _ = write!(out, "{} ({})", project.slug, project.status());
     if !goal.is_empty() {
-        let _ = write!(out, " — {goal}");
+        let _ = write!(out, ": {goal}");
     }
     let _ = writeln!(out);
     if rows.is_empty() {
@@ -129,7 +134,11 @@ pub fn render(project: &Project, rows: &[Row]) -> String {
                 if t.machine.is_empty() {
                     let _ = writeln!(out, "          needs you in pane {}", t.pane_id);
                 } else {
-                    let _ = writeln!(out, "          needs you in pane {} on machine `{}`: select the machine in herdr's sidebar, or run `herdr --remote <ssh target>`", t.pane_id, t.machine);
+                    let _ = writeln!(
+                        out,
+                        "          needs you in pane {} on machine `{}`: select the machine in herdr's sidebar, or run `herdr --remote <ssh target>`",
+                        t.pane_id, t.machine
+                    );
                 }
             }
         }
@@ -166,10 +175,15 @@ pub fn run(ctx: &Ctx, slug: Option<&str>, wait: bool) -> Result<()> {
 pub fn focus(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
     let slug = require_slug(ctx, slug)?;
     let project = Project::load(&ctx.root, &slug)?;
-    let view = threads::session_view(ctx, &project)
-        .ok_or_else(|| anyhow::anyhow!("the herdr session of `{slug}` is not reachable; run `open {slug}` first"))?;
-    view.herdr.agent_view_set_project(&slug).map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("sidebar focused on `{slug}`; `unfocus` clears it (this replaced any view another tool had set)");
+    let view = threads::session_view(ctx, &project).ok_or_else(|| {
+        anyhow::anyhow!("the herdr session of `{slug}` is not reachable; run `open {slug}` first")
+    })?;
+    view.herdr
+        .agent_view_set_project(&slug)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "sidebar focused on `{slug}`; `unfocus` clears it (this replaced any view another tool had set)"
+    );
     Ok(())
 }
 
@@ -177,7 +191,9 @@ pub fn focus(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
 pub fn unfocus(ctx: &Ctx, session: &crate::paths::SessionFlags) -> Result<()> {
     let session = crate::paths::resolve_session(session, ctx.env, ctx.runner)?;
     let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), &session.socket, ctx.runner);
-    herdr.agent_view_clear().map_err(|e| anyhow::anyhow!("{e}"))?;
+    herdr
+        .agent_view_clear()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("sidebar view cleared");
     Ok(())
 }
@@ -190,7 +206,13 @@ mod tests {
 
     fn row(id: &str, group: Group, note: &str) -> Row {
         Row {
-            thread: Thread { id: id.into(), title: format!("Title {id}"), pane_id: "w2:p1".into(), kind: Kind::Tab, ..Thread::default() },
+            thread: Thread {
+                id: id.into(),
+                title: format!("Title {id}"),
+                pane_id: "w2:p1".into(),
+                kind: Kind::Tab,
+                ..Thread::default()
+            },
             group,
             note: note.into(),
         }
@@ -209,10 +231,20 @@ mod tests {
             row("t-0006", Group::Landing, "idle"),
         ];
         let text = render(&project, &rows);
-        let order: Vec<usize> = ["Ready for review", "Waiting on you", "Working", "Landing", "Idle", "Resolved"]
-            .iter()
-            .map(|label| text.find(&format!("\n{label} (")).unwrap_or_else(|| panic!("{label} missing in\n{text}")))
-            .collect();
+        let order: Vec<usize> = [
+            "Ready for review",
+            "Waiting on you",
+            "Working",
+            "Landing",
+            "Idle",
+            "Resolved",
+        ]
+        .iter()
+        .map(|label| {
+            text.find(&format!("\n{label} ("))
+                .unwrap_or_else(|| panic!("{label} missing in\n{text}"))
+        })
+        .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{text}");
         assert!(text.contains("needs you in pane w2:p1"));
     }
@@ -228,10 +260,19 @@ mod tests {
         let b_socket = beta.coordinator().unwrap().socket;
 
         // Both coordinators record w1; the socket tells them apart.
-        assert_eq!(project_for_workspace(&ctx, "w1", &a_socket).as_deref(), Some("alpha"));
-        assert_eq!(project_for_workspace(&ctx, "w1", &b_socket).as_deref(), Some("beta"));
+        assert_eq!(
+            project_for_workspace(&ctx, "w1", &a_socket).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            project_for_workspace(&ctx, "w1", &b_socket).as_deref(),
+            Some("beta")
+        );
         // Through a thread's workspace.
-        assert_eq!(project_for_workspace(&ctx, "w7", &a_socket).as_deref(), Some("alpha"));
+        assert_eq!(
+            project_for_workspace(&ctx, "w7", &a_socket).as_deref(),
+            Some("alpha")
+        );
         assert_eq!(project_for_workspace(&ctx, "w7", &b_socket), None);
         assert_eq!(project_for_workspace(&ctx, "w9", &a_socket), None);
         assert_eq!(project_for_workspace(&ctx, "", &a_socket), None);
@@ -244,12 +285,21 @@ mod tests {
         focus(&world.ctx(), Some("demo")).unwrap();
         let requests = world.runner.socket_requests.borrow();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].0.to_string_lossy(), project.coordinator().unwrap().socket);
+        assert_eq!(
+            requests[0].0.to_string_lossy(),
+            project.coordinator().unwrap().socket
+        );
         let request: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
         assert_eq!(request["method"], "agent.view.set");
         assert_eq!(request["params"]["source"], "herdr-projects");
-        assert_eq!(request["params"]["filter"], serde_json::json!({"op":"eq","field":{"token":"project"},"value":"demo"}));
-        assert_eq!(request["params"]["sort"], serde_json::json!([{"field":{"token":"rank"},"order":"asc"}]));
+        assert_eq!(
+            request["params"]["filter"],
+            serde_json::json!({"op":"eq","field":{"token":"project"},"value":"demo"})
+        );
+        assert_eq!(
+            request["params"]["sort"],
+            serde_json::json!([{"field":{"token":"rank"},"order":"asc"}])
+        );
     }
 
     #[test]
