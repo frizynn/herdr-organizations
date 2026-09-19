@@ -42,7 +42,7 @@ New descendants inherit omitted profile fields from their parent. Use `--no-spaw
 
 ## Organization tree
 
-Herdr's **Herdr Organizations: organization tree** action opens a popup that lists projects and then shows the selected project's root and descendants. Use Up/Down or `j`/`k` to move, Enter to open or focus, Esc or `q` to go back or close, and `r` to refresh. Mouse selection and double-click focus work when the Herdr client forwards terminal mouse events. The popup explicitly focuses the selected live pane. The tree runs in the popup process because Herdr's native sidebar exposes a flat agent list.
+Herdr's **Herdr Organizations: organization tree** action opens a popup that lists projects and then shows the selected project's root and descendants. Use Up/Down or `j`/`k` to move, Enter to open, Esc or `q` to go back or close, and `r` to refresh. Enter focuses a live agent, opens an existing tab without an agent, or recreates an active node whose tab was closed. The popup closes after a successful open. Mouse selection and double-click work when the Herdr client forwards terminal mouse events. The tree runs in the popup process because Herdr's native sidebar exposes a flat agent list.
 
 Pane metadata includes project, node id, role, parent, depth, tree order and current review group. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
 

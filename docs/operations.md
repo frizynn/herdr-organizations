@@ -5,7 +5,7 @@ How Herdr Organizations stores recursive nodes, what its safety settings do and 
 ## How it works
 
 - **The root coordinator is an ordinary agent** in a Herdr pane that follows a skill (`herdr-organizations skill` prints it). Local coordinator nodes may create children beneath themselves. Plugin code does not route messages, plan work or decide anything.
-- **The binary does mechanics.** Starting or restarting a node, copying reports, marking inbox items handled: each is one deterministic subcommand. It talks to Herdr through Herdr's CLI. The existing `focus`/`unfocus` actions control the flat sidebar view. The organization popup uses an explicit pane focus request for the selected live node.
+- **The binary does mechanics.** Starting or restarting a node, copying reports, marking inbox items handled: each is one deterministic subcommand. It talks to Herdr through Herdr's CLI. The existing `focus`/`unfocus` actions control the flat sidebar view. The organization popup focuses a live agent, focuses a surviving tab, or delegates a missing active tab to the same restart mechanic used by the CLI.
 - **Files are the record, prompts are nudges.** Threads write a report file, the ticker writes events to an inbox folder, and the coordinator re-reads state with `context` at the start of every turn. A missed prompt loses nothing.
 - **One ticker per projects root** checks every 15 seconds: node state and groups, pending prompts, changed reports, pull requests (every two minutes), routines, auto-resolve. Remote machines are polled once a minute.
 - **Tools are found even under a bare `PATH`.** A Herdr server started outside a login shell gives its plugins a minimal `PATH`; the binary appends `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin` to its own, so the ticker finds `gh`, `rsync` and friends. `ticker status` and `doctor` show what resolved.
@@ -49,7 +49,7 @@ The virtual `root` is the project coordinator. A new worker has `parent_id=root`
 | `node start <project> --parent root\|<id> --role worker\|coordinator --title T [profile flags] [--repo PATH] [--machine M] [--base REF] --task-file F` | New hierarchy node; `node create` is an alias, and `-` reads the task from standard input. Returns before the agent is up. |
 | `node restart`, `node prompt`, `node list`, `node show`, `node ack`, `node resolve` | Hierarchy-aware lifecycle and reports. |
 | `thread start <project> ...` | Backward-compatible alias for a worker directly under `root`. Existing thread lifecycle commands remain accepted for old records. |
-| `organizations` action | Project picker and recursive tree popup with keyboard selection and live pane focus. |
+| `organizations` action | Project picker and recursive tree popup with keyboard selection, session recovery and focus. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Node work grouped by attention, as text and in the flat sidebar. |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |

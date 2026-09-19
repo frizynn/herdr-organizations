@@ -52,9 +52,9 @@ These flags are adapters for current CLI interfaces, not a promise that all agen
 
 ## Organization picker
 
-Herdr 0.9.1 plugin panes are static commands. Its native agent sidebar is a flat agent list, so the recursive tree runs in the `organizations` popup process. Crossterm reads keyboard and terminal mouse events. Keyboard navigation is the supported baseline. Mouse selection is handled when the host forwards mouse events. Selecting a live node sends an explicit `herdr agent focus <pane>` request; it does not set a global sidebar filter.
+Herdr 0.9.1 plugin panes are static commands. Its native agent sidebar is a flat agent list, so the recursive tree runs in the `organizations` popup process. Crossterm reads keyboard and terminal mouse events. Keyboard navigation is the supported baseline. Mouse selection is handled when the host forwards mouse events. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone. A successful activation exits the popup process. It does not set a global sidebar filter.
 
-The popup starts with a project picker, then shows the virtual root and descendants in tree order with role, state and parent. The pure tree layout and selection helpers are unit-testable without a terminal. Actual terminal rendering and mouse forwarding remain client-side checks.
+The popup starts with a project picker, then shows the virtual root and descendants in tree order with title, state, role and id. Parentage is expressed by tree indentation rather than repeated metadata. Resolved leaves stay in durable history but are hidden from the operational tree. The pure tree layout and selection helpers are unit-testable without a terminal. Actual terminal rendering and mouse forwarding remain client-side checks.
 
 ## Compatibility and intentional limits
 

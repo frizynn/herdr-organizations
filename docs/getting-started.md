@@ -76,7 +76,7 @@ The existing `thread start` command remains a worker-under-root alias. Use `node
 Run **Herdr Organizations: organization tree** from Herdr's action menu. The popup first lists projects, then renders the selected project root and all descendants with role and state.
 
 - Up and Down or `k` and `j` move the selection.
-- Enter opens a project's tree or focuses the selected live pane.
+- Enter opens a project's tree. Inside the tree it focuses a live agent, opens an existing tab, or recreates an active node whose tab was closed. The popup closes after a successful open.
 - Esc or `q` goes back or closes the popup.
 - `r` refreshes the current tree.
 - A mouse click selects a row. A double-click opens or focuses it when the Herdr client forwards terminal mouse events.

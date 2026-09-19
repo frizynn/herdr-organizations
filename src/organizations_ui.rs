@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::herdr::Herdr;
 use crate::organizations::{self, TreeEntry};
-use crate::paths::Ctx;
+use crate::paths::{Ctx, SessionFlags};
 use crate::project::{self, Project};
 use crate::thread::{self, Thread};
 use crate::{coordinator, threads};
@@ -114,7 +114,11 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     },
                     KeyCode::Up | KeyCode::Char('k') => change_selection(&mut screen, -1),
                     KeyCode::Down | KeyCode::Char('j') => change_selection(&mut screen, 1),
-                    KeyCode::Enter => activate(ctx, &mut screen, &mut message),
+                    KeyCode::Enter => {
+                        if activate(ctx, &mut screen, &mut message) {
+                            break;
+                        }
+                    }
                     KeyCode::Char('r') => refresh(ctx, &mut screen, &mut message),
                     _ => {}
                 }
@@ -130,7 +134,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     last_click = Some((index, now));
                     message.clear();
                     if same_double {
-                        activate(ctx, &mut screen, &mut message);
+                        if activate(ctx, &mut screen, &mut message) {
+                            break;
+                        }
                         last_click = None;
                     }
                 }
@@ -256,11 +262,7 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
     match screen {
         Screen::Projects { choices, selected } => {
             write_display_line(writer, "Herdr Organizations", width)?;
-            write_display_line(
-                writer,
-                "Select a project. Enter opens its tree. Esc or q closes.",
-                width,
-            )?;
+            write_display_line(writer, "↑/k ↓/j move   Enter browse   Esc/q close", width)?;
             if choices.is_empty() {
                 write_display_line(writer, "No organizations yet.", width)?;
             } else {
@@ -289,7 +291,7 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
             )?;
             write_display_line(
                 writer,
-                "↑/k and ↓/j navigate, Enter focuses a live pane, Esc/q returns, r refreshes.",
+                "↑/k ↓/j move   Enter open   r refresh   Esc/q projects",
                 width,
             )?;
             let rows =
@@ -366,7 +368,7 @@ fn tree_lines_with_width(
     let shown_count = entries.len().min(MAX_RENDERED_NODES);
     let omitted_count = omitted_nodes.saturating_add(entries.len() - shown_count);
     let mut root = format!(
-        "root  coordinator  {}  {}  parent=none  Herdr project root",
+        "Project coordinator  [{}]  {}",
         project.status(),
         coordinator_state,
     );
@@ -387,13 +389,12 @@ fn tree_lines_with_width(
                 thread::Status::Resolved => "Resolved",
             });
         let row = format!(
-            "{}{}  {}  {}  parent={}  {}",
+            "{}{}  [{}]  {}  {}",
             entry.prefix,
-            entry.thread.id,
-            entry.thread.role.as_str(),
+            entry.thread.title,
             state,
-            organizations::parent_id(&entry.thread),
-            entry.thread.title
+            entry.thread.role.as_str(),
+            entry.thread.id,
         );
         output.push(fit_terminal_row(&row, width));
     }
@@ -563,7 +564,9 @@ fn visible_range(count: usize, selected: usize, capacity: usize) -> Range<usize>
     start..start + capacity
 }
 
-fn activate(ctx: &Ctx, screen: &mut Screen, message: &mut String) {
+/// Returns true when the popup should close because the selected session was
+/// opened successfully.
+fn activate(ctx: &Ctx, screen: &mut Screen, message: &mut String) -> bool {
     match screen {
         Screen::Projects { choices, selected } => {
             if let Some(choice) = choices.get(*selected) {
@@ -575,14 +578,18 @@ fn activate(ctx: &Ctx, screen: &mut Screen, message: &mut String) {
                     Err(error) => *message = format!("Could not read organization tree: {error:#}"),
                 }
             }
+            false
         }
         Screen::Tree { view, selected } => {
             let node = selected
                 .checked_sub(1)
                 .and_then(|index| view.entries.get(index).map(|entry| &entry.thread));
             match focus_node(ctx, &view.project, node) {
-                Ok(pane) => *message = format!("Focused pane {pane}."),
-                Err(error) => *message = format!("Could not focus selection: {error:#}"),
+                Ok(_) => true,
+                Err(error) => {
+                    *message = format!("Could not open selection: {error:#}");
+                    false
+                }
             }
         }
     }
@@ -609,36 +616,90 @@ fn refresh(ctx: &Ctx, screen: &mut Screen, message: &mut String) {
 }
 
 fn focus_node(ctx: &Ctx, project: &Project, node: Option<&Thread>) -> Result<String> {
-    let view = threads::session_view(ctx, project)
-        .context("the project's Herdr session is not reachable; open the project first")?;
-    match node {
-        None => {
-            let record = project
-                .coordinator()
-                .context("the project coordinator has not been opened")?;
-            let is_live = view
-                .panes
-                .iter()
-                .any(|pane| coordinator::pane_matches(&record, pane));
-            focus_live_pane(&view.herdr, &record.pane_id, is_live)
+    let recorded_socket = project.coordinator().and_then(|record| {
+        (!record.socket.is_empty()).then(|| std::path::PathBuf::from(record.socket))
+    });
+    let options = coordinator::OpenOptions {
+        session: SessionFlags {
+            session: None,
+            socket: recorded_socket.filter(|socket| socket.exists()),
+        },
+        reprime: false,
+        rebind: true,
+    };
+    coordinator::open(ctx, &project.slug, &options)
+        .context("could not open the project coordinator")?;
+
+    let project = Project::load(&ctx.root, &project.slug)?;
+    let coordinator = project
+        .coordinator()
+        .context("the project coordinator has not been placed")?;
+    let Some(selected) = node else {
+        let view = threads::session_view(ctx, &project)
+            .context("the project's Herdr session did not become reachable")?;
+        if view
+            .agents
+            .iter()
+            .any(|agent| coordinator::agent_matches(&coordinator, agent))
+        {
+            return focus_live_pane(&view.herdr, &coordinator.pane_id, true);
         }
-        Some(node) => {
-            if node.is_remote() {
-                let herdr = view.herdr.on_machine(&node.machine);
-                let panes = herdr
-                    .pane_list()
-                    .context("could not list panes on the node's machine")?;
-                let is_live = panes.iter().any(|pane| thread::pane_matches(node, pane));
-                focus_live_pane(&herdr, &node.pane_id, is_live)
-            } else {
-                let is_live = view
-                    .panes
-                    .iter()
-                    .any(|pane| thread::pane_matches(node, pane));
-                focus_live_pane(&view.herdr, &node.pane_id, is_live)
-            }
+        if view
+            .panes
+            .iter()
+            .any(|pane| coordinator::pane_matches(&coordinator, pane))
+        {
+            view.herdr
+                .tab_focus(&coordinator.tab_id)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            return Ok(coordinator.pane_id);
         }
+        bail!("the project coordinator has no live pane after opening");
+    };
+
+    let mut record = thread::load(&project, &selected.id)?;
+    if record.status == thread::Status::Resolved {
+        bail!(
+            "{} is resolved and cannot be reopened automatically",
+            record.id
+        );
     }
+    let view = threads::session_view(ctx, &project)
+        .context("the project's Herdr session did not become reachable")?;
+    let herdr = view.herdr.on_machine(&record.machine);
+    let (agents, panes) = if record.is_remote() {
+        (
+            herdr
+                .agent_list()
+                .context("could not list agents on the node's machine")?,
+            herdr
+                .pane_list()
+                .context("could not list panes on the node's machine")?,
+        )
+    } else {
+        (view.agents, view.panes)
+    };
+
+    if agents
+        .iter()
+        .any(|agent| thread::agent_matches(&record, agent))
+    {
+        return focus_live_pane(&herdr, &record.pane_id, true);
+    }
+    if panes.iter().any(|pane| thread::pane_matches(&record, pane)) {
+        herdr
+            .tab_focus(&record.tab_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(record.pane_id);
+    }
+
+    record = threads::restart(ctx, &project.slug, &record.id)
+        .with_context(|| format!("could not reopen {}", record.id))?;
+    view.herdr
+        .on_machine(&record.machine)
+        .tab_focus(&record.tab_id)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(record.pane_id)
 }
 
 fn focus_live_pane(herdr: &Herdr<'_>, pane_id: &str, is_live: bool) -> Result<String> {
@@ -681,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_rows_include_root_state_role_parent_and_depth() {
+    fn tree_rows_lead_with_titles_and_keep_compact_operational_metadata() {
         let world = crate::scenarios::World::new();
         let project = world.project("demo", "a.sock");
         let coordinator = organizations::tree_from(&[
@@ -702,10 +763,10 @@ mod tests {
         ])
         .unwrap();
         let lines = tree_lines(&project, &coordinator);
-        assert!(lines[0].contains("root  coordinator"));
-        assert!(lines[1].contains("t-0001  coordinator"));
-        assert!(lines[2].contains("└─ t-0002  worker"));
-        assert!(lines[2].contains("parent=t-0001"));
+        assert!(lines[0].starts_with("Project coordinator  [active]"));
+        assert!(lines[1].contains("Area lead  [Starting]  coordinator  t-0001"));
+        assert!(lines[2].contains("└─ Builder  [Starting]  worker  t-0002"));
+        assert!(!lines.iter().any(|line| line.contains("parent=")));
     }
 
     #[test]
@@ -740,9 +801,9 @@ mod tests {
         let mut output = Vec::new();
         render(&mut output, &screen, "").unwrap();
         let rendered = String::from_utf8(output).unwrap();
-        assert!(rendered.contains("root  coordinator"));
-        assert!(rendered.contains("└─ t-0001  coordinator"));
-        assert!(rendered.contains("   └─ t-0002  worker"));
+        assert!(rendered.contains("Project coordinator  [active]"));
+        assert!(rendered.contains("└─ Area lead  [Starting]  coordinator  t-0001"));
+        assert!(rendered.contains("   └─ Builder  [Starting]  worker  t-0002"));
     }
 
     #[test]
@@ -849,6 +910,162 @@ mod tests {
                 .any(|call| call.display().contains("agent focus w1:p7"))
         );
         assert!(focus_live_pane(&herdr, "w1:p7", false).is_err());
+    }
+
+    #[test]
+    fn tab_focus_uses_the_exact_herdr_command() {
+        let world = crate::scenarios::World::new();
+        world
+            .runner
+            .on("tab focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let ctx = world.ctx();
+        let herdr = Herdr::new(ctx.env.herdr_bin(), "socket", ctx.runner);
+
+        herdr.tab_focus("w1:t7").unwrap();
+
+        assert!(
+            world
+                .runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.display().ends_with("tab focus w1:t7"))
+        );
+    }
+
+    #[test]
+    fn opening_a_live_node_focuses_it_and_tells_the_popup_to_close() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let thread_cwd = world.home.path().join("thread");
+        let worker = world.thread(&project, &thread_cwd, |_| {});
+        *world.panes.borrow_mut() = format!(
+            "[{},{}]",
+            world.coordinator_pane(&project),
+            crate::scenarios::pane_json(
+                &worker.workspace_id,
+                &worker.tab_id,
+                &worker.pane_id,
+                &worker.cwd,
+            )
+        );
+        *world.agents.borrow_mut() = format!(
+            "[{},{}]",
+            crate::scenarios::agent_json(
+                "w1",
+                "w1:t1",
+                "w1:p1",
+                &project.canonical_dir().to_string_lossy(),
+                "hp-demo-coordinator",
+                "idle",
+            ),
+            crate::scenarios::agent_json(
+                &worker.workspace_id,
+                &worker.tab_id,
+                &worker.pane_id,
+                &worker.cwd,
+                &worker.agent_name,
+                "idle",
+            )
+        );
+        world
+            .runner
+            .on("agent focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let entries = organizations::tree(&project).unwrap();
+        let mut screen = Screen::Tree {
+            view: TreeView {
+                project,
+                entries,
+                omitted_nodes: 0,
+            },
+            selected: 1,
+        };
+        let mut message = String::new();
+
+        assert!(activate(&world.ctx(), &mut screen, &mut message));
+        assert!(message.is_empty());
+        assert!(world.runner.calls.borrow().iter().any(|call| {
+            call.display()
+                .ends_with(&format!("agent focus {}", worker.pane_id))
+        }));
+    }
+
+    #[test]
+    fn opening_a_closed_tab_node_recreates_and_focuses_its_tab() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let worker = crate::thread::allocate(&project, |thread| {
+            thread.title = "Closed task".into();
+            thread.status = thread::Status::Open;
+            thread.kind = thread::Kind::Tab;
+            thread.agent = "codex".into();
+            thread.workspace_id = "w1".into();
+            thread.tab_id = "w1:old".into();
+            thread.pane_id = "w1:old-pane".into();
+        })
+        .unwrap();
+        *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+        *world.agents.borrow_mut() = format!(
+            "[{}]",
+            crate::scenarios::agent_json(
+                "w1",
+                "w1:t1",
+                "w1:p1",
+                &project.canonical_dir().to_string_lossy(),
+                "hp-demo-coordinator",
+                "idle",
+            )
+        );
+        world
+            .runner
+            .on("agent focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+        world.runner.on(
+            "tab create",
+            crate::runner::fake::ok(
+                r#"{"result":{"root_pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}"#,
+            ),
+        );
+        world
+            .runner
+            .on("tab focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+
+        let opened = focus_node(&world.ctx(), &project, Some(&worker)).unwrap();
+
+        assert_eq!(opened, "w1:p2");
+        assert!(
+            world
+                .runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| { call.display().ends_with("tab focus w1:t2") })
+        );
+        let reopened = thread::load(&project, &worker.id).unwrap();
+        assert_eq!(reopened.tab_id, "w1:t2");
+        assert_eq!(reopened.pane_id, "w1:p2");
+        assert!(reopened.prompt_pending);
+    }
+
+    #[test]
+    fn opening_a_coordinator_at_a_shell_focuses_its_existing_tab() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+        world
+            .runner
+            .on("tab focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+
+        let opened = focus_node(&world.ctx(), &project, None).unwrap();
+
+        assert_eq!(opened, "w1:p1");
+        assert!(
+            world
+                .runner
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| { call.display().ends_with("tab focus w1:t1") })
+        );
     }
 
     #[test]

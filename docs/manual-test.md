@@ -41,11 +41,12 @@ Use the installed Codex CLI to check a node with a model, reasoning effort and e
 Open **Herdr Organizations: organization tree** from Herdr's action menu.
 
 1. Select a project with keyboard arrows, `j` or `k`, and press Enter.
-2. Confirm root and every descendant render in the same stable order as `node list`, with depth, role, parent and state.
-3. Move through root and children using Up/Down and `j`/`k`. Press Enter on a live child and confirm the selected pane receives focus. Repeat for root.
-4. Press Esc to return to project selection, then `q` to close.
-5. Click a row to select it. Double-click to open or focus when Herdr forwards mouse events. If no mouse event reaches the popup, keyboard support remains available.
-6. Press `r` after creating a node and confirm the tree refreshes.
+2. Confirm root and every active descendant render in the same stable order as `node list`, with title, state, role and id. Confirm resolved leaves are absent.
+3. Move through root and children using Up/Down and `j`/`k`. Press Enter on a live child and confirm the selected pane receives focus and the popup closes. Repeat for root.
+4. Close an active tab, reopen the popup, select that node and press Enter. Confirm a replacement tab is created, focused and the popup closes.
+5. Press Esc to return to project selection, then `q` to close.
+6. Click a row to select it. Double-click to open or focus when Herdr forwards mouse events. If no mouse event reaches the popup, keyboard support remains available.
+7. Press `r` after creating a node and confirm the tree refreshes.
 
 ## Existing behavior
 

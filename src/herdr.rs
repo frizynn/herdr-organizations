@@ -502,6 +502,11 @@ impl<'a> Herdr<'a> {
             .map(|_| ())
     }
 
+    pub fn tab_focus(&self, tab_id: &str) -> Result<(), HerdrError> {
+        self.call(&["tab", "focus", tab_id], CALL_TIMEOUT)
+            .map(|_| ())
+    }
+
     pub fn notification_show(&self, title: &str, body: &str) -> Result<(), HerdrError> {
         self.call(
             &["notification", "show", title, "--body", body],
