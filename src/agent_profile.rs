@@ -149,9 +149,9 @@ fn codex_argv(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
     if !profile.reasoning_effort.is_empty() {
         if !matches!(
             profile.reasoning_effort.as_str(),
-            "minimal" | "low" | "medium" | "high" | "xhigh"
+            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
         ) {
-            bail!("Codex reasoning effort must be minimal, low, medium, high or xhigh");
+            bail!("Codex reasoning effort must be minimal, low, medium, high, xhigh or max");
         }
         argv.extend([
             "--config".into(),
@@ -243,6 +243,19 @@ mod tests {
                 "--legacy-safe",
                 "two words",
             ]
+        );
+    }
+
+    #[test]
+    fn codex_profile_accepts_max_reasoning_effort() {
+        let profile = AgentProfile {
+            harness: "codex".into(),
+            reasoning_effort: "max".into(),
+            ..AgentProfile::default()
+        };
+        assert_eq!(
+            profile.argv(&[]).unwrap(),
+            ["--config", "model_reasoning_effort=\"max\""]
         );
     }
 

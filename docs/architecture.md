@@ -35,7 +35,7 @@ Each node stores the effective harness, model, reasoning effort, permission prof
 Codex adapter:
 
 - `--model <value>` maps to `--model <value>`.
-- Reasoning effort accepts `minimal`, `low`, `medium`, `high` and `xhigh`, mapped to `--config model_reasoning_effort="<value>"`.
+- Reasoning effort accepts `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, mapped to `--config model_reasoning_effort="<value>"`.
 - `read-only` maps to `--sandbox read-only --ask-for-approval on-request`.
 - `workspace-write` maps to `--sandbox workspace-write --ask-for-approval on-request`.
 - `full-access` maps to `--sandbox danger-full-access --ask-for-approval never`.
