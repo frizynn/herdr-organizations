@@ -230,13 +230,12 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
                 let range = visible_range(choices.len(), *selected, visible_rows);
                 for (index, choice) in choices.iter().enumerate().take(range.end).skip(range.start)
                 {
-                    write_selected(writer, index == *selected)?;
-                    write_display_line(
+                    write_selectable_line(
                         writer,
                         &format!("{}  ({})", choice.label, choice.project.slug),
                         width,
+                        index == *selected,
                     )?;
-                    reset_selected(writer, index == *selected)?;
                 }
             }
         }
@@ -260,9 +259,7 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
                 tree_lines_with_width(&view.project, &view.entries, view.omitted_nodes, width);
             let range = visible_range(rows.len(), *selected, visible_rows);
             for (index, row) in rows.iter().enumerate().take(range.end).skip(range.start) {
-                write_selected(writer, index == *selected)?;
-                write_display_line(writer, row, width)?;
-                reset_selected(writer, index == *selected)?;
+                write_selectable_line(writer, row, width, index == *selected)?;
             }
         }
     }
@@ -285,21 +282,24 @@ fn terminal_width() -> usize {
 }
 
 fn write_display_line(writer: &mut impl Write, value: &str, width: usize) -> Result<()> {
-    writeln!(writer, "{}", fit_terminal_row(value, width))?;
+    write!(writer, "{}\r\n", fit_terminal_row(value, width))?;
     Ok(())
 }
 
-fn write_selected(writer: &mut impl Write, selected: bool) -> Result<()> {
+fn write_selectable_line(
+    writer: &mut impl Write,
+    value: &str,
+    width: usize,
+    selected: bool,
+) -> Result<()> {
     if selected {
         execute!(writer, SetAttribute(Attribute::Reverse))?;
     }
-    Ok(())
-}
-
-fn reset_selected(writer: &mut impl Write, selected: bool) -> Result<()> {
+    write!(writer, "{}", fit_terminal_row(value, width))?;
     if selected {
         execute!(writer, SetAttribute(Attribute::Reset))?;
     }
+    write!(writer, "\r\n")?;
     Ok(())
 }
 
@@ -706,6 +706,25 @@ mod tests {
         assert!(rendered.contains("root  coordinator"));
         assert!(rendered.contains("└─ t-0001  coordinator"));
         assert!(rendered.contains("   └─ t-0002  worker"));
+    }
+
+    #[test]
+    fn rendered_rows_return_to_column_zero_and_reset_selection_before_newline() {
+        let mut output = Vec::new();
+
+        write_display_line(&mut output, "header", 80).unwrap();
+        write_selectable_line(&mut output, "selected", 80, true).unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.starts_with("header\r\n"));
+        assert!(rendered.ends_with("selected\x1b[0m\r\n"));
+        assert!(
+            rendered
+                .as_bytes()
+                .windows(2)
+                .filter(|bytes| bytes[1] == b'\n')
+                .all(|bytes| bytes[0] == b'\r')
+        );
     }
 
     #[test]
