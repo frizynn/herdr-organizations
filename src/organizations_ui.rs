@@ -1,5 +1,6 @@
 //! Recursive Organizations picker shown inside Herdr's plugin popup.
 
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -156,7 +157,7 @@ fn project_choices(ctx: &Ctx) -> Vec<ProjectChoice> {
 }
 
 fn open_tree(project: Project) -> Result<TreeView> {
-    let mut entries = organizations::tree(&project)?;
+    let mut entries = operational_tree(&project)?;
     let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
     entries.truncate(MAX_RENDERED_NODES);
     Ok(TreeView {
@@ -164,6 +165,42 @@ fn open_tree(project: Project) -> Result<TreeView> {
         omitted_nodes,
         project,
     })
+}
+
+/// The popup is an operational view. Resolved leaves remain persisted for
+/// history but disappear from the tree. A resolved ancestor stays visible
+/// while it still gives structure to an active descendant.
+fn operational_tree(project: &Project) -> Result<Vec<TreeEntry>> {
+    let all = organizations::tree(project)?;
+    let parents: BTreeMap<_, _> = all
+        .iter()
+        .map(|entry| {
+            (
+                entry.thread.id.clone(),
+                organizations::parent_id(&entry.thread).to_string(),
+            )
+        })
+        .collect();
+    let mut visible: HashSet<String> = all
+        .iter()
+        .filter(|entry| entry.thread.status != thread::Status::Resolved)
+        .map(|entry| entry.thread.id.clone())
+        .collect();
+    let mut pending: Vec<_> = visible.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        let Some(parent) = parents.get(&id) else {
+            continue;
+        };
+        if parent != organizations::ROOT_ID && visible.insert(parent.clone()) {
+            pending.push(parent.clone());
+        }
+    }
+    let records: Vec<_> = all
+        .into_iter()
+        .filter(|entry| visible.contains(&entry.thread.id))
+        .map(|entry| entry.thread)
+        .collect();
+    organizations::tree_from(&records)
 }
 
 fn print_all(ctx: &Ctx) -> Result<()> {
@@ -706,6 +743,43 @@ mod tests {
         assert!(rendered.contains("root  coordinator"));
         assert!(rendered.contains("└─ t-0001  coordinator"));
         assert!(rendered.contains("   └─ t-0002  worker"));
+    }
+
+    #[test]
+    fn operational_tree_hides_resolved_leaves_but_keeps_needed_ancestors() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        crate::thread::allocate(&project, |thread| {
+            thread.id = "t-0001".into();
+            thread.parent_id = organizations::ROOT_ID.into();
+            thread.role = crate::thread::NodeRole::Coordinator;
+            thread.can_spawn = true;
+            thread.status = thread::Status::Resolved;
+        })
+        .unwrap();
+        crate::thread::allocate(&project, |thread| {
+            thread.id = "t-0002".into();
+            thread.parent_id = "t-0001".into();
+            thread.status = thread::Status::Open;
+        })
+        .unwrap();
+        crate::thread::allocate(&project, |thread| {
+            thread.id = "t-0003".into();
+            thread.parent_id = organizations::ROOT_ID.into();
+            thread.status = thread::Status::Resolved;
+        })
+        .unwrap();
+
+        let entries = operational_tree(&project).unwrap();
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.thread.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t-0001", "t-0002"]
+        );
+        assert_eq!(entries[1].prefix, "   └─ ");
     }
 
     #[test]
