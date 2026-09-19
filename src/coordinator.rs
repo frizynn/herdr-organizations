@@ -246,7 +246,7 @@ fn sync_label(herdr: &Herdr, workspace_id: &str, label: &str) {
 /// leaves `prime_pending` set so the ticker delivers it. One delivery path.
 fn deliver_or_defer(project: &Project, herdr: &Herdr, agent: &Agent, prompt: &str) -> Result<()> {
     let sent = agent.ready()
-        && match herdr.agent_prompt(&agent.pane_id, prompt) {
+        && match herdr.agent_prompt_start(&agent.pane_id, prompt) {
             Ok(()) => true,
             Err(error) => {
                 println!("the priming prompt was not accepted ({error})");

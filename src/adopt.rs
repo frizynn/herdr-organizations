@@ -156,7 +156,7 @@ pub fn adopt(
     // delivery path sends the line later (also when the agent ends in `done`).
     let sent = agent.ready()
         && herdr
-            .agent_prompt(pane, &thread::launch_prompt(slug, &id))
+            .agent_prompt_start(pane, &thread::launch_prompt(slug, &id))
             .is_ok();
     let adopted = thread::update(&project, &id, |t| {
         t.status = Status::Open;

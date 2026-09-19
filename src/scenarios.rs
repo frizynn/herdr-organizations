@@ -246,8 +246,20 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
         .find(|c| c.display().contains("agent prompt"))
         .unwrap();
     assert_eq!(
-        prompt.args.last().unwrap(),
-        "Read .herdr-project/demo-t-0001/brief.md and do what it says."
+        prompt.args,
+        [
+            "agent",
+            "prompt",
+            "w2:p1",
+            "Read .herdr-project/demo-t-0001/brief.md and do what it says.",
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            "10000",
+        ]
     );
     drop(calls);
     assert!(!thread::load(&project, "t-0001").unwrap().prompt_pending);

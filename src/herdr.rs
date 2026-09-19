@@ -458,6 +458,29 @@ impl<'a> Herdr<'a> {
             .map(|_| ())
     }
 
+    /// Submits initial work and waits until Herdr observes the agent start it.
+    /// A plain accepted prompt can otherwise race an agent UI that is still
+    /// becoming interactive after `agent start`.
+    pub fn agent_prompt_start(&self, target: &str, text: &str) -> Result<(), HerdrError> {
+        self.call(
+            &[
+                "agent",
+                "prompt",
+                target,
+                text,
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                "10000",
+            ],
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
     pub fn agent_focus(&self, target: &str) -> Result<(), HerdrError> {
         self.call(&["agent", "focus", target], CALL_TIMEOUT)
             .map(|_| ())
@@ -615,5 +638,36 @@ mod tests {
             ["--model", "a model with spaces", shell_text.as_str()]
         );
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn initial_prompt_waits_for_observed_work() {
+        let runner = crate::runner::fake::FakeRunner::new();
+        runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let herdr = Herdr::new("herdr", "socket", &runner);
+
+        herdr.agent_prompt_start("w1:p1", "read the brief").unwrap();
+
+        let calls = runner.calls.borrow();
+        let call = calls
+            .iter()
+            .find(|call| call.args.starts_with(&["agent".into(), "prompt".into()]))
+            .unwrap();
+        assert_eq!(
+            call.args,
+            [
+                "agent",
+                "prompt",
+                "w1:p1",
+                "read the brief",
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                "10000",
+            ]
+        );
     }
 }

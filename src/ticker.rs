@@ -426,7 +426,7 @@ fn thread_pass(
                 .as_deref()
                 .is_some_and(crate::herdr::ready_state)
         {
-            match herdr.agent_prompt(&t.pane_id, &thread::launch_prompt(slug, &t.id)) {
+            match herdr.agent_prompt_start(&t.pane_id, &thread::launch_prompt(slug, &t.id)) {
                 Ok(()) => delivered = true,
                 Err(error) => {
                     pass.error = pass
@@ -598,7 +598,9 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
     if let Some(agent) = agent {
         if record.prime_pending && agent.ready() {
             let prefix = coordinator::current_prefix(&ctx.root)?;
-            match herdr.agent_prompt(&record.pane_id, &coordinator::priming_prompt(&prefix, slug)) {
+            match herdr
+                .agent_prompt_start(&record.pane_id, &coordinator::priming_prompt(&prefix, slug))
+            {
                 Ok(()) => {
                     project.update_coordinator(|c| c.prime_pending = false)?;
                 }
