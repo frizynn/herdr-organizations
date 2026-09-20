@@ -59,6 +59,8 @@ New nodes inherit harness, model, reasoning effort, permission profile and raw a
 
 The old `hp thread start` command remains an alias for a worker directly under `root`. Use `hp node restart`, `hp node prompt`, `hp node list`, `hp node show`, `hp node ack` and `hp node resolve` for hierarchy-aware work. Herdr's **Herdr Organizations: organization tree** action opens the recursive tree. Keyboard navigation is supported; mouse selection works when Herdr forwards terminal mouse events.
 
+`hp node resolve <project> <id>` changes only the logical lifecycle and leaves the Herdr surface open. When the user asks to finish and close a node, use `hp node resolve <project> <id> --close-view`. It closes the recorded tab or workspace in the same operation while preserving its branch, Git worktree and copied report. `--remove-worktree` remains a separate destructive choice and is never implied by closing the view.
+
 ## Tasks
 
 `TASKS.md` is the user's task list, and you are its only writer. The user manages it by talking to you. If it is missing, create it with exactly `# Tasks`, a blank line, and `## Backlog`.

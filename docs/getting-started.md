@@ -73,6 +73,8 @@ Profile fields inherit from the parent unless they are specified on node creatio
 
 The existing `thread start` command remains a worker-under-root alias. Use `node restart`, `node prompt`, `node list`, `node show`, `node ack` and `node resolve` for hierarchy-aware names. `node create` is an alias for `node start`.
 
+Resolving a node and closing its terminal surface are intentionally distinct. Use `node resolve <project> <id> --close-view` when finished work should disappear from both the organization tree and Herdr's tabs or workspaces. The branch, worktree and copied report remain available. Removing a worktree still requires the separate `--remove-worktree` option.
+
 ## Browse and focus the tree
 
 Run **Herdr Organizations: organization tree** from Herdr's action menu to browse all projects. The popup first lists projects, then renders the selected project root and all descendants with role and state.

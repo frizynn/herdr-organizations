@@ -517,6 +517,18 @@ impl<'a> Herdr<'a> {
             .map(|_| ())
     }
 
+    /// Close only Herdr's workspace surface. This does not remove a Git
+    /// worktree or delete its branch.
+    pub fn workspace_close(&self, workspace: &str) -> Result<(), HerdrError> {
+        self.call(&["workspace", "close", workspace], CALL_TIMEOUT)
+            .map(|_| ())
+    }
+
+    /// Close only Herdr's tab surface.
+    pub fn tab_close(&self, tab: &str) -> Result<(), HerdrError> {
+        self.call(&["tab", "close", tab], CALL_TIMEOUT).map(|_| ())
+    }
+
     /// The working directory herdr reports for a new tab's pane.
     pub fn pane_cwd(&self, pane: &str) -> Result<String, HerdrError> {
         let result = self.call(&["pane", "get", pane], CALL_TIMEOUT)?;

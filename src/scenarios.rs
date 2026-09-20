@@ -783,6 +783,98 @@ fn every_resolve_copies_first_and_remove_worktree_needs_a_complete_copy() {
 }
 
 #[test]
+fn resolve_can_close_the_herdr_view_without_removing_git_artifacts() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let worktree = world.thread(&project, world.home.path(), |thread| {
+        thread.branch = "hp/demo/t-0001-task".into();
+    });
+    world
+        .runner
+        .on("workspace close w2", ok(r#"{"result":{"type":"ok"}}"#));
+
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+
+    let resolved = thread::load(&project, "t-0001").unwrap();
+    assert_eq!(resolved.status, Status::Resolved);
+    assert_eq!(resolved.worktree_path, worktree.worktree_path);
+    assert_eq!(resolved.branch, worktree.branch);
+    assert_eq!(world.runner.count("workspace close w2"), 1);
+    assert_eq!(world.runner.count("worktree remove"), 0);
+
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |thread| {
+        thread.kind = Kind::Tab;
+        thread.workspace_id = "w1".into();
+        thread.tab_id = "w1:t2".into();
+        thread.pane_id = "w1:p2".into();
+        thread.worktree_path.clear();
+        thread.branch.clear();
+    });
+    world
+        .runner
+        .on("tab close w1:t2", ok(r#"{"result":{"type":"ok"}}"#));
+
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Resolved
+    );
+    assert_eq!(world.runner.count("tab close w1:t2"), 1);
+}
+
+#[test]
+fn a_failed_view_close_leaves_the_node_open_and_retryable() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |_| {});
+    world.runner.on(
+        "workspace close w2",
+        fail(1, r#"{"error":{"code":"workspace_busy","message":"busy"}}"#),
+    );
+
+    let error = threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("could not close its Herdr view"));
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Open
+    );
+}
+
+#[test]
 fn a_failed_final_copy_blocks_resolve_unless_skipped() {
     let world = World::new();
     let project = world.project("demo", "a.sock");

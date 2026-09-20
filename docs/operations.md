@@ -49,7 +49,7 @@ The virtual `root` is the project coordinator. A new worker has `parent_id=root`
 | `inbox consume <project>` | Print and archive one bounded batch after successful stdout delivery; used by automated ticker turns. |
 | `inbox done <project> <item>... \| --all` | Mark inbox items handled. |
 | `node start <project> --parent root\|<id> --role worker\|coordinator --title T [profile flags] [--repo PATH] [--machine M] [--base REF] --task-file F` | New hierarchy node; `node create` is an alias, and `-` reads the task from standard input. Returns before the agent is up. |
-| `node restart`, `node prompt`, `node list`, `node show`, `node ack`, `node resolve` | Hierarchy-aware lifecycle and reports. |
+| `node restart`, `node prompt`, `node list`, `node show`, `node ack`, `node resolve [--close-view]` | Hierarchy-aware lifecycle and reports. `--close-view` closes the recorded Herdr surface but keeps the branch and worktree. |
 | `thread start <project> ...` | Backward-compatible alias for a worker directly under `root`. Existing thread lifecycle commands remain accepted for old records. |
 | `organizations` action | Project picker and recursive tree popup with keyboard selection, session recovery and focus. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Node work grouped by attention, as text and in the flat sidebar. |

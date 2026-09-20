@@ -75,6 +75,20 @@ fn legacy_thread_adopt_cli_arguments_remain_available() {
 }
 
 #[test]
+fn node_resolve_exposes_the_non_destructive_close_view_option() {
+    let home = tempfile::tempdir().unwrap();
+    let output = hp(home.path(), &["node", "resolve", "--help"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--close-view"), "{help}");
+    assert!(help.contains("surface, keeping Git artifacts"), "{help}");
+}
+
+#[test]
 fn peek_records_nothing_and_context_records_seen_items() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");

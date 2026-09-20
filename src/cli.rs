@@ -237,6 +237,9 @@ enum ThreadCommand {
         id: String,
         #[arg(long, conflicts_with_all = ["remove_worktree", "skip_copy", "discard_uncopied"])]
         reopen: bool,
+        /// Close the recorded Herdr surface, keeping Git artifacts
+        #[arg(long, conflicts_with_all = ["reopen", "remove_worktree"])]
+        close_view: bool,
         /// Also remove the worktree (never forced; the branch is kept)
         #[arg(long)]
         remove_worktree: bool,
@@ -329,6 +332,9 @@ enum NodeCommand {
         id: String,
         #[arg(long, conflicts_with_all = ["remove_worktree", "skip_copy", "discard_uncopied"])]
         reopen: bool,
+        /// Close the recorded Herdr surface, keeping Git artifacts
+        #[arg(long, conflicts_with_all = ["reopen", "remove_worktree"])]
+        close_view: bool,
         #[arg(long)]
         remove_worktree: bool,
         #[arg(long)]
@@ -542,6 +548,7 @@ pub fn run() -> Result<()> {
                 slug,
                 id,
                 reopen,
+                close_view,
                 remove_worktree,
                 skip_copy,
                 discard_uncopied,
@@ -551,6 +558,7 @@ pub fn run() -> Result<()> {
                 &id,
                 &ResolveArgs {
                     reopen,
+                    close_view,
                     remove_worktree,
                     skip_copy,
                     discard_uncopied,
@@ -653,6 +661,7 @@ pub fn run() -> Result<()> {
                 slug,
                 id,
                 reopen,
+                close_view,
                 remove_worktree,
                 skip_copy,
                 discard_uncopied,
@@ -662,6 +671,7 @@ pub fn run() -> Result<()> {
                 &id,
                 &ResolveArgs {
                     reopen,
+                    close_view,
                     remove_worktree,
                     skip_copy,
                     discard_uncopied,

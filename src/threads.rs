@@ -715,14 +715,36 @@ pub fn ack(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
 #[derive(Default)]
 pub struct ResolveArgs {
     pub reopen: bool,
+    pub close_view: bool,
     pub remove_worktree: bool,
     pub skip_copy: bool,
     pub discard_uncopied: bool,
 }
 
+fn close_thread_view(view: &SessionView<'_>, slug: &str, thread: &Thread) -> Result<()> {
+    let herdr = view.herdr.on_machine(&thread.machine);
+    match thread.kind {
+        Kind::Worktree => herdr.workspace_close(&thread.workspace_id),
+        Kind::Tab => herdr.tab_close(&thread.tab_id),
+        Kind::Adopted => herdr.pane_close(&thread.pane_id),
+    }
+    .map_err(|error| anyhow::anyhow!(error))
+    .with_context(|| {
+        format!(
+            "{} could not close its Herdr view; retry with `node resolve {slug} {} --close-view`",
+            thread.id, thread.id
+        )
+    })
+}
+
 pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
+    if args.close_view && args.remove_worktree {
+        bail!(
+            "--close-view cannot be combined with --remove-worktree; removing a worktree already closes its workspace"
+        );
+    }
     if args.reopen {
         if record.status != Status::Resolved {
             bail!("{id} is not resolved");
@@ -775,16 +797,35 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         // The record says what exists: `delete` lists leftovers from it.
         thread::update(&project, id, |t| t.worktree_path.clear())?;
     }
+    let view = if args.close_view {
+        let view = require_session(ctx, &project)?;
+        clear_thread_tokens(&view.herdr, &record);
+        close_thread_view(&view, slug, &record)?;
+        Some(view)
+    } else {
+        session_view(ctx, &project)
+    };
     let resolved = thread::update(&project, id, |t| {
         t.status = Status::Resolved;
         t.resolved_reason = "manual".into();
         t.prompt_pending = false;
     })?;
-    if let Some(view) = session_view(ctx, &project) {
+    if !args.close_view
+        && let Some(view) = view
+    {
         clear_thread_tokens(&view.herdr, &resolved);
     }
     println!("{id} resolved.");
-    if !args.remove_worktree {
+    if args.close_view {
+        println!(
+            "Its Herdr {} was closed; recorded Git artifacts were left unchanged.",
+            match resolved.kind {
+                Kind::Worktree => "workspace",
+                Kind::Tab => "tab",
+                Kind::Adopted => "pane",
+            }
+        );
+    } else if !args.remove_worktree {
         match resolved.kind {
             Kind::Worktree if resolved.worktree_path.is_empty() => {
                 println!("No worktree was recorded for it, so there is nothing to close or remove.")
