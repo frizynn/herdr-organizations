@@ -48,6 +48,15 @@ Open **Herdr Organizations: organization tree** from Herdr's action menu.
 6. Click a row to select it. Double-click to open or focus when Herdr forwards mouse events. If no mouse event reaches the popup, keyboard support remains available.
 7. Press `r` after creating a node and confirm the tree refreshes.
 
+## Contextual organization sidebar
+
+1. From a coordinator or worker pane in a project workspace, run **Herdr Organizations: toggle project hierarchy sidebar**. Confirm one split appears on the configured side at the configured width and is scoped to that project.
+2. Navigate with Up/Down and `j`/`k`. Press Space on a coordinator and confirm only its descendants fold. Press Enter on root and a live node; confirm the pane focuses and the sidebar remains available. Close a node tab and confirm Enter recreates an active node.
+3. Open the visible gear with `s`. Change dock side and width, close and reopen, and confirm the layout updates. Toggle focus-on-open, auto-open, resolved nodes, status, role and strict toggle; reopen the settings and confirm values persist in Herdr's plugin config directory.
+4. Confirm the settings screen identifies `organizations` as the global picker and `organization-sidebar` as the contextual toggle. Confirm its shortcut recommendation does not change Herdr's global keybindings.
+5. Open an unrelated pane in the same workspace and give it a similar label. Toggle the organization sidebar and confirm only the pane with matching organization sidebar, project and workspace tokens closes. Repeat with another project's workspace.
+6. With auto-open enabled, focus a project tab and confirm the sidebar is ensured once. With it disabled, focus the tab and confirm no split is created.
+
 ## Existing behavior
 
 - Open a project, start a root worker with `thread start`, and confirm it is a worker child of `root`.

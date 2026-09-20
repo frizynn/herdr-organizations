@@ -36,6 +36,13 @@ contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "organizations"]
 
 [[actions]]
+id = "organization-sidebar"
+title = "Herdr Organizations: toggle project hierarchy sidebar"
+description = "Toggle the recursive split sidebar for the current Herdr Organizations project."
+contexts = ["workspace"]
+command = ["target/release/herdr-organizations", "action", "organization-sidebar"]
+
+[[actions]]
 id = "focus"
 title = "Herdr Organizations: focus sidebar on this project"
 contexts = ["workspace"]
@@ -100,3 +107,11 @@ id = "organizations"
 title = "Herdr Organizations"
 placement = "popup"
 command = ["target/release/herdr-organizations", "pane", "organizations"]
+
+[[events]]
+on = "tab.focused"
+command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]
+
+[[events]]
+on = "workspace.created"
+command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]

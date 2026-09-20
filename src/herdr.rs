@@ -148,6 +148,12 @@ pub struct Pane {
     pub workspace_id: String,
     #[serde(default)]
     pub cwd: String,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub tokens: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -222,6 +228,38 @@ impl<'a> Herdr<'a> {
         })
     }
 
+    /// Runs a Herdr command whose successful CLI form may intentionally emit
+    /// no JSON, while preserving structured errors when Herdr returns one.
+    fn call_status(&self, args: &[&str], timeout: Duration) -> Result<(), HerdrError> {
+        let cmd = self.cmd(timeout).args(args.iter().copied());
+        let out = self.runner.run(&cmd).map_err(|error| HerdrError {
+            code: "unreachable".into(),
+            message: format!("{error:#}"),
+        })?;
+        if out.timed_out {
+            return Err(HerdrError {
+                code: "timeout".into(),
+                message: format!("`herdr {}` timed out", args.join(" ")),
+            });
+        }
+        if out.success() {
+            return Ok(());
+        }
+        let reply = [&out.stdout, &out.stderr]
+            .into_iter()
+            .find_map(|text| serde_json::from_str::<serde_json::Value>(text.trim()).ok());
+        if let Some(error) = reply.as_ref().and_then(|reply| reply.get("error")) {
+            return Err(HerdrError {
+                code: error["code"].as_str().unwrap_or("failed").to_string(),
+                message: error["message"].as_str().unwrap_or("").to_string(),
+            });
+        }
+        Err(HerdrError {
+            code: "failed".into(),
+            message: format!("`herdr {}`: {}", args.join(" "), out.error_text()),
+        })
+    }
+
     fn call_as<T: serde::de::DeserializeOwned>(
         &self,
         args: &[&str],
@@ -236,6 +274,77 @@ impl<'a> Herdr<'a> {
 
     pub fn pane_list(&self) -> Result<Vec<Pane>, HerdrError> {
         self.call_as(&["pane", "list"], "panes")
+    }
+
+    /// Split a pane and return the new Herdr pane id from the response.
+    pub fn pane_split(
+        &self,
+        target: &str,
+        direction: &str,
+        ratio: f64,
+        cwd: &str,
+    ) -> Result<Pane, HerdrError> {
+        let ratio = ratio.clamp(0.15, 0.85).to_string();
+        let mut args = vec![
+            "pane".to_string(),
+            "split".to_string(),
+            target.to_string(),
+            "--direction".to_string(),
+            direction.to_string(),
+            "--ratio".to_string(),
+            ratio,
+            "--no-focus".to_string(),
+        ];
+        if !cwd.is_empty() {
+            args.push("--cwd".into());
+            args.push(cwd.into());
+        }
+        let refs: Vec<_> = args.iter().map(String::as_str).collect();
+        self.call_as(&refs, "pane")
+    }
+
+    pub fn pane_run(&self, pane: &str, command: &[String]) -> Result<(), HerdrError> {
+        let mut args = vec!["pane", "run", pane];
+        args.extend(command.iter().map(String::as_str));
+        self.call_status(&args, CALL_TIMEOUT)
+    }
+
+    pub fn pane_rename(&self, pane: &str, label: &str) -> Result<(), HerdrError> {
+        self.call(&["pane", "rename", pane, label], CALL_TIMEOUT)
+            .map(|_| ())
+    }
+
+    pub fn pane_swap(&self, source: &str, target: &str) -> Result<(), HerdrError> {
+        self.call(
+            &[
+                "pane",
+                "swap",
+                "--source-pane",
+                source,
+                "--target-pane",
+                target,
+            ],
+            CALL_TIMEOUT,
+        )
+        .map(|_| ())
+    }
+
+    pub fn pane_focus_direction(&self, pane: &str, direction: &str) -> Result<(), HerdrError> {
+        self.call(
+            &["pane", "focus", "--direction", direction, "--pane", pane],
+            CALL_TIMEOUT,
+        )
+        .map(|_| ())
+    }
+
+    pub fn plugin_pane_focus(&self, pane: &str) -> Result<(), HerdrError> {
+        self.call(&["plugin", "pane", "focus", pane], CALL_TIMEOUT)
+            .map(|_| ())
+    }
+
+    pub fn pane_close(&self, pane: &str) -> Result<(), HerdrError> {
+        self.call(&["pane", "close", pane], CALL_TIMEOUT)
+            .map(|_| ())
     }
 
     pub fn agent_list(&self) -> Result<Vec<Agent>, HerdrError> {
@@ -523,6 +632,16 @@ impl<'a> Herdr<'a> {
         tokens: &[(&str, &str)],
         ttl: Duration,
     ) -> Result<(), HerdrError> {
+        self.pane_report_tokens_from(pane, SOURCE, tokens, ttl)
+    }
+
+    pub fn pane_report_tokens_from(
+        &self,
+        pane: &str,
+        source: &str,
+        tokens: &[(&str, &str)],
+        ttl: Duration,
+    ) -> Result<(), HerdrError> {
         let ttl = ttl.as_millis().to_string();
         let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut args = vec![
@@ -530,7 +649,7 @@ impl<'a> Herdr<'a> {
             "report-metadata",
             pane,
             "--source",
-            SOURCE,
+            source,
             "--ttl-ms",
             &ttl,
         ];
@@ -538,7 +657,7 @@ impl<'a> Herdr<'a> {
             args.push("--token");
             args.push(pair);
         }
-        self.call(&args, CALL_TIMEOUT).map(|_| ())
+        self.call_status(&args, CALL_TIMEOUT)
     }
 
     pub fn pane_clear_tokens(&self, pane: &str, names: &[&str]) -> Result<(), HerdrError> {
@@ -547,7 +666,7 @@ impl<'a> Herdr<'a> {
             args.push("--clear-token");
             args.push(name);
         }
-        self.call(&args, CALL_TIMEOUT).map(|_| ())
+        self.call_status(&args, CALL_TIMEOUT)
     }
 }
 
@@ -620,6 +739,17 @@ mod tests {
         assert_eq!(parse_version("herdr"), None);
         assert!(Version(0, 9, 0) < MIN_VERSION);
         assert!(Version(0, 10, 0) > MIN_VERSION);
+    }
+
+    #[test]
+    fn silent_success_is_valid_for_status_only_cli_commands() {
+        let runner = crate::runner::fake::FakeRunner::new();
+        runner.on("pane run", crate::runner::fake::ok(""));
+        let herdr = Herdr::new("herdr", "socket", &runner);
+
+        herdr
+            .pane_run("w1:p2", &["/bin/echo".into(), "ready".into()])
+            .unwrap();
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::coordinator::{self, OpenOptions};
 use crate::herdr::{CALL_TIMEOUT, Herdr};
 use crate::paths::{Ctx, SessionFlags};
 use crate::project::{self, Status};
-use crate::{doctor, lifecycle, organizations_ui, overview};
+use crate::{doctor, lifecycle, organization_sidebar, organizations_ui, overview};
 
 const PLUGIN_ID: &str = "herdr-projects";
 
@@ -122,6 +122,20 @@ fn current_slug(ctx: &Ctx) -> Option<String> {
     )
 }
 
+fn current_workspace(ctx: &Ctx, context: &ActionContext) -> String {
+    ctx.env
+        .var("HERDR_WORKSPACE_ID")
+        .unwrap_or(&context.workspace_id)
+        .to_string()
+}
+
+fn current_pane(ctx: &Ctx, context: &ActionContext) -> String {
+    ctx.env
+        .var("HERDR_PANE_ID")
+        .unwrap_or(&context.focused_pane_id)
+        .to_string()
+}
+
 pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
     let context = action_context(ctx);
     let base = Handoff {
@@ -131,6 +145,25 @@ pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
     match id {
         "new" => open_pane(ctx, "new", None),
         "organizations" => open_pane(ctx, "organizations", None),
+        organization_sidebar::ACTION_ID => {
+            let slug = current_slug(ctx).context(
+                "this action needs a Herdr Organizations project workspace; use `organizations` to browse all projects",
+            )?;
+            let workspace = current_workspace(ctx, &context);
+            let pane = current_pane(ctx, &context);
+            organization_sidebar::toggle(ctx, &slug, &workspace, &pane).map(|_| ())
+        }
+        organization_sidebar::AUTO_OPEN_ACTION_ID => {
+            let workspace = current_workspace(ctx, &context);
+            let pane = current_pane(ctx, &context);
+            organization_sidebar::ensure_auto_open(
+                ctx,
+                current_slug(ctx).as_deref(),
+                &workspace,
+                &pane,
+            )
+            .map(|_| ())
+        }
         "overview" => open_pane(
             ctx,
             "overview",
@@ -236,9 +269,19 @@ fn hold_open() {
     let _ = ask("\nPress Enter to close", "");
 }
 
-/// A popup's body. Errors are printed and the popup is held open, so the user
-/// can read them before it closes.
+/// A static plugin pane's body. Modal panes show failures long enough to read;
+/// the contextual sidebar handles and displays its own interactive errors.
 pub fn run_pane(ctx: &Ctx, id: &str) -> Result<()> {
+    if id == "organization-sidebar" {
+        return match organization_sidebar::run(ctx) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                println!("\nerror: {error:#}");
+                hold_open();
+                Err(error)
+            }
+        };
+    }
     if id == "organizations" {
         return organizations_ui::run(ctx);
     }
@@ -361,6 +404,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plugin_manifest_keeps_the_global_picker_and_adds_a_contextual_sidebar_action() {
+        let manifest: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
+        let actions = manifest["actions"].as_array().unwrap();
+        let global = actions
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some("organizations"))
+            .unwrap();
+        let sidebar = actions
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some("organization-sidebar"))
+            .unwrap();
+        assert_eq!(
+            global["title"].as_str(),
+            Some("Herdr Organizations: organization tree")
+        );
+        assert_eq!(
+            sidebar["command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|argument| argument.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "target/release/herdr-organizations",
+                "action",
+                "organization-sidebar"
+            ]
+        );
+        assert!(manifest["events"].as_array().unwrap().iter().any(|event| {
+            event["command"].as_array().is_some_and(|command| {
+                command
+                    .iter()
+                    .any(|argument| argument.as_str() == Some("organization-sidebar-auto-open"))
+            })
+        }));
+    }
+
     fn plugin_env(world: &World, extra: &[(&str, &str)]) -> Env {
         let state = world.home.path().join("state");
         let socket = world.home.path().join("a.sock");
@@ -442,6 +523,22 @@ mod tests {
                 "organizations"
             ]
         );
+    }
+
+    #[test]
+    fn contextual_sidebar_action_refuses_to_open_from_a_non_project_workspace() {
+        let world = World::new();
+        let env = plugin_env(&world, &[]);
+        let ctx = Ctx {
+            env: &env,
+            ..world.ctx()
+        };
+
+        let error = run_action(&ctx, "organization-sidebar").unwrap_err();
+
+        assert!(error.to_string().contains("project workspace"));
+        assert_eq!(world.runner.count("pane split"), 0);
+        assert_eq!(world.runner.count("plugin pane open"), 0);
     }
 
     #[test]

@@ -73,7 +73,7 @@ The existing `thread start` command remains a worker-under-root alias. Use `node
 
 ## Browse and focus the tree
 
-Run **Herdr Organizations: organization tree** from Herdr's action menu. The popup first lists projects, then renders the selected project root and all descendants with role and state.
+Run **Herdr Organizations: organization tree** from Herdr's action menu to browse all projects. The popup first lists projects, then renders the selected project root and all descendants with role and state.
 
 - Up and Down or `k` and `j` move the selection.
 - Enter opens a project's tree. Inside the tree it focuses a live agent, opens an existing tab, or recreates an active node whose tab was closed. The popup closes after a successful open.
@@ -81,7 +81,14 @@ Run **Herdr Organizations: organization tree** from Herdr's action menu. The pop
 - `r` refreshes the current tree.
 - A mouse click selects a row. A double-click opens or focuses it when the Herdr client forwards terminal mouse events.
 
-Keyboard support is the baseline. The tree is rendered inside the popup process because Herdr's native sidebar is a flat agent list.
+Inside a project workspace, run **Herdr Organizations: toggle project hierarchy sidebar** to show a right split scoped to that project. It defaults to 30% width and does not steal focus on open.
+
+- Up and Down or `j` and `k` move through visible rows; Enter focuses or reopens a node while leaving the tree available.
+- Space folds or expands a coordinator. `s` opens the visible gear/settings surface.
+- `q` or Esc closes the split. Settings can move the dock, change width, control auto-open and focus behavior, include resolved nodes, hide status or role, and change strict toggle behavior.
+- The settings screen names `organizations` as the global picker and `organization-sidebar` as the contextual toggle. It recommends `Ctrl+B`, then `Shift+H`; Herdr keybindings remain user-managed.
+
+Sidebar settings are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default and checks project/workspace metadata before creating a split.
 
 ## Preserve existing projects
 

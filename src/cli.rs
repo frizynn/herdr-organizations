@@ -147,7 +147,7 @@ enum Command {
     /// Run by herdr's action menu
     #[command(hide = true)]
     Action { id: String },
-    /// Run inside a plugin popup pane
+    /// Run inside a plugin popup or split pane
     #[command(hide = true)]
     Pane { id: String },
     /// Safety settings

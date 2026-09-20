@@ -177,7 +177,14 @@ fn open_tree(project: Project) -> Result<TreeView> {
 /// history but disappear from the tree. A resolved ancestor stays visible
 /// while it still gives structure to an active descendant.
 fn operational_tree(project: &Project) -> Result<Vec<TreeEntry>> {
+    tree_entries(project, false)
+}
+
+pub(crate) fn tree_entries(project: &Project, show_resolved: bool) -> Result<Vec<TreeEntry>> {
     let all = organizations::tree(project)?;
+    if show_resolved {
+        return Ok(all);
+    }
     let parents: BTreeMap<_, _> = all
         .iter()
         .map(|entry| {
@@ -474,7 +481,7 @@ fn sanitize_terminal_text(value: &str) -> String {
     output
 }
 
-fn fit_terminal_row(value: &str, max_width: usize) -> String {
+pub(crate) fn fit_terminal_row(value: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
@@ -615,7 +622,7 @@ fn refresh(ctx: &Ctx, screen: &mut Screen, message: &mut String) {
     }
 }
 
-fn focus_node(ctx: &Ctx, project: &Project, node: Option<&Thread>) -> Result<String> {
+pub(crate) fn focus_node(ctx: &Ctx, project: &Project, node: Option<&Thread>) -> Result<String> {
     let recorded_socket = project.coordinator().and_then(|record| {
         (!record.socket.is_empty()).then(|| std::path::PathBuf::from(record.socket))
     });

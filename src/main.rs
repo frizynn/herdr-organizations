@@ -7,6 +7,7 @@ mod doctor;
 mod herdr;
 mod inbox;
 mod lifecycle;
+mod organization_sidebar;
 mod organizations;
 mod organizations_ui;
 mod overview;

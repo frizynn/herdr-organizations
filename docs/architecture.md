@@ -52,9 +52,11 @@ These flags are adapters for current CLI interfaces, not a promise that all agen
 
 ## Organization picker
 
-Herdr 0.9.1 plugin panes are static commands. Its native agent sidebar is a flat agent list, so the recursive tree runs in the `organizations` popup process. Crossterm reads keyboard and terminal mouse events. Keyboard navigation is the supported baseline. Mouse selection is handled when the host forwards mouse events. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone. A successful activation exits the popup process. It does not set a global sidebar filter.
+The `organizations` action remains the global project picker popup. The distinct `organization-sidebar` action resolves its project from the current Herdr workspace and opens a recursive tree in a split pane. Its compact terminal UI supports keyboard navigation, coordinator disclosure, status colors and an in-pane settings screen. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone.
 
-The popup starts with a project picker, then shows the virtual root and descendants in tree order with title, state, role and id. Parentage is expressed by tree indentation rather than repeated metadata. Resolved leaves stay in durable history but are hidden from the operational tree. The pure tree layout and selection helpers are unit-testable without a terminal. Actual terminal rendering and mouse forwarding remain client-side checks.
+The popup starts with a project picker, then shows the virtual root and descendants in tree order with title, state, role and id. The split sidebar stays within one project, leads rows with titles and can hide role/status or include resolved nodes. Resolved leaves stay in durable history but are hidden by default. Its settings are stored under the Herdr-provided plugin config directory. A plugin-owned metadata token plus project and workspace tokens identify the split; the toggle only focuses or closes panes matching all three values in that workspace. The sidebar heartbeats the tokens while open. The settings screen shows action ids and a shortcut recommendation without writing Herdr's global keybindings.
+
+The pure tree layout, collapse, settings and selection helpers are unit-testable without a terminal. Actual split geometry, terminal colors and key forwarding remain client-side checks.
 
 ## Compatibility and intentional limits
 
