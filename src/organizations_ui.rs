@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
@@ -37,7 +37,8 @@ impl TerminalGuard {
         execute!(
             io::stdout(),
             EnterAlternateScreen,
-            event::EnableMouseCapture
+            event::EnableMouseCapture,
+            Hide
         )
         .context("could not enter Organizations view")?;
         Ok(guard)
@@ -49,6 +50,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             event::DisableMouseCapture,
+            Show,
             LeaveAlternateScreen,
             SetAttribute(Attribute::Reset)
         );
@@ -278,6 +280,7 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
     execute!(
         writer,
         BeginSynchronizedUpdate,
+        Hide,
         MoveTo(0, 0),
         Clear(ClearType::All)
     )?;
@@ -859,6 +862,7 @@ mod tests {
         let mut output = Vec::new();
         render(&mut output, &screen, "").unwrap();
         let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("\x1b[?25l"));
         assert!(rendered.contains("Project coordinator  [active]"));
         assert!(rendered.contains("└─ Area lead  [Starting]  coordinator  t-0001"));
         assert!(rendered.contains("   └─ Builder  [Starting]  worker  t-0002"));
