@@ -88,6 +88,24 @@ Inside a project workspace, run **Herdr Organizations: toggle project hierarchy 
 - `q` or Esc closes the split. Settings can move the dock, change width, control auto-open and focus behavior, include resolved nodes, hide status or role, and change strict toggle behavior.
 - Herdr keybindings remain user-managed. The settings screen only controls the contextual sidebar and keeps command ids out of the normal navigation flow.
 
+To bind the global picker and project hierarchy without starting a shell subprocess, add this to `~/.config/herdr/config.toml`, then run `herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+shift+o"
+type = "plugin_action"
+command = "herdr-projects.organizations"
+description = "Open Herdr Organizations project picker"
+
+[[keys.command]]
+key = "prefix+shift+y"
+type = "plugin_action"
+command = "herdr-projects.organization-sidebar"
+description = "Toggle Herdr Organizations hierarchy sidebar"
+```
+
+With Herdr's default prefix, press `Ctrl+B`, release it, then press `Shift+O` or `Shift+Y`. `Shift+H` is intentionally avoided because Herdr already uses `prefix+shift+h` to swap the active pane left.
+
 Sidebar settings are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default and checks project/workspace metadata before creating a split.
 
 ## Preserve existing projects

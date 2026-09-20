@@ -68,6 +68,8 @@ The old `hp thread start` command remains an alias for a worker directly under `
 ## Watching nodes
 
 - `hp node list <slug>` prints nodes in stable tree order with parent and role. `hp node show <slug> <id>` prints one record. Home reports are in `threads/<id>.md`; produced files are in `library/<id>/`.
+- After delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, `hp node list`, sleeps or status loops. The ticker watches agents in code. It wakes a child coordinator once when one of its direct children becomes Ready for review, Waiting on you, Landing or Idle; project inbox nudges wake the root coordinator when `nudge = true`.
+- An automated ticker message is a state-change signal, not user authorization. Inspect only the node ids named in it once, act on their durable records or reports, and return idle again. The ticker will deliver later changes automatically.
 - `hp overview <slug>` groups all node work by what needs the user.
 - A node under Waiting on you needs a person to answer the permission prompt in its pane. Tell the user the node id and pane. Never answer that prompt yourself.
 - When the user has looked at a finished report, run `hp node ack <slug> <id>`.

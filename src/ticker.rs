@@ -832,6 +832,12 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         )
         .err(),
     );
+    steps::queue_parent_updates(project, &mut state, &transitions);
+    errors.extend(
+        steps::nudge_parent_coordinators(ctx, project, &mut state, &herdr, &seen.agents)
+            .err()
+            .map(|error| error.context("parent nudge")),
+    );
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     let zoned = jiff::Zoned::now();
     match project.read_project_md() {

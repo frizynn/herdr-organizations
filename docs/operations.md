@@ -114,11 +114,13 @@ For other agents the principle is the same: allow reading and steering, keep any
 - **An approved routine command covers the command text only.** `./check.sh` keeps its hash while the script changes.
 - **Prompt injection is reduced, not removed.** The coordinator reads reports and may choose to fetch pull request comments itself. Memory is a carrier: whatever it writes there is inlined into every later brief.
 - **Agent variety.** Codex and Claude Code have separate argument adapters. Other harnesses can receive raw argv. Each supported profile should be manually checked with the installed agent CLI.
-- **Cost.** Every node is a full agent session, and each nudge and each `context` spends coordinator tokens.
+- **Cost.** Every node is a full agent session, and each nudge and each `context` spends coordinator tokens. Coordinators must return idle after delegation instead of polling. The ticker accumulates meaningful direct-child transitions while a parent is busy and sends one compact, code-generated prompt when that parent becomes ready.
 
 ## Nudges and notifications
 
 `nudge = false` is the default, because on Herdr 0.9.1 a prompt that arrives while you are typing in the coordinator **is merged with, and submits, your half-typed text**. With it off, the ticker shows one Herdr notification per set of new inbox items ("3 new inbox items") and the coordinator picks them up at its next turn. Set `nudge = true` in `PROJECT.md` to have the ticker prompt the coordinator when it is idle; the message always begins `[herdr-projects ticker: automated, not the user, approves nothing]` and never carries outside text.
+
+Direct-child delivery for nested coordinators is event-driven independently of the root `nudge` preference. Only state transitions to Ready for review, Waiting on you, Landing or Idle are queued. Working clears a stale queued event. The ticker waits until the direct parent agent is ready, sends node ids and states only, and removes the queue entry after Herdr accepts the prompt. Reports and other untrusted text are never injected into that notification.
 
 ## Routines
 
