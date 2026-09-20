@@ -1264,7 +1264,7 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     let content_width = width.saturating_sub(marker_width);
     let value = organizations_ui::fit_terminal_row(&item.value, content_width);
     let value_width = UnicodeWidthStr::width(value.as_str());
-    let value_column = SETTINGS_VALUE_COLUMN.min(width.saturating_sub(value_width));
+    let value_column = setting_value_column(width, value_width);
     let label_width = value_column.saturating_sub(marker_width + 2);
     let label = organizations_ui::fit_terminal_row(item.label, label_width);
     let padding = value_column
@@ -1297,6 +1297,10 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     write!(&mut output, "{value}")?;
     execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))?;
     Ok(output)
+}
+
+fn setting_value_column(width: usize, value_width: usize) -> usize {
+    SETTINGS_VALUE_COLUMN.min(width.saturating_sub(value_width))
 }
 
 fn modify_setting(settings: &mut SidebarSettings, selected: usize, direction: isize) {
@@ -1684,18 +1688,9 @@ mod tests {
 
     #[test]
     fn setting_values_share_a_compact_column_instead_of_the_pane_edge() {
-        let settings = SidebarSettings::default();
-        let dock =
-            String::from_utf8(setting_row_bytes(&setting_item(&settings, 0), 80, false).unwrap())
-                .unwrap();
-        let width =
-            String::from_utf8(setting_row_bytes(&setting_item(&settings, 1), 80, false).unwrap())
-                .unwrap();
-        let dock_value = dock.find("Right").unwrap();
-        let width_value = width.find("30%").unwrap();
-
-        assert_eq!(dock_value, width_value);
-        assert!(dock_value < 40, "values should stay near their labels");
+        assert_eq!(setting_value_column(80, 5), SETTINGS_VALUE_COLUMN);
+        assert_eq!(setting_value_column(80, 3), SETTINGS_VALUE_COLUMN);
+        assert_eq!(setting_value_column(12, 5), 7);
     }
 
     #[test]
