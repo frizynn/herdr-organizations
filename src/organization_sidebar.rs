@@ -48,6 +48,7 @@ const LOCK_ATTEMPTS: usize = 40;
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const MAX_RENDERED_NODES: usize = 1_000;
 const SETTINGS_COUNT: usize = 8;
+const SETTINGS_VALUE_COLUMN: usize = 24;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -958,12 +959,10 @@ fn build_frame(
             }
         }
         Screen::Settings { selected } => {
-            set_accent_row(&mut frame, 0, "Organization", width);
-            set_plain_row(&mut frame, 1, "Sidebar settings", width);
-            set_muted_row(&mut frame, 2, "Changes save automatically", width);
+            set_accent_row(&mut frame, 0, "Settings", width);
 
-            let mut row = 4;
-            for (section, range) in [("LAYOUT", 0..2), ("BEHAVIOR", 2..5), ("TREE", 5..8)] {
+            let mut row = 2;
+            for (section, range) in [("Layout", 0..2), ("Behavior", 2..5), ("Tree", 5..8)] {
                 set_section_row(&mut frame, row, section, width);
                 row += 1;
                 for index in range {
@@ -1022,7 +1021,7 @@ fn set_section_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize)
     set_styled_row(
         frame,
         row,
-        simple_styled_row(value, width, Color::DarkGrey, Attribute::Bold),
+        simple_styled_row(value, width, Color::Grey, Attribute::Bold),
     );
 }
 
@@ -1030,7 +1029,7 @@ fn set_muted_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
     set_styled_row(
         frame,
         row,
-        simple_styled_row(value, width, Color::DarkGrey, Attribute::Dim),
+        simple_styled_row(value, width, Color::DarkGrey, Attribute::NormalIntensity),
     );
 }
 
@@ -1249,10 +1248,10 @@ fn setting_item(settings: &SidebarSettings, index: usize) -> SettingItem {
             value: format!("{}%", settings.width_percent),
             enabled: None,
         },
-        2 => toggle("Focus when opened", settings.focus_on_open),
+        2 => toggle("Focus on open", settings.focus_on_open),
         3 => toggle("Open with project", settings.auto_open),
-        4 => toggle("Shortcut always closes", settings.strict_toggle),
-        5 => toggle("Show resolved", settings.show_resolved),
+        4 => toggle("Close on shortcut", settings.strict_toggle),
+        5 => toggle("Resolved nodes", settings.show_resolved),
         6 => toggle("Status", settings.show_status),
         7 => toggle("Roles", settings.show_role),
         _ => unreachable!("setting index is bounded by SETTINGS_COUNT"),
@@ -1265,11 +1264,11 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     let content_width = width.saturating_sub(marker_width);
     let value = organizations_ui::fit_terminal_row(&item.value, content_width);
     let value_width = UnicodeWidthStr::width(value.as_str());
-    let gap = usize::from(content_width > value_width);
-    let label_width = content_width.saturating_sub(value_width + gap);
+    let value_column = SETTINGS_VALUE_COLUMN.min(width.saturating_sub(value_width));
+    let label_width = value_column.saturating_sub(marker_width + 2);
     let label = organizations_ui::fit_terminal_row(item.label, label_width);
-    let padding = content_width
-        .saturating_sub(UnicodeWidthStr::width(label.as_str()) + value_width)
+    let padding = value_column
+        .saturating_sub(marker_width + UnicodeWidthStr::width(label.as_str()))
         .min(content_width);
 
     if selected {
@@ -1290,7 +1289,7 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     write!(&mut output, "{}", " ".repeat(padding))?;
     let value_color = match item.enabled {
         Some(true) => Color::Green,
-        Some(false) => Color::DarkGrey,
+        Some(false) => Color::Grey,
         None if selected => Color::Blue,
         None => Color::Grey,
     };
@@ -1672,13 +1671,31 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("LAYOUT"));
-        assert!(output.contains("BEHAVIOR"));
-        assert!(output.contains("TREE"));
-        assert!(output.contains("Changes save automatically"));
+        assert!(output.contains("Settings"));
+        assert!(output.contains("Layout"));
+        assert!(output.contains("Behavior"));
+        assert!(output.contains("Tree"));
         assert!(output.contains("› Dock"));
+        assert!(!output.contains("Sidebar settings"));
+        assert!(!output.contains("Changes save automatically"));
         assert!(!output.contains("organization-sidebar"));
         assert!(!output.contains("Strict toggle"));
+    }
+
+    #[test]
+    fn setting_values_share_a_compact_column_instead_of_the_pane_edge() {
+        let settings = SidebarSettings::default();
+        let dock =
+            String::from_utf8(setting_row_bytes(&setting_item(&settings, 0), 80, false).unwrap())
+                .unwrap();
+        let width =
+            String::from_utf8(setting_row_bytes(&setting_item(&settings, 1), 80, false).unwrap())
+                .unwrap();
+        let dock_value = dock.find("Right").unwrap();
+        let width_value = width.find("30%").unwrap();
+
+        assert_eq!(dock_value, width_value);
+        assert!(dock_value < 40, "values should stay near their labels");
     }
 
     #[test]
