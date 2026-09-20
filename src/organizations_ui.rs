@@ -9,8 +9,11 @@ use anyhow::{Context, Result, bail};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::execute;
-use crossterm::style::{Attribute, SetAttribute};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{
+    self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use unicode_width::UnicodeWidthChar;
 
 use crate::herdr::Herdr;
@@ -91,15 +94,20 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     };
     let mut message = String::new();
     let mut last_click: Option<(usize, Instant)> = None;
+    let mut dirty = true;
 
     loop {
-        render(&mut io::stdout(), &screen, &message)?;
+        if dirty {
+            render(&mut io::stdout(), &screen, &message)?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
         let event = event::read()?;
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                dirty = true;
                 last_click = None;
                 message.clear();
                 match key.code {
@@ -124,6 +132,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 }
             }
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                dirty = true;
                 let now = Instant::now();
                 let height = terminal::size()?.1 as usize;
                 if let Some(index) = mouse_selection(&screen, mouse.row as usize, height) {
@@ -141,6 +150,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     }
                 }
             }
+            Event::Resize(_, _) => dirty = true,
             _ => {}
         }
     }
@@ -265,11 +275,16 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
         .unwrap_or(24);
     let width = terminal_width();
     let visible_rows = visible_row_capacity(height, 2);
-    execute!(writer, MoveTo(0, 0), Clear(ClearType::All))?;
+    execute!(
+        writer,
+        BeginSynchronizedUpdate,
+        MoveTo(0, 0),
+        Clear(ClearType::All)
+    )?;
     match screen {
         Screen::Projects { choices, selected } => {
-            write_display_line(writer, "Herdr Organizations", width)?;
-            write_display_line(writer, "↑/k ↓/j move   Enter browse   Esc/q close", width)?;
+            write_heading_line(writer, "Organizations", width)?;
+            write_muted_line(writer, "Choose a project   Enter Browse   q Close", width)?;
             if choices.is_empty() {
                 write_display_line(writer, "No organizations yet.", width)?;
             } else {
@@ -291,14 +306,10 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
                 .read_project_md()
                 .map(|(settings, _)| project::display_name(&settings.name, &view.project.slug))
                 .unwrap_or_else(|_| project::humanize(&view.project.slug));
-            write_display_line(
+            write_heading_line(writer, &label, width)?;
+            write_muted_line(
                 writer,
-                &format!("Herdr Organizations / {label} ({})", view.project.slug),
-                width,
-            )?;
-            write_display_line(
-                writer,
-                "↑/k ↓/j move   Enter open   r refresh   Esc/q projects",
+                "Organization   Enter Open   r Refresh   Esc Projects",
                 width,
             )?;
             let rows =
@@ -316,6 +327,12 @@ fn render(writer: &mut impl Write, screen: &Screen, message: &str) -> Result<()>
         )?;
         write!(writer, "{}", fit_terminal_row(message, width))?;
     }
+    execute!(
+        writer,
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+        EndSynchronizedUpdate
+    )?;
     writer.flush()?;
     Ok(())
 }
@@ -332,18 +349,52 @@ fn write_display_line(writer: &mut impl Write, value: &str, width: usize) -> Res
     Ok(())
 }
 
+fn write_heading_line(writer: &mut impl Write, value: &str, width: usize) -> Result<()> {
+    execute!(
+        writer,
+        SetForegroundColor(Color::Blue),
+        SetAttribute(Attribute::Bold)
+    )?;
+    write_display_line(writer, value, width)?;
+    execute!(writer, ResetColor, SetAttribute(Attribute::Reset))?;
+    Ok(())
+}
+
+fn write_muted_line(writer: &mut impl Write, value: &str, width: usize) -> Result<()> {
+    execute!(
+        writer,
+        SetForegroundColor(Color::DarkGrey),
+        SetAttribute(Attribute::Dim)
+    )?;
+    write_display_line(writer, value, width)?;
+    execute!(writer, ResetColor, SetAttribute(Attribute::Reset))?;
+    Ok(())
+}
+
 fn write_selectable_line(
     writer: &mut impl Write,
     value: &str,
     width: usize,
     selected: bool,
 ) -> Result<()> {
+    let marker_width = width.min(2);
     if selected {
-        execute!(writer, SetAttribute(Attribute::Reverse))?;
+        execute!(
+            writer,
+            SetForegroundColor(Color::Blue),
+            SetAttribute(Attribute::Bold)
+        )?;
+        write!(writer, "{}", fit_terminal_row("› ", marker_width))?;
+    } else {
+        write!(writer, "{}", " ".repeat(marker_width))?;
     }
-    write!(writer, "{}", fit_terminal_row(value, width))?;
+    write!(
+        writer,
+        "{}",
+        fit_terminal_row(value, width.saturating_sub(marker_width))
+    )?;
     if selected {
-        execute!(writer, SetAttribute(Attribute::Reset))?;
+        execute!(writer, ResetColor, SetAttribute(Attribute::Reset))?;
     }
     write!(writer, "\r\n")?;
     Ok(())
@@ -851,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_rows_return_to_column_zero_and_reset_selection_before_newline() {
+    fn rendered_rows_use_a_quiet_marker_and_reset_before_newline() {
         let mut output = Vec::new();
 
         write_display_line(&mut output, "header", 80).unwrap();
@@ -859,7 +910,9 @@ mod tests {
 
         let rendered = String::from_utf8(output).unwrap();
         assert!(rendered.starts_with("header\r\n"));
-        assert!(rendered.ends_with("selected\x1b[0m\r\n"));
+        assert!(rendered.contains("› selected"));
+        assert!(rendered.ends_with("\x1b[0m\x1b[0m\r\n"));
+        assert!(!rendered.contains("\x1b[7m"));
         assert!(
             rendered
                 .as_bytes()

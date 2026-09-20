@@ -86,7 +86,7 @@ Inside a project workspace, run **Herdr Organizations: toggle project hierarchy 
 - Up and Down or `j` and `k` move through visible rows; Enter focuses or reopens a node while leaving the tree available.
 - Space folds or expands a coordinator. `s` opens the visible gear/settings surface.
 - `q` or Esc closes the split. Settings can move the dock, change width, control auto-open and focus behavior, include resolved nodes, hide status or role, and change strict toggle behavior.
-- The settings screen names `organizations` as the global picker and `organization-sidebar` as the contextual toggle. It recommends `Ctrl+B`, then `Shift+H`; Herdr keybindings remain user-managed.
+- Herdr keybindings remain user-managed. The settings screen only controls the contextual sidebar and keeps command ids out of the normal navigation flow.
 
 Sidebar settings are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default and checks project/workspace metadata before creating a split.
 

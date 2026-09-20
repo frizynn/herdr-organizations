@@ -18,6 +18,7 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 use crate::herdr::{Herdr, Pane};
 use crate::organizations::{self, TreeEntry};
@@ -261,7 +262,7 @@ fn operate_with_settings(
         let _ = herdr.pane_close(&created.pane_id);
         return Err(anyhow::anyhow!("{error}"));
     }
-    let _ = herdr.pane_rename(&created.pane_id, "Org Hierarchy");
+    let _ = herdr.pane_rename(&created.pane_id, "Organization");
     let command = launch_argv(ctx, &created.pane_id, slug, workspace, &config_dir, socket)?;
     if let Err(error) = herdr.pane_run(&created.pane_id, &command) {
         let _ = herdr.pane_close(&created.pane_id);
@@ -634,7 +635,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             (Screen::Settings { selected }, KeyCode::Left) => {
                 modify_setting(&mut settings, *selected, -1);
                 save_settings(ctx, &settings)?;
-                if *selected == 4 {
+                if *selected == 5 {
                     view = load_view(ctx, slug, settings.show_resolved)?;
                 }
             }
@@ -645,7 +646,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 let direction = if key.code == KeyCode::Right { 1 } else { 0 };
                 modify_setting(&mut settings, *selected, direction);
                 save_settings(ctx, &settings)?;
-                if *selected == 4 {
+                if *selected == 5 {
                     view = load_view(ctx, slug, settings.show_resolved)?;
                 }
             }
@@ -897,14 +898,18 @@ fn build_frame(
             root_collapsed,
             selected,
         } => {
-            set_plain_row(
+            set_accent_row(&mut frame, 0, &project_label(&view.project), width);
+            let rows = visible_rows(view, collapsed, *root_collapsed);
+            let node_count = rows.len();
+            set_muted_row(
                 &mut frame,
-                0,
-                &format!("{}  ⚙ Settings [s]", project_label(&view.project)),
+                1,
+                &format!(
+                    "Organization  ·  {node_count} {}",
+                    if node_count == 1 { "node" } else { "nodes" }
+                ),
                 width,
             );
-            set_plain_row(&mut frame, 1, "Organization", width);
-            let rows = visible_rows(view, collapsed, *root_collapsed);
             let body_capacity = height.saturating_sub(5).max(1);
             let range = visible_range(rows.len(), *selected, body_capacity);
             let row_context = TreeRowContext {
@@ -939,13 +944,13 @@ fn build_frame(
                 set_plain_row(
                     &mut frame,
                     height.saturating_sub(3),
-                    "↑/↓ or j/k move · Enter focus · Space fold",
+                    "↑↓ Navigate   Enter Focus   Space Fold",
                     width,
                 );
-                set_plain_row(
+                set_muted_row(
                     &mut frame,
                     height.saturating_sub(1),
-                    "s settings · q/Esc close",
+                    "s Settings   q Close",
                     width,
                 );
             } else {
@@ -953,57 +958,36 @@ fn build_frame(
             }
         }
         Screen::Settings { selected } => {
-            set_plain_row(&mut frame, 0, "⚙ Organization sidebar settings", width);
-            set_plain_row(
-                &mut frame,
-                1,
-                "Select an option; ←/→ or Space changes it",
-                width,
-            );
-            for (index, label) in setting_labels(settings).iter().enumerate() {
-                set_styled_row(
-                    &mut frame,
-                    index + 2,
-                    selectable_row_bytes(label, width, index == *selected)?,
-                );
+            set_accent_row(&mut frame, 0, "Organization", width);
+            set_plain_row(&mut frame, 1, "Sidebar settings", width);
+            set_muted_row(&mut frame, 2, "Changes save automatically", width);
+
+            let mut row = 4;
+            for (section, range) in [("LAYOUT", 0..2), ("BEHAVIOR", 2..5), ("TREE", 5..8)] {
+                set_section_row(&mut frame, row, section, width);
+                row += 1;
+                for index in range {
+                    let item = setting_item(settings, index);
+                    set_styled_row(
+                        &mut frame,
+                        row,
+                        setting_row_bytes(&item, width, index == *selected)?,
+                    );
+                    row += 1;
+                }
+                row += 1;
             }
-            let shortcuts_row = 2 + SETTINGS_COUNT;
-            set_plain_row(&mut frame, shortcuts_row, "Keyboard shortcuts", width);
-            set_plain_row(
-                &mut frame,
-                shortcuts_row + 1,
-                "Global picker: organizations (Ctrl+B, Shift+O)",
-                width,
-            );
-            set_plain_row(
-                &mut frame,
-                shortcuts_row + 2,
-                "Project tree: organization-sidebar",
-                width,
-            );
-            set_plain_row(
-                &mut frame,
-                shortcuts_row + 3,
-                "Suggested: Ctrl+B, Shift+H",
-                width,
-            );
-            set_plain_row(
-                &mut frame,
-                shortcuts_row + 4,
-                "Bind in Herdr; dock/width apply after reopening",
-                width,
-            );
             if message.is_empty() {
-                set_plain_row(
+                set_muted_row(
                     &mut frame,
                     height.saturating_sub(3),
-                    "↑/↓ move · ←/→ change · Space toggle",
+                    "↑↓ Navigate   ←→ Change",
                     width,
                 );
-                set_plain_row(
+                set_muted_row(
                     &mut frame,
                     height.saturating_sub(1),
-                    "Esc back · q close",
+                    "Esc Back   q Close",
                     width,
                 );
             } else {
@@ -1026,6 +1010,49 @@ fn set_styled_row(frame: &mut [Vec<u8>], row: usize, value: Vec<u8>) {
     }
 }
 
+fn set_accent_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
+    set_styled_row(
+        frame,
+        row,
+        simple_styled_row(value, width, Color::Blue, Attribute::Bold),
+    );
+}
+
+fn set_section_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
+    set_styled_row(
+        frame,
+        row,
+        simple_styled_row(value, width, Color::DarkGrey, Attribute::Bold),
+    );
+}
+
+fn set_muted_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
+    set_styled_row(
+        frame,
+        row,
+        simple_styled_row(value, width, Color::DarkGrey, Attribute::Dim),
+    );
+}
+
+fn simple_styled_row(value: &str, width: usize, color: Color, attribute: Attribute) -> Vec<u8> {
+    let mut output = Vec::new();
+    execute!(
+        &mut output,
+        SetForegroundColor(color),
+        SetAttribute(attribute)
+    )
+    .expect("writing to a byte buffer cannot fail");
+    write!(
+        &mut output,
+        "{}",
+        organizations_ui::fit_terminal_row(value, width)
+    )
+    .expect("writing to a byte buffer cannot fail");
+    execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))
+        .expect("writing to a byte buffer cannot fail");
+    output
+}
+
 fn tree_row_bytes(
     row: &VisibleRow<'_>,
     selected: bool,
@@ -1033,13 +1060,6 @@ fn tree_row_bytes(
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     write_tree_row(&mut output, row, selected, context)?;
-    output.truncate(output.len().saturating_sub(2));
-    Ok(output)
-}
-
-fn selectable_row_bytes(value: &str, width: usize, selected: bool) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    write_selectable_line(&mut output, value, width, selected)?;
     output.truncate(output.len().saturating_sub(2));
     Ok(output)
 }
@@ -1065,10 +1085,23 @@ fn write_tree_row(
         context.collapsed,
         context.root_collapsed,
     );
+    let marker_width = context.width.min(2);
     if selected {
-        execute!(writer, SetAttribute(Attribute::Reverse))?;
+        execute!(
+            writer,
+            SetForegroundColor(Color::Blue),
+            SetAttribute(Attribute::Bold)
+        )?;
+        write!(
+            writer,
+            "{}",
+            organizations_ui::fit_terminal_row("› ", marker_width)
+        )?;
+    } else {
+        write!(writer, "{}", " ".repeat(marker_width))?;
     }
-    let text = organizations_ui::fit_terminal_row(&text, context.width);
+    let text =
+        organizations_ui::fit_terminal_row(&text, context.width.saturating_sub(marker_width));
     if context.settings.show_status
         && let Some(status_start) = text.rfind("  ● ")
     {
@@ -1084,6 +1117,7 @@ fn write_tree_row(
             .flatten()
             .filter(|start| *start >= status_start);
         write!(writer, "{}", &text[..status_start])?;
+        execute!(writer, SetAttribute(Attribute::Reset))?;
         if let Some(color) = color {
             execute!(writer, SetForegroundColor(color))?;
         }
@@ -1192,24 +1226,78 @@ fn row_text_with_color(
     }
 }
 
-fn setting_labels(settings: &SidebarSettings) -> Vec<String> {
-    vec![
-        format!("Dock side: {}", settings.dock_side.label()),
-        format!("Width: {}%", settings.width_percent),
-        format!("Focus on open: {}", on_off(settings.focus_on_open)),
-        format!(
-            "Auto-open in project workspaces: {}",
-            on_off(settings.auto_open)
-        ),
-        format!("Show resolved nodes: {}", on_off(settings.show_resolved)),
-        format!("Show status: {}", on_off(settings.show_status)),
-        format!("Show role: {}", on_off(settings.show_role)),
-        format!("Strict toggle: {}", on_off(settings.strict_toggle)),
-    ]
+struct SettingItem {
+    label: &'static str,
+    value: String,
+    enabled: Option<bool>,
 }
 
-fn on_off(value: bool) -> &'static str {
-    if value { "On" } else { "Off" }
+fn setting_item(settings: &SidebarSettings, index: usize) -> SettingItem {
+    let toggle = |label, value| SettingItem {
+        label,
+        value: if value { "● On" } else { "○ Off" }.into(),
+        enabled: Some(value),
+    };
+    match index {
+        0 => SettingItem {
+            label: "Dock",
+            value: settings.dock_side.label().into(),
+            enabled: None,
+        },
+        1 => SettingItem {
+            label: "Width",
+            value: format!("{}%", settings.width_percent),
+            enabled: None,
+        },
+        2 => toggle("Focus when opened", settings.focus_on_open),
+        3 => toggle("Open with project", settings.auto_open),
+        4 => toggle("Shortcut always closes", settings.strict_toggle),
+        5 => toggle("Show resolved", settings.show_resolved),
+        6 => toggle("Status", settings.show_status),
+        7 => toggle("Roles", settings.show_role),
+        _ => unreachable!("setting index is bounded by SETTINGS_COUNT"),
+    }
+}
+
+fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let marker_width = width.min(2);
+    let content_width = width.saturating_sub(marker_width);
+    let value = organizations_ui::fit_terminal_row(&item.value, content_width);
+    let value_width = UnicodeWidthStr::width(value.as_str());
+    let gap = usize::from(content_width > value_width);
+    let label_width = content_width.saturating_sub(value_width + gap);
+    let label = organizations_ui::fit_terminal_row(item.label, label_width);
+    let padding = content_width
+        .saturating_sub(UnicodeWidthStr::width(label.as_str()) + value_width)
+        .min(content_width);
+
+    if selected {
+        execute!(
+            &mut output,
+            SetForegroundColor(Color::Blue),
+            SetAttribute(Attribute::Bold)
+        )?;
+        write!(
+            &mut output,
+            "{}{label}",
+            organizations_ui::fit_terminal_row("› ", marker_width)
+        )?;
+    } else {
+        write!(&mut output, "{}{label}", " ".repeat(marker_width))?;
+    }
+    execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))?;
+    write!(&mut output, "{}", " ".repeat(padding))?;
+    let value_color = match item.enabled {
+        Some(true) => Color::Green,
+        Some(false) => Color::DarkGrey,
+        None if selected => Color::Blue,
+        None => Color::Grey,
+    };
+    execute!(&mut output, SetForegroundColor(value_color))?;
+    write!(&mut output, "{value}")?;
+    execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))?;
+    Ok(output)
 }
 
 fn modify_setting(settings: &mut SidebarSettings, selected: usize, direction: isize) {
@@ -1241,33 +1329,12 @@ fn modify_setting(settings: &mut SidebarSettings, selected: usize, direction: is
         }
         2 => set_bool(&mut settings.focus_on_open),
         3 => set_bool(&mut settings.auto_open),
-        4 => set_bool(&mut settings.show_resolved),
-        5 => set_bool(&mut settings.show_status),
-        6 => set_bool(&mut settings.show_role),
-        7 => set_bool(&mut settings.strict_toggle),
+        4 => set_bool(&mut settings.strict_toggle),
+        5 => set_bool(&mut settings.show_resolved),
+        6 => set_bool(&mut settings.show_status),
+        7 => set_bool(&mut settings.show_role),
         _ => {}
     }
-}
-
-fn write_selectable_line(
-    writer: &mut impl Write,
-    value: &str,
-    width: usize,
-    selected: bool,
-) -> Result<()> {
-    if selected {
-        execute!(writer, SetAttribute(Attribute::Reverse))?;
-    }
-    write!(
-        writer,
-        "{}",
-        organizations_ui::fit_terminal_row(value, width)
-    )?;
-    if selected {
-        execute!(writer, SetAttribute(Attribute::Reset))?;
-    }
-    write!(writer, "\r\n")?;
-    Ok(())
 }
 
 fn visible_range(count: usize, selected: usize, capacity: usize) -> Range<usize> {
@@ -1536,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_tree_rows_reset_style_before_crlf_and_color_only_metadata() {
+    fn selected_tree_rows_use_a_quiet_marker_and_reset_style_before_crlf() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let entries = organizations::tree_from(&[thread_model::Thread {
@@ -1571,9 +1638,14 @@ mod tests {
         let blue_sequence = String::from_utf8(blue_sequence).unwrap();
         let title = rendered.find("Review the release").unwrap();
         let blue = rendered.find(&blue_sequence).unwrap();
+        assert!(blue < title, "the selection marker should lead the title");
+        assert!(rendered.contains("› "));
+        let mut reverse_sequence = Vec::new();
+        execute!(&mut reverse_sequence, SetAttribute(Attribute::Reverse)).unwrap();
         assert!(
-            title < blue,
-            "the title should keep the terminal foreground"
+            !output
+                .windows(reverse_sequence.len())
+                .any(|window| window == reverse_sequence)
         );
         let mut reset_suffix = Vec::new();
         execute!(
@@ -1587,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_show_both_action_names_and_a_non_mutating_shortcut_recommendation() {
+    fn settings_are_grouped_and_hide_implementation_details() {
         let settings = SidebarSettings::default();
         let mut output = Vec::new();
         render(
@@ -1600,9 +1672,13 @@ mod tests {
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("organizations"));
-        assert!(output.contains("organization-sidebar"));
-        assert!(output.contains("Ctrl+B, Shift+H"));
+        assert!(output.contains("LAYOUT"));
+        assert!(output.contains("BEHAVIOR"));
+        assert!(output.contains("TREE"));
+        assert!(output.contains("Changes save automatically"));
+        assert!(output.contains("› Dock"));
+        assert!(!output.contains("organization-sidebar"));
+        assert!(!output.contains("Strict toggle"));
     }
 
     #[test]
@@ -1634,7 +1710,7 @@ mod tests {
         let mut settings = SidebarSettings::default();
         modify_setting(&mut settings, 1, 1);
         modify_setting(&mut settings, 2, 0);
-        modify_setting(&mut settings, 4, 0);
+        modify_setting(&mut settings, 5, 0);
         assert_eq!(settings.width_percent, 35);
         assert!(settings.focus_on_open);
         assert!(settings.show_resolved);
