@@ -1,6 +1,7 @@
 //! `open` and `context`: the coordinator's pane and the digest it reads.
 
 use std::fmt::Write as _;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -83,16 +84,33 @@ pub struct OpenOptions {
 }
 
 pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    open_with_output(ctx, slug, options, &mut stdout.lock(), &mut stderr.lock())
+}
+
+pub(crate) fn open_quiet(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
+    open_with_output(ctx, slug, options, &mut io::sink(), &mut io::sink())
+}
+
+fn open_with_output(
+    ctx: &Ctx,
+    slug: &str,
+    options: &OpenOptions,
+    out: &mut dyn io::Write,
+    err: &mut dyn io::Write,
+) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     if project.status() == Status::Archived {
         bail!("`{slug}` is archived; run `unarchive {slug}` first");
     }
     let (settings, body) = project.read_project_md()?;
     if body.chars().count() > crate::project::BODY_WARN_CHARS {
-        eprintln!(
+        writeln!(
+            err,
             "warning: the instructions in PROJECT.md are over {} characters",
             crate::project::BODY_WARN_CHARS
-        );
+        )?;
     }
     let safety = project.safety(&ctx.config_dir)?;
     let session = paths::resolve_session(&options.session, ctx.env, ctx.runner)?;
@@ -116,7 +134,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
                 record.socket
             );
         }
-        println!("rebinding `{slug}` from {} to {socket}", record.socket);
+        writeln!(out, "rebinding `{slug}` from {} to {socket}", record.socket)?;
         previous = None;
     }
 
@@ -132,15 +150,15 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     if let Some(record) = &previous
         && let Some(agent) = agents.iter().find(|a| agent_matches(record, a))
     {
-        sync_label(&herdr, &record.workspace_id, &label);
+        sync_label(&herdr, &record.workspace_id, &label, out);
         let _ = herdr.agent_focus(&record.pane_id);
         report_tokens(&herdr, slug, &record.pane_id);
         if options.reprime {
-            deliver_or_defer(&project, &herdr, agent, &prompt)?;
+            deliver_or_defer(&project, &herdr, agent, &prompt, out)?;
         }
         ticker::start(ctx)?;
-        println!("coordinator is running in pane {}", record.pane_id);
-        println!("Commands: {prefix}");
+        writeln!(out, "coordinator is running in pane {}", record.pane_id)?;
+        writeln!(out, "Commands: {prefix}")?;
         return Ok(());
     }
 
@@ -156,7 +174,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             && !agents.iter().any(|a| a.pane_id == record.pane_id)
     });
     let (workspace_id, tab_id, pane_id) = if let Some(record) = reusable {
-        sync_label(&herdr, &record.workspace_id, &label);
+        sync_label(&herdr, &record.workspace_id, &label, out);
         (
             record.workspace_id.clone(),
             record.tab_id.clone(),
@@ -173,7 +191,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             });
         let created = match workspace {
             Some(id) => {
-                sync_label(&herdr, &id, &label);
+                sync_label(&herdr, &id, &label, out);
                 herdr.tab_create(&id, &dir, "coordinator", true)?
             }
             None => {
@@ -212,30 +230,35 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         &record.pane_id,
         &safety.coordinator_agent_args,
     ) {
-        Ok(agent) => deliver_or_defer(&project, &herdr, &agent, &prompt)?,
-        Err(error) => println!(
+        Ok(agent) => deliver_or_defer(&project, &herdr, &agent, &prompt, out)?,
+        Err(error) => writeln!(
+            out,
             "the coordinator agent is not ready yet ({error}). If it shows a dialog, answer it in pane {}; the ticker sends the priming prompt once it is ready.",
             record.pane_id
-        ),
+        )?,
     }
     report_tokens(&herdr, slug, &record.pane_id);
     ticker::start(ctx)?;
-    println!(
+    writeln!(
+        out,
         "opened `{slug}` in workspace {} (pane {})",
         record.workspace_id, record.pane_id
-    );
-    println!("Commands: {prefix}");
+    )?;
+    writeln!(out, "Commands: {prefix}")?;
     Ok(())
 }
 
 /// Renames a recorded workspace whose label is not the project's display name,
 /// so a `name` edited in PROJECT.md shows on the next `open`. Never fails: a
 /// wrong label is cosmetic.
-fn sync_label(herdr: &Herdr, workspace_id: &str, label: &str) {
+fn sync_label(herdr: &Herdr, workspace_id: &str, label: &str, out: &mut dyn io::Write) {
     match herdr.workspace_label(workspace_id) {
         Ok(current) if current != label => {
             if let Err(error) = herdr.workspace_rename(workspace_id, label) {
-                println!("could not rename workspace {workspace_id} to `{label}` ({error})");
+                let _ = writeln!(
+                    out,
+                    "could not rename workspace {workspace_id} to `{label}` ({error})"
+                );
             }
         }
         _ => {}
@@ -244,22 +267,29 @@ fn sync_label(herdr: &Herdr, workspace_id: &str, label: &str) {
 
 /// Sends the priming prompt now when the agent is ready for one; otherwise
 /// leaves `prime_pending` set so the ticker delivers it. One delivery path.
-fn deliver_or_defer(project: &Project, herdr: &Herdr, agent: &Agent, prompt: &str) -> Result<()> {
+fn deliver_or_defer(
+    project: &Project,
+    herdr: &Herdr,
+    agent: &Agent,
+    prompt: &str,
+    out: &mut dyn io::Write,
+) -> Result<()> {
     let sent = agent.ready()
         && match herdr.agent_prompt_start(&agent.pane_id, prompt) {
             Ok(()) => true,
             Err(error) => {
-                println!("the priming prompt was not accepted ({error})");
+                writeln!(out, "the priming prompt was not accepted ({error})")?;
                 false
             }
         };
     project.update_coordinator(|c| c.prime_pending = !sent)?;
     if sent {
-        println!("priming prompt sent");
+        writeln!(out, "priming prompt sent")?;
     } else {
-        println!(
+        writeln!(
+            out,
             "priming prompt pending; the ticker sends it when the agent is ready for a prompt"
-        );
+        )?;
     }
     Ok(())
 }
@@ -427,6 +457,45 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_routes_cli_status_through_the_injected_writer() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+        *world.agents.borrow_mut() = format!(
+            "[{}]",
+            crate::scenarios::agent_json(
+                "w1",
+                "w1:t1",
+                "w1:p1",
+                &project.canonical_dir().to_string_lossy(),
+                "hp-demo-coordinator",
+                "idle",
+            )
+        );
+        world
+            .runner
+            .on("agent focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let socket = std::path::PathBuf::from(project.coordinator().unwrap().socket);
+        let options = OpenOptions {
+            session: SessionFlags {
+                session: None,
+                socket: Some(socket),
+            },
+            reprime: false,
+            rebind: true,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        open_with_output(&world.ctx(), "demo", &options, &mut stdout, &mut stderr).unwrap();
+
+        let stdout = String::from_utf8(stdout).unwrap();
+        assert!(stdout.contains("coordinator is running in pane w1:p1"));
+        assert!(stdout.contains("Commands:"));
+        assert!(stderr.is_empty());
+    }
 
     #[test]
     fn prefix_has_the_fixed_shape_and_quotes_spaces() {

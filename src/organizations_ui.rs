@@ -685,7 +685,7 @@ pub(crate) fn focus_node(ctx: &Ctx, project: &Project, node: Option<&Thread>) ->
         reprime: false,
         rebind: true,
     };
-    coordinator::open(ctx, &project.slug, &options)
+    coordinator::open_quiet(ctx, &project.slug, &options)
         .context("could not open the project coordinator")?;
 
     let project = Project::load(&ctx.root, &project.slug)?;
