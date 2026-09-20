@@ -530,17 +530,27 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let mut message = String::new();
     let mut last_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
+    let mut last_size = None;
+    let mut dirty = true;
 
     loop {
         let (width, height) = terminal::size().unwrap_or((40, 24));
-        render(
-            &mut io::stdout(),
-            &screen,
-            &settings,
-            &message,
-            width as usize,
-            height as usize,
-        )?;
+        let size = (width as usize, height as usize);
+        if last_size != Some(size) {
+            last_size = Some(size);
+            dirty = true;
+        }
+        if dirty {
+            render(
+                &mut io::stdout(),
+                &screen,
+                &settings,
+                &message,
+                size.0,
+                size.1,
+            )?;
+            dirty = false;
+        }
 
         if last_heartbeat.elapsed() >= TOKEN_REFRESH {
             let _ = report_identity(&herdr, pane_id, slug, workspace);
@@ -556,6 +566,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             {
                 match load_view(ctx, slug, settings.show_resolved) {
                     Ok(refreshed) => {
+                        dirty |= tree_view_changed(tree_view, &refreshed);
                         *tree_view = refreshed.clone();
                         view = refreshed.clone();
                         *selected = (*selected).min(
@@ -564,7 +575,11 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                                 .saturating_sub(1),
                         );
                     }
-                    Err(error) => message = format!("Refresh failed: {error:#}"),
+                    Err(error) => {
+                        let refresh_message = format!("Refresh failed: {error:#}");
+                        dirty |= message != refresh_message;
+                        message = refresh_message;
+                    }
                 }
             }
             last_refresh = Instant::now();
@@ -578,6 +593,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        dirty = true;
         message.clear();
         match (&mut screen, key.code) {
             (_, KeyCode::Char('q')) => break,
@@ -688,6 +704,15 @@ pub fn run(ctx: &Ctx) -> Result<()> {
 
     drop(guard);
     close_sidebar_pane(&herdr, pane_id)
+}
+
+fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
+    current.project.root != refreshed.project.root
+        || current.project.slug != refreshed.project.slug
+        || current.entries != refreshed.entries
+        || current.groups != refreshed.groups
+        || current.omitted_nodes != refreshed.omitted_nodes
+        || project_label(&current.project) != project_label(&refreshed.project)
 }
 
 fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
@@ -1232,6 +1257,31 @@ mod tests {
         assert!(settings.show_status);
         assert!(settings.show_role);
         assert!(settings.strict_toggle);
+    }
+
+    #[test]
+    fn unchanged_periodic_refreshes_do_not_dirty_the_terminal_view() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let current = TreeView {
+            project,
+            entries: organizations::tree_from(&[thread_model::Thread {
+                id: "t-0001".into(),
+                title: "Stable worker".into(),
+                ..thread_model::Thread::default()
+            }])
+            .unwrap(),
+            groups: HashMap::from([("t-0001".into(), Group::Working)]),
+            omitted_nodes: 0,
+        };
+
+        assert!(!tree_view_changed(&current, &current.clone()));
+
+        let mut changed = current.clone();
+        changed
+            .groups
+            .insert("t-0001".into(), Group::ReadyForReview);
+        assert!(tree_view_changed(&current, &changed));
     }
 
     #[test]
