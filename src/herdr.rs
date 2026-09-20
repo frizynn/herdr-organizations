@@ -276,6 +276,10 @@ impl<'a> Herdr<'a> {
         self.call_as(&["pane", "list"], "panes")
     }
 
+    pub fn pane_list_workspace(&self, workspace: &str) -> Result<Vec<Pane>, HerdrError> {
+        self.call_as(&["pane", "list", "--workspace", workspace], "panes")
+    }
+
     /// Split a pane and return the new Herdr pane id from the response.
     pub fn pane_split(
         &self,
@@ -307,11 +311,6 @@ impl<'a> Herdr<'a> {
         let mut args = vec!["pane", "run", pane];
         args.extend(command.iter().map(String::as_str));
         self.call_status(&args, CALL_TIMEOUT)
-    }
-
-    pub fn pane_rename(&self, pane: &str, label: &str) -> Result<(), HerdrError> {
-        self.call(&["pane", "rename", pane, label], CALL_TIMEOUT)
-            .map(|_| ())
     }
 
     pub fn pane_swap(&self, source: &str, target: &str) -> Result<(), HerdrError> {
@@ -654,6 +653,17 @@ impl<'a> Herdr<'a> {
         tokens: &[(&str, &str)],
         ttl: Duration,
     ) -> Result<(), HerdrError> {
+        self.pane_report_tokens_with_title_from(pane, source, None, tokens, ttl)
+    }
+
+    pub fn pane_report_tokens_with_title_from(
+        &self,
+        pane: &str,
+        source: &str,
+        title: Option<&str>,
+        tokens: &[(&str, &str)],
+        ttl: Duration,
+    ) -> Result<(), HerdrError> {
         let ttl = ttl.as_millis().to_string();
         let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut args = vec![
@@ -665,6 +675,10 @@ impl<'a> Herdr<'a> {
             "--ttl-ms",
             &ttl,
         ];
+        if let Some(title) = title {
+            args.push("--title");
+            args.push(title);
+        }
         for pair in &pairs {
             args.push("--token");
             args.push(pair);

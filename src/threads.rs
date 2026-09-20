@@ -937,13 +937,23 @@ pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
         .collect()
 }
 
-fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
-    // Before the first poll a thread that is waiting for its launch is Working.
-    let recorded = Group::from_token(&t.last_group).unwrap_or(if t.prompt_pending {
+/// Best known group without a live Herdr round trip. The ticker persists this
+/// value, so interactive views can paint immediately and hydrate live state
+/// after their first frame.
+pub fn recorded_group(thread: &Thread) -> Group {
+    if thread.status == Status::Resolved {
+        return Group::Resolved;
+    }
+    Group::from_token(&thread.last_group).unwrap_or(if thread.prompt_pending {
         Group::Working
     } else {
         Group::Idle
-    });
+    })
+}
+
+fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
+    // Before the first poll a thread that is waiting for its launch is Working.
+    let recorded = recorded_group(t);
     if t.status == Status::Resolved {
         return Row {
             thread: t.clone(),
