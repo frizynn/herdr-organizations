@@ -48,6 +48,8 @@ Inside a project workspace, **Herdr Organizations: toggle project hierarchy side
 
 Pane metadata includes project, node id, role, parent, depth, tree order and current review group. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
 
+Root coordination is event-driven. Human turns load the organized project digest; ticker turns run one bounded `inbox consume` command that prints and archives the delivered batch. `HANDOFF.md` carries compact objective, decisions, active work and next action across Codex or Claude replacements without copying chat transcripts or reports.
+
 ## Compatibility
 
 The primary package, repository and binary are `herdr-organizations`. Cargo also builds the `herdr-projects` compatibility binary. The plugin id remains `herdr-projects`, while its visible name is **Herdr Organizations**. When replacing upstream, uninstall its registration first with `herdr plugin uninstall herdr-projects`, then build and link this checkout with `cargo build --release --locked` and `herdr plugin link .`. Existing projects remain under `~/.herdr-projects/`, and settings remain under `~/.config/herdr-projects/`. Legacy thread records load as worker nodes below `root`. Loading does not rewrite them. The CLI accepts the existing `HERDR_PROJECTS_ROOT` environment variable and configuration format.

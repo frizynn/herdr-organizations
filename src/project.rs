@@ -486,6 +486,10 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
         &dir.join("MEMORY.md"),
         b"# Memory\n\nOne line per memory file: `- [title](memory/file.md): what it holds`.\n",
     )?;
+    write_atomic(
+        &dir.join("HANDOFF.md"),
+        b"# Handoff\n\n## Current objective\n\n(none)\n\n## Decisions and constraints\n\n(none)\n\n## Active work\n\n(none)\n\n## Next action\n\n(none)\n",
+    )?;
     write_atomic(&dir.join("TASKS.md"), TASKS_TEMPLATE.as_bytes())?;
     write_json(
         &project.state_dir().join("project.json"),
@@ -605,6 +609,7 @@ mod tests {
             assert!(project.dir().join(sub).is_dir(), "{sub}");
         }
         assert!(project.dir().join("MEMORY.md").is_file());
+        assert!(project.dir().join("HANDOFF.md").is_file());
         assert!(project.dir().join("TASKS.md").is_file());
         let (settings, body) = project.read_project_md().unwrap();
         assert_eq!(settings.name, "Demo");

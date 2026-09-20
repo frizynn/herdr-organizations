@@ -633,7 +633,10 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
         let mut state = steps::load_state(project);
         let before = state.nudged.clone();
         let ready_pane = agent.filter(|a| a.ready()).map(|_| record.pane_id.as_str());
-        if let Err(error) = steps::nudge(project, &mut state, &settings, &herdr, ready_pane) {
+        let prefix = coordinator::current_prefix(&ctx.root)?;
+        if let Err(error) =
+            steps::nudge(project, &mut state, &settings, &herdr, ready_pane, &prefix)
+        {
             first_error = first_error.or(Some(error.context("nudge")));
         }
         if state.nudged != before {

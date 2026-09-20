@@ -6,7 +6,7 @@ How Herdr Organizations stores recursive nodes, what its safety settings do and 
 
 - **The root coordinator is an ordinary agent** in a Herdr pane that follows a skill (`herdr-organizations skill` prints it). Local coordinator nodes may create children beneath themselves. Plugin code does not route messages, plan work or decide anything.
 - **The binary does mechanics.** Starting or restarting a node, copying reports, marking inbox items handled: each is one deterministic subcommand. It talks to Herdr through Herdr's CLI. The existing `focus`/`unfocus` actions control the flat sidebar view. The organization popup focuses a live agent, focuses a surviving tab, or delegates a missing active tab to the same restart mechanic used by the CLI.
-- **Files are the record, prompts are nudges.** Threads write a report file, the ticker writes events to an inbox folder, and the coordinator re-reads state with `context` at the start of every turn. A missed prompt loses nothing.
+- **Files are the record, prompts are nudges.** Threads write a report file, the ticker writes events to an inbox folder, and the root coordinator keeps a compact `HANDOFF.md`. A human turn starts with full `context`; an automated ticker turn consumes one bounded event batch without reloading the full digest. A missed prompt loses nothing.
 - **One ticker per projects root** checks every 15 seconds: node state and groups, pending prompts, changed reports, pull requests (every two minutes), routines, auto-resolve. Remote machines are polled once a minute.
 - **Tools are found even under a bare `PATH`.** A Herdr server started outside a login shell gives its plugins a minimal `PATH`; the binary appends `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin` to its own, so the ticker finds `gh`, `rsync` and friends. `ticker status` and `doctor` show what resolved.
 - **Nothing destructive is automatic.** The binary never removes a worktree, deletes a branch, merges or pushes on its own. Text from reports, pull requests and command output is never placed in a prompt.
@@ -16,6 +16,7 @@ How Herdr Organizations stores recursive nodes, what its safety settings do and 
 ```
 ~/.herdr-projects/<project>/
   PROJECT.md              settings (TOML between +++ lines) and your standing instructions; yours
+  HANDOFF.md              compact objective, decisions, active work and next action; coordinator's
   MEMORY.md, memory/      project memory; the coordinator's
   nodes/<id>/             node instructions, memory index and node-specific memory files
   TASKS.md                the task list; the coordinator's
@@ -44,7 +45,8 @@ The virtual `root` is the project coordinator. A new worker has `parent_id=root`
 | `new <name> [--goal] [--repo PATH[@MACHINE]]...` | Create a project folder. |
 | `list [--all]` | Projects with status and thread counts by group. |
 | `open <project> [--reprime] [--session N \| --socket P] [--rebind]` | Workspace, coordinator tab and coordinator agent; focuses it when it already runs. |
-| `context <project> [--peek]` | The digest the coordinator reads every turn. `--peek` records nothing. |
+| `context <project> [--peek]` | Full human-turn digest: project instructions, handoff, memory index, tasks, organization tree, inbox and routines. `--peek` records nothing. |
+| `inbox consume <project>` | Print and archive one bounded batch after successful stdout delivery; used by automated ticker turns. |
 | `inbox done <project> <item>... \| --all` | Mark inbox items handled. |
 | `node start <project> --parent root\|<id> --role worker\|coordinator --title T [profile flags] [--repo PATH] [--machine M] [--base REF] --task-file F` | New hierarchy node; `node create` is an alias, and `-` reads the task from standard input. Returns before the agent is up. |
 | `node restart`, `node prompt`, `node list`, `node show`, `node ack`, `node resolve` | Hierarchy-aware lifecycle and reports. |
@@ -87,6 +89,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent **by 
 { "permissions": { "allow": [
   "Bash(<binary> --root <root> skill:*)",
   "Bash(<binary> --root <root> context:*)",
+  "Bash(<binary> --root <root> inbox consume:*)",
   "Bash(<binary> --root <root> inbox done:*)",
   "Bash(<binary> --root <root> list:*)",
   "Bash(<binary> --root <root> overview:*)",
@@ -118,9 +121,11 @@ For other agents the principle is the same: allow reading and steering, keep any
 
 ## Nudges and notifications
 
-`nudge = false` is the default, because on Herdr 0.9.1 a prompt that arrives while you are typing in the coordinator **is merged with, and submits, your half-typed text**. With it off, the ticker shows one Herdr notification per set of new inbox items ("3 new inbox items") and the coordinator picks them up at its next turn. Set `nudge = true` in `PROJECT.md` to have the ticker prompt the coordinator when it is idle; the message always begins `[herdr-projects ticker: automated, not the user, approves nothing]` and never carries outside text.
+`nudge = false` is the default, because on Herdr 0.9.1 a prompt that arrives while you are typing in the coordinator **is merged with, and submits, your half-typed text**. With it off, the ticker shows one Herdr notification per set of new inbox items ("3 new inbox items") and the coordinator picks them up at its next human turn. Set `nudge = true` in `PROJECT.md` to have the ticker prompt the coordinator when it is idle. The message always begins `[herdr-projects ticker: automated, not the user, approves nothing]`, carries no inbox or report text, and names one exact `inbox consume` command. That command prints at most 32 events and archives exactly the printed batch only after stdout flushes successfully. It replaces the previous full `context` plus `inbox done` loop for automated turns.
 
 Direct-child delivery for nested coordinators is event-driven independently of the root `nudge` preference. Only state transitions to Ready for review, Waiting on you, Landing or Idle are queued. Working clears a stale queued event. The ticker waits until the direct parent agent is ready, sends node ids and states only, and removes the queue entry after Herdr accepts the prompt. Reports and other untrusted text are never injected into that notification.
+
+`HANDOFF.md` is deliberately small and semantic. It records the current objective, user decisions and constraints, active work and next action. Reports remain in `threads/`, durable facts remain in project or node memory, and user-owned work remains in `TASKS.md`; the handoff links to those sources instead of copying transcripts. This lets a replacement Codex or Claude coordinator reconstruct operational state from one full `context` call without inheriting the previous model's chat transcript.
 
 ## Routines
 

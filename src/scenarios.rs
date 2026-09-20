@@ -961,7 +961,12 @@ fn a_finishing_thread_gives_one_item_and_one_nudge_until_a_new_item_arrives() {
             .calls
             .borrow()
             .iter()
-            .filter(|c| c.args.last().is_some_and(|a| a == crate::steps::NUDGE_TEXT))
+            .filter(|c| {
+                c.args.last().is_some_and(|arg| {
+                    arg.starts_with(crate::steps::NUDGE_PREFIX)
+                        && arg.contains("inbox consume demo")
+                })
+            })
             .count()
     };
     assert_eq!(nudges(&world), 1);
@@ -969,9 +974,16 @@ fn a_finishing_thread_gives_one_item_and_one_nudge_until_a_new_item_arrives() {
     let calls = world.runner.calls.borrow();
     let nudge = calls
         .iter()
-        .find(|c| c.args.last().is_some_and(|a| a == crate::steps::NUDGE_TEXT))
+        .find(|c| {
+            c.args.last().is_some_and(|arg| {
+                arg.starts_with(crate::steps::NUDGE_PREFIX) && arg.contains("inbox consume demo")
+            })
+        })
         .unwrap();
     assert!(nudge.args.contains(&"w1:p1".to_string()));
+    let prompt = nudge.args.last().unwrap();
+    assert!(prompt.contains("Run exactly once"));
+    assert!(prompt.contains("do not run `context` or `inbox done`"));
     drop(calls);
 
     // Working and idle again on an unchanged report: nothing.
@@ -1776,4 +1788,46 @@ fn the_digest_prints_the_task_list_or_none() {
     std::fs::remove_file(&tasks).unwrap();
     let digest = coordinator::digest(&world.ctx(), &project, "hp").unwrap().0;
     assert!(digest.contains("## Tasks (TASKS.md)\n(none)"));
+}
+
+#[test]
+fn the_digest_orders_project_handoff_and_recursive_organization() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let project_md = std::fs::read_to_string(project.project_md()).unwrap();
+    std::fs::write(
+        project.project_md(),
+        project_md.replace("# Instructions", "# Instructions\n\nProject rule sentinel."),
+    )
+    .unwrap();
+    std::fs::write(
+        project.dir().join("HANDOFF.md"),
+        "# Handoff\n\n## Current objective\n\nHandoff sentinel.\n",
+    )
+    .unwrap();
+    let parent = world.thread(&project, world.home.path(), |thread| {
+        thread.title = "Frontend coordinator".into();
+        thread.role = crate::thread::NodeRole::Coordinator;
+        thread.can_spawn = true;
+    });
+    let child = thread::allocate(&project, |thread| {
+        thread.title = "Implement form".into();
+        thread.parent_id = parent.id.clone();
+        thread.status = Status::Open;
+        thread.last_group = "idle".into();
+    })
+    .unwrap();
+
+    let digest = coordinator::digest(&world.ctx(), &project, "hp").unwrap().0;
+    let instructions = digest.find("## Project instructions").unwrap();
+    let handoff = digest.find("## Current handoff").unwrap();
+    let memory = digest.find("## Memory index").unwrap();
+    let organization = digest.find("## Organization").unwrap();
+    assert!(instructions < handoff && handoff < memory && memory < organization);
+    assert!(digest.contains("Project rule sentinel."));
+    assert!(digest.contains("Handoff sentinel."));
+    let parent_pos = digest.find(&format!("- {} [", parent.id)).unwrap();
+    let child_pos = digest.find(&format!("- {} [", child.id)).unwrap();
+    assert!(parent_pos < child_pos);
+    assert!(digest[child_pos..].contains(&format!("parent={}", parent.id)));
 }

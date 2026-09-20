@@ -35,6 +35,8 @@ The project is created at `~/.herdr-projects/billing/` by default. `open` create
 
 Project settings and root instructions live in `PROJECT.md`. `thread_agent` selects the default worker harness, `coordinator_agent` selects the root coordinator harness, and `max_parallel_threads` limits active project nodes. Existing settings in `~/.config/herdr-projects/config.toml` continue to work.
 
+The root coordinator maintains `HANDOFF.md` as a compact cross-harness handoff. A fresh Codex or Claude coordinator receives project instructions, that handoff, the memory index, tasks and the open organization in stable tree order through `context`. Automated ticker turns use `inbox consume` instead, so a state notification does not reload the whole project or require a separate acknowledgement command.
+
 ## Create nodes
 
 The root coordinator is the virtual parent `root`. A worker is a leaf. A local coordinator can create workers or more coordinators beneath itself. A local child coordinator brief gives it the project CLI prefix and tells it to use its own node id as parent. A remote coordinator cannot receive child-spawn permission because its brief cannot safely launch the local CLI from the remote machine.

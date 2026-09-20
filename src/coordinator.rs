@@ -1,5 +1,6 @@
 //! `open` and `context`: the coordinator's pane and the digest it reads.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
@@ -11,10 +12,11 @@ use crate::herdr::{Agent, Herdr, Pane};
 use crate::paths::{self, Ctx, SessionFlags};
 use crate::project::{Coordinator, Project, Status};
 use crate::remote::quote;
-use crate::{inbox, ticker};
+use crate::{inbox, organizations, ticker};
 
 pub const TOKEN_TTL: Duration = Duration::from_secs(300);
 pub const MAX_LAUNCH_ATTEMPTS: u32 = 3;
+const MAX_HANDOFF_CHARS: usize = 8_000;
 
 /// `<binary> --root <root>`: the fixed shape every printed command starts
 /// with, so allow-list patterns can match on it. Values with spaces are quoted.
@@ -313,8 +315,10 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = writeln!(out, "Project: {slug} ({})", project.status());
     let _ = writeln!(out, "Folder: {}", project.dir().display());
 
+    let mut instructions = String::new();
     match project.read_project_md() {
-        Ok((settings, _)) => {
+        Ok((settings, body)) => {
+            instructions = body;
             let _ = writeln!(out, "Name: {}", settings.name);
             let _ = writeln!(
                 out,
@@ -367,6 +371,36 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         }
     }
 
+    let _ = writeln!(out, "\n## Project instructions (PROJECT.md)");
+    let _ = writeln!(
+        out,
+        "{}",
+        if instructions.trim().is_empty() {
+            "(none)"
+        } else {
+            instructions.trim()
+        }
+    );
+
+    let _ = writeln!(out, "\n## Current handoff (HANDOFF.md)");
+    let handoff = std::fs::read_to_string(project.dir().join("HANDOFF.md")).unwrap_or_default();
+    let handoff_chars = handoff.chars().count();
+    let bounded_handoff: String = handoff.chars().take(MAX_HANDOFF_CHARS).collect();
+    let _ = writeln!(
+        out,
+        "{}",
+        if bounded_handoff.trim().is_empty() {
+            "(none; coordinator must maintain HANDOFF.md)".to_string()
+        } else if handoff_chars > MAX_HANDOFF_CHARS {
+            format!(
+                "{}\n\n(truncated after {MAX_HANDOFF_CHARS} characters; compact HANDOFF.md)",
+                bounded_handoff.trim()
+            )
+        } else {
+            bounded_handoff.trim().to_string()
+        }
+    );
+
     let _ = writeln!(out, "\n## Memory index (MEMORY.md)");
     let memory = std::fs::read_to_string(project.dir().join("MEMORY.md")).unwrap_or_default();
     let _ = writeln!(out, "{}", memory.trim());
@@ -384,27 +418,52 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     );
 
     let rows = crate::threads::rows(ctx, project);
-    let open: Vec<_> = rows
+    let rows_by_id: BTreeMap<&str, &crate::threads::Row> = rows
         .iter()
-        .filter(|r| r.group != crate::thread::Group::Resolved)
+        .map(|row| (row.thread.id.as_str(), row))
         .collect();
-    let _ = writeln!(out, "\n## Open threads ({})", open.len());
-    for row in open {
-        let t = &row.thread;
-        let place = if t.repo.is_empty() {
-            "no repo".to_string()
-        } else {
-            t.repo.clone()
-        };
-        let _ = writeln!(
-            out,
-            "- {} [{}] ({}) {}: {}",
-            t.id,
-            row.group.label(),
-            row.note,
-            t.title,
-            place
-        );
+    let open_count = rows
+        .iter()
+        .filter(|row| row.group != crate::thread::Group::Resolved)
+        .count();
+    let _ = writeln!(out, "\n## Organization ({open_count} open nodes)");
+    let _ = writeln!(out, "- root [active] coordinator: project coordinator");
+    match organizations::tree(project) {
+        Ok(entries) => {
+            for entry in entries {
+                let Some(row) = rows_by_id.get(entry.thread.id.as_str()) else {
+                    continue;
+                };
+                if row.group == crate::thread::Group::Resolved {
+                    continue;
+                }
+                let thread = &row.thread;
+                let place = if thread.branch.is_empty() {
+                    "tab".to_string()
+                } else {
+                    thread.branch.clone()
+                };
+                let title: String = thread
+                    .title
+                    .chars()
+                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "{}- {} [{}] {} parent={} {} ({place}; {})",
+                    "  ".repeat(entry.depth),
+                    thread.id,
+                    row.group.label(),
+                    thread.role.as_str(),
+                    organizations::parent_id(thread),
+                    title.trim(),
+                    row.note
+                );
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(out, "- config-error: organization tree: {error:#}");
+        }
     }
 
     let items = inbox::unhandled(project);

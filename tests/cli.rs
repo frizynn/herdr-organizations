@@ -114,6 +114,41 @@ fn peek_records_nothing_and_context_records_seen_items() {
 }
 
 #[test]
+fn inbox_consume_outputs_and_archives_the_same_batch() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    let id = "20260917T000000Z-thread-state-t-0001-1";
+    let item = format!(
+        "+++\nid = \"{id}\"\nkind = \"thread-state\"\nsubject = \"t-0001\"\ncreated = \"x\"\nsummary = \"ready\"\n+++\n"
+    );
+    std::fs::write(root.join("demo/inbox").join(format!("{id}.md")), item).unwrap();
+
+    let out = hp(
+        home.path(),
+        &["--root", root_arg, "inbox", "consume", "demo"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("[thread-state] t-0001: ready"));
+    assert!(!root.join("demo/inbox").join(format!("{id}.md")).exists());
+    assert!(
+        root.join("demo/inbox/done")
+            .join(format!("{id}.md"))
+            .is_file()
+    );
+}
+
+#[test]
 fn path_like_names_and_slugs_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");
