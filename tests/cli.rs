@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
+const BIN: &str = env!("CARGO_BIN_EXE_herdr-organizations");
+const LEGACY_BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
 
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
@@ -19,12 +20,28 @@ fn context_prints_a_usable_prefix_in_a_scrubbed_environment() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("my root");
     let root_arg = root.to_str().unwrap();
-    assert!(hp(home.path(), &["--root", root_arg, "new", "Demo"]).status.success());
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
 
-    let out = hp(home.path(), &["--root", root_arg, "context", "demo", "--peek"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = hp(
+        home.path(),
+        &["--root", root_arg, "context", "demo", "--peek"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).unwrap();
-    let prefix = text.lines().next().unwrap().strip_prefix("Commands: ").unwrap();
+    let prefix = text
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("Commands: ")
+        .unwrap();
     // Fixed shape `<binary> --root <root>`, with the spaced root shell-quoted.
     assert_eq!(prefix, format!("{BIN} --root '{root_arg}'"));
 
@@ -36,7 +53,39 @@ fn context_prints_a_usable_prefix_in_a_scrubbed_environment() {
         .output()
         .unwrap();
     assert!(listed.status.success());
-    assert_eq!(String::from_utf8_lossy(&listed.stdout), "demo\tactive\tno threads\n");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        "demo\tactive\tno threads\n"
+    );
+}
+
+#[test]
+fn legacy_thread_adopt_cli_arguments_remain_available() {
+    let home = tempfile::tempdir().unwrap();
+    let output = hp(home.path(), &["thread", "adopt", "--help"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("thread adopt"), "{help}");
+    assert!(help.contains("--pane"), "{help}");
+    assert!(help.contains("--title <TITLE>"), "{help}");
+}
+
+#[test]
+fn node_resolve_exposes_the_non_destructive_close_view_option() {
+    let home = tempfile::tempdir().unwrap();
+    let output = hp(home.path(), &["node", "resolve", "--help"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--close-view"), "{help}");
+    assert!(help.contains("surface, keeping Git artifacts"), "{help}");
 }
 
 #[test]
@@ -44,15 +93,73 @@ fn peek_records_nothing_and_context_records_seen_items() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");
     let root_arg = root.to_str().unwrap();
-    assert!(hp(home.path(), &["--root", root_arg, "new", "demo"]).status.success());
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
     let item = "+++\nid = \"20260917T000000Z-routine-r-1\"\nkind = \"routine\"\nsubject = \"r\"\ncreated = \"x\"\nsummary = \"s\"\n+++\n";
-    std::fs::write(root.join("demo/inbox/20260917T000000Z-routine-r-1.md"), item).unwrap();
+    std::fs::write(
+        root.join("demo/inbox/20260917T000000Z-routine-r-1.md"),
+        item,
+    )
+    .unwrap();
     let seen = root.join("demo/.state/inbox-seen.json");
 
-    assert!(hp(home.path(), &["--root", root_arg, "context", "demo", "--peek"]).status.success());
+    assert!(
+        hp(
+            home.path(),
+            &["--root", root_arg, "context", "demo", "--peek"]
+        )
+        .status
+        .success()
+    );
     assert!(!seen.exists());
-    assert!(hp(home.path(), &["--root", root_arg, "context", "demo"]).status.success());
-    assert!(std::fs::read_to_string(&seen).unwrap().contains("routine-r-1"));
+    assert!(
+        hp(home.path(), &["--root", root_arg, "context", "demo"])
+            .status
+            .success()
+    );
+    assert!(
+        std::fs::read_to_string(&seen)
+            .unwrap()
+            .contains("routine-r-1")
+    );
+}
+
+#[test]
+fn inbox_consume_outputs_and_archives_the_same_batch() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    let id = "20260917T000000Z-thread-state-t-0001-1";
+    let item = format!(
+        "+++\nid = \"{id}\"\nkind = \"thread-state\"\nsubject = \"t-0001\"\ncreated = \"x\"\nsummary = \"ready\"\n+++\n"
+    );
+    std::fs::write(root.join("demo/inbox").join(format!("{id}.md")), item).unwrap();
+
+    let out = hp(
+        home.path(),
+        &["--root", root_arg, "inbox", "consume", "demo"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("[thread-state] t-0001: ready"));
+    assert!(!root.join("demo/inbox").join(format!("{id}.md")).exists());
+    assert!(
+        root.join("demo/inbox/done")
+            .join(format!("{id}.md"))
+            .is_file()
+    );
 }
 
 #[test]
@@ -60,11 +167,34 @@ fn path_like_names_and_slugs_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");
     let root_arg = root.to_str().unwrap();
-    assert!(!hp(home.path(), &["--root", root_arg, "new", "../x"]).status.success());
-    assert!(!hp(home.path(), &["--root", root_arg, "open", "../x"]).status.success());
-    assert!(!hp(home.path(), &["--root", root_arg, "context", "../x"]).status.success());
-    assert!(!hp(home.path(), &["--root", root_arg, "thread", "list", "../x"]).status.success());
-    assert!(!hp(home.path(), &["--root", root_arg, "delete", "../x", "--force"]).status.success());
+    assert!(
+        !hp(home.path(), &["--root", root_arg, "new", "../x"])
+            .status
+            .success()
+    );
+    assert!(
+        !hp(home.path(), &["--root", root_arg, "open", "../x"])
+            .status
+            .success()
+    );
+    assert!(
+        !hp(home.path(), &["--root", root_arg, "context", "../x"])
+            .status
+            .success()
+    );
+    assert!(
+        !hp(home.path(), &["--root", root_arg, "thread", "list", "../x"])
+            .status
+            .success()
+    );
+    assert!(
+        !hp(
+            home.path(),
+            &["--root", root_arg, "delete", "../x", "--force"]
+        )
+        .status
+        .success()
+    );
     assert!(!root.exists());
     assert!(!home.path().join("x").exists());
 }
@@ -75,4 +205,66 @@ fn ticker_start_without_projects_creates_nothing() {
     assert!(hp(home.path(), &["ticker", "start"]).status.success());
     assert!(!home.path().join(".herdr-projects").exists());
     assert!(!home.path().join(".config").exists());
+}
+
+#[test]
+fn legacy_binary_alias_keeps_the_compatibility_data_root() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(LEGACY_BIN)
+        .env_clear()
+        .env("HOME", home.path())
+        .args(["new", "Legacy"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        home.path()
+            .join(".herdr-projects/legacy/PROJECT.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn node_start_rejects_a_missing_parent_before_creating_state_or_starting_the_ticker() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
+    let task = home.path().join("task.md");
+    std::fs::write(&task, "A task that must not start").unwrap();
+    let task_arg = task.to_str().unwrap();
+
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "node",
+            "start",
+            "demo",
+            "--parent",
+            "t-9999",
+            "--role",
+            "coordinator",
+            "--title",
+            "Rejected",
+            "--task-file",
+            task_arg,
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("parent node `t-9999` does not exist")
+    );
+    assert!(!root.join("demo/threads/t-0001.toml").exists());
+    assert!(!root.join("demo/nodes").exists());
+    assert!(!root.join(".ticker.lock").exists());
 }

@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::herdr::{Agent, Herdr, Pane};
+use crate::organizations::{self, CreateNode, NodeRequest};
 use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::runner::{Cmd, Runner};
@@ -32,7 +33,11 @@ pub fn session_view<'a>(ctx: &'a Ctx, project: &Project) -> Option<SessionView<'
     let herdr = Herdr::new(ctx.env.herdr_bin(), &record.socket, ctx.runner);
     let agents = herdr.agent_list().ok()?;
     let panes = herdr.pane_list().ok()?;
-    Some(SessionView { herdr, agents, panes })
+    Some(SessionView {
+        herdr,
+        agents,
+        panes,
+    })
 }
 
 fn require_session<'a>(ctx: &'a Ctx, project: &Project) -> Result<SessionView<'a>> {
@@ -45,35 +50,100 @@ fn require_session<'a>(ctx: &'a Ctx, project: &Project) -> Result<SessionView<'a
 }
 
 fn git(runner: &dyn Runner, repo: &str, args: &[&str], timeout: Duration) -> Result<String> {
-    let out = runner.run(&Cmd::new("git", timeout).args(["-C", repo]).args(args.iter().copied()))?;
+    let out = runner.run(
+        &Cmd::new("git", timeout)
+            .args(["-C", repo])
+            .args(args.iter().copied()),
+    )?;
     if !out.success() {
         bail!("git {}: {}", args.join(" "), out.error_text());
     }
     Ok(out.stdout.trim().to_string())
 }
 
-pub fn thread_tokens(thread: &Thread, slug: &str, group: Group) -> Vec<(String, String)> {
+pub fn thread_tokens(
+    project: &Project,
+    thread: &Thread,
+    slug: &str,
+    group: Group,
+) -> Vec<(String, String)> {
+    let entries = organizations::tree(project).unwrap_or_default();
+    thread_tokens_in_tree(thread, slug, group, &entries)
+}
+
+fn thread_tokens_in_tree(
+    thread: &Thread,
+    slug: &str,
+    group: Group,
+    entries: &[organizations::TreeEntry],
+) -> Vec<(String, String)> {
+    let entry = entries.iter().find(|entry| entry.thread.id == thread.id);
+    let depth = entry.as_ref().map_or(1, |entry| entry.depth);
+    let tree_order = entry.as_ref().map_or(0, |entry| entry.tree_order);
     vec![
         ("project".into(), slug.to_string()),
         ("thread".into(), thread.id.clone()),
         ("review".into(), group.token().to_string()),
         ("rank".into(), group.rank().to_string()),
+        ("depth".into(), depth.to_string()),
+        (
+            "parent".into(),
+            organizations::parent_id(thread).to_string(),
+        ),
+        ("role".into(), thread.role.as_str().to_string()),
+        ("tree-order".into(), tree_order.to_string()),
     ]
 }
 
-pub fn report_thread_tokens(herdr: &Herdr, thread: &Thread, slug: &str, group: Group) {
-    let tokens = thread_tokens(thread, slug, group);
-    let pairs: Vec<(&str, &str)> = tokens.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let _ = herdr
-        .on_machine(&thread.machine)
-        .pane_report_tokens(&thread.pane_id, &pairs, coordinator::TOKEN_TTL);
+pub fn report_thread_tokens(
+    herdr: &Herdr,
+    project: &Project,
+    thread: &Thread,
+    slug: &str,
+    group: Group,
+) {
+    let tokens = thread_tokens(project, thread, slug, group);
+    send_thread_tokens(herdr, thread, tokens);
+}
+
+pub(crate) fn report_thread_tokens_in_tree(
+    herdr: &Herdr,
+    thread: &Thread,
+    slug: &str,
+    group: Group,
+    entries: &[organizations::TreeEntry],
+) {
+    let tokens = thread_tokens_in_tree(thread, slug, group, entries);
+    send_thread_tokens(herdr, thread, tokens);
+}
+
+fn send_thread_tokens(herdr: &Herdr, thread: &Thread, tokens: Vec<(String, String)>) {
+    let pairs: Vec<(&str, &str)> = tokens
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let _ = herdr.on_machine(&thread.machine).pane_report_tokens(
+        &thread.pane_id,
+        &pairs,
+        coordinator::TOKEN_TTL,
+    );
 }
 
 fn clear_thread_tokens(herdr: &Herdr, thread: &Thread) {
     if !thread.pane_id.is_empty() {
-        let _ = herdr
-            .on_machine(&thread.machine)
-            .pane_clear_tokens(&thread.pane_id, &["project", "thread", "review", "rank"]);
+        let _ = herdr.on_machine(&thread.machine).pane_clear_tokens(
+            &thread.pane_id,
+            &[
+                "project",
+                "thread",
+                "review",
+                "rank",
+                "depth",
+                "parent",
+                "role",
+                "tree-order",
+            ],
+        );
     }
 }
 
@@ -84,6 +154,7 @@ pub struct StartArgs {
     pub agent: Option<String>,
     pub base: Option<String>,
     pub task: String,
+    pub node: NodeRequest,
 }
 
 /// Creates the workspace or tab, the thread directory and the brief, then
@@ -101,14 +172,36 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
         bail!("the task is empty");
     }
     let (settings, _) = project.read_project_md()?;
-    // Without a running ticker nothing launches.
-    ticker::start(ctx)?;
-    let view = require_session(ctx, &project)?;
+    let mut node_request = args.node.clone();
+    if let Some(agent) = &args.agent {
+        node_request.profile.harness = Some(agent.clone());
+    }
+    // Validate parent permissions and harness arguments before starting the
+    // ticker, creating a node record, or calling Herdr.
+    let (can_spawn, profile) = organizations::prepare_node(&project, &node_request)?;
+    organizations::authorize_creator(
+        &project,
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+        &node_request.parent_id,
+    )?;
+    let listed = args
+        .repo
+        .as_ref()
+        .and_then(|repo| settings.repos.iter().find(|r| &r.path == repo));
+    let machine = args
+        .machine
+        .clone()
+        .or_else(|| listed.and_then(|r| r.machine.clone()))
+        .unwrap_or_default();
+    organizations::validate_machine_spawn(node_request.role, can_spawn, &machine)?;
+    let safety = project.safety(&ctx.config_dir)?;
+    profile.argv(&safety.thread_agent_args)?;
 
-    let listed = args.repo.as_ref().and_then(|repo| settings.repos.iter().find(|r| &r.path == repo));
-    let machine = args.machine.clone().or_else(|| listed.and_then(|r| r.machine.clone())).unwrap_or_default();
     let repo = match (&args.repo, machine.is_empty()) {
-        (None, false) => bail!("a remote thread needs --repo: a task with no repository runs as a tab in the project's own workspace, which is local"),
+        (None, false) => bail!(
+            "a remote thread needs --repo: a task with no repository runs as a tab in the project's own workspace, which is local"
+        ),
         (None, true) => String::new(),
         // A remote path is stored as it is on its own machine.
         (Some(repo), false) => repo.clone(),
@@ -117,7 +210,11 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
                 .with_context(|| format!("repository {repo} does not exist"))?
                 .to_string_lossy()
                 .into_owned();
-            if !settings.repos.iter().any(|r| r.path == path || &r.path == repo) {
+            if !settings
+                .repos
+                .iter()
+                .any(|r| r.path == path || &r.path == repo)
+            {
                 eprintln!("warning: {path} is not listed in `repos` in PROJECT.md");
             }
             path
@@ -127,7 +224,14 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
         eprintln!("warning: {repo} on {machine} is not listed in `repos` in PROJECT.md");
     }
 
-    let open_count = thread::list(&project).iter().filter(|t| t.status == Status::Open || t.status == Status::Starting).count();
+    // Without a running ticker nothing launches.
+    ticker::start(ctx)?;
+    let view = require_session(ctx, &project)?;
+
+    let open_count = thread::list(&project)
+        .iter()
+        .filter(|t| t.status == Status::Open || t.status == Status::Starting)
+        .count();
     if open_count as u32 >= settings.max_parallel_threads {
         eprintln!(
             "warning: {open_count} threads are already open; max_parallel_threads is {}",
@@ -135,20 +239,23 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
         );
     }
 
-    let agent_kind = args.agent.clone().unwrap_or_else(|| settings.thread_agent.clone());
-    let record = thread::allocate(&project, |t| {
-        t.title = args.title.trim().to_string();
-        t.kind = if repo.is_empty() { Kind::Tab } else { Kind::Worktree };
-        t.repo = repo.clone();
-        t.machine = machine.clone();
-        t.agent = agent_kind.clone();
-        t.base = args.base.clone().unwrap_or_default();
-    })?;
+    let record = organizations::create_node(
+        &project,
+        &CreateNode {
+            request: node_request,
+            title: args.title.trim().to_string(),
+            kind: if repo.is_empty() {
+                Kind::Tab
+            } else {
+                Kind::Worktree
+            },
+            repo,
+            machine,
+            base: args.base.clone().unwrap_or_default(),
+            task: args.task.clone(),
+        },
+    )?;
     let id = record.id.clone();
-    {
-        let _lock = project.lock()?;
-        project::write_atomic(&thread::task_path(&project, &id), args.task.as_bytes())?;
-    }
 
     match place_and_brief(ctx, &project, &view, &id, false) {
         Ok(thread) => Ok(thread),
@@ -159,13 +266,21 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
                 t.status = Status::Failed;
                 t.error = message.clone();
             });
-            Err(error.context(format!("thread {id} failed to start; `thread restart {slug} {id}` retries")))
+            Err(error.context(format!(
+                "thread {id} failed to start; `thread restart {slug} {id}` retries"
+            )))
         }
     }
 }
 
 /// Steps 2 to 5 of starting a thread, also used by `thread restart` case (a).
-fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, restart: bool) -> Result<Thread> {
+fn place_and_brief(
+    ctx: &Ctx,
+    project: &Project,
+    view: &SessionView,
+    id: &str,
+    restart: bool,
+) -> Result<Thread> {
     let slug = &project.slug;
     let record = thread::load(project, id)?;
     let runner = ctx.runner;
@@ -174,10 +289,20 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
         Kind::Worktree if record.is_remote() => {
             // The same steps on the thread's own machine: git over ssh, herdr
             // through `--machine`.
-            let target = remote::ssh_target(runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
+            let target = remote::ssh_target(
+                runner,
+                &ctx.env.herdr_bin(),
+                &ctx.config_dir,
+                &record.machine,
+            )?;
             let (origin, base) = remote::repo_info(runner, &target, &record.repo, &record.base)?;
             let branch = thread::branch_name(slug, id, &record.title);
-            let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_create(&record.repo, &branch, &base, &record.title)?;
+            let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_create(
+                &record.repo,
+                &branch,
+                &base,
+                &record.title,
+            )?;
             thread::update(project, id, |t| {
                 t.origin = origin;
                 t.base = base;
@@ -190,26 +315,51 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
             })?
         }
         Kind::Worktree => {
-            git(runner, &record.repo, &["rev-parse", "--show-toplevel"], GIT_TIMEOUT)
-                .with_context(|| format!("{} is not a git repository", record.repo))?;
-            let origin = git(runner, &record.repo, &["remote", "get-url", "origin"], GIT_TIMEOUT).unwrap_or_default();
+            git(
+                runner,
+                &record.repo,
+                &["rev-parse", "--show-toplevel"],
+                GIT_TIMEOUT,
+            )
+            .with_context(|| format!("{} is not a git repository", record.repo))?;
+            let origin = git(
+                runner,
+                &record.repo,
+                &["remote", "get-url", "origin"],
+                GIT_TIMEOUT,
+            )
+            .unwrap_or_default();
             if !origin.is_empty()
                 && let Err(error) = git(runner, &record.repo, &["fetch", "origin"], FETCH_TIMEOUT)
             {
                 eprintln!("warning: {error:#}");
             }
             let base = if record.base.is_empty() {
-                git(runner, &record.repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], GIT_TIMEOUT)
-                    .or_else(|_| git(runner, &record.repo, &["rev-parse", "--abbrev-ref", "HEAD"], GIT_TIMEOUT))
-                    .and_then(|base| match base.as_str() {
-                        "HEAD" => git(runner, &record.repo, &["rev-parse", "HEAD"], GIT_TIMEOUT),
-                        _ => Ok(base),
-                    })?
+                git(
+                    runner,
+                    &record.repo,
+                    &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    GIT_TIMEOUT,
+                )
+                .or_else(|_| {
+                    git(
+                        runner,
+                        &record.repo,
+                        &["rev-parse", "--abbrev-ref", "HEAD"],
+                        GIT_TIMEOUT,
+                    )
+                })
+                .and_then(|base| match base.as_str() {
+                    "HEAD" => git(runner, &record.repo, &["rev-parse", "HEAD"], GIT_TIMEOUT),
+                    _ => Ok(base),
+                })?
             } else {
                 record.base.clone()
             };
             let branch = thread::branch_name(slug, id, &record.title);
-            let (created, path, cwd) = view.herdr.worktree_create(&record.repo, &branch, &base, &record.title)?;
+            let (created, path, cwd) =
+                view.herdr
+                    .worktree_create(&record.repo, &branch, &base, &record.title)?;
             // Recorded immediately, so a command killed midway still leaves a
             // record `thread restart` can act on.
             thread::update(project, id, |t| {
@@ -237,31 +387,54 @@ fn write_brief(ctx: &Ctx, project: &Project, placed: &Thread, restart: bool) -> 
         return write_brief_local(ctx, project, placed, restart);
     }
     let dir = thread::thread_dir(&placed.cwd, &project.slug, &placed.id);
-    let with_dir = Thread { thread_dir: dir.clone(), ..placed.clone() };
+    let with_dir = Thread {
+        thread_dir: dir.clone(),
+        ..placed.clone()
+    };
     let task = std::fs::read_to_string(thread::task_path(project, &placed.id)).unwrap_or_default();
-    let brief = thread::brief_for(project, &with_dir, &task, restart)?;
-    let target = remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &placed.machine)?;
+    let prefix = coordinator::current_prefix(&ctx.root)?;
+    let brief = thread::brief_for_with_prefix(project, &with_dir, &task, restart, &prefix)?;
+    let target = remote::ssh_target(
+        ctx.runner,
+        &ctx.env.herdr_bin(),
+        &ctx.config_dir,
+        &placed.machine,
+    )?;
     remote::write_brief(ctx.runner, &target, &placed.cwd, &dir, &brief)?;
     thread::update(project, &placed.id, |t| t.thread_dir = dir)?;
     Ok(())
 }
 
 fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<Thread> {
-    let coordinator = project.coordinator().context("the project has never been opened")?;
-    if !view.panes.iter().any(|p| p.workspace_id == coordinator.workspace_id && coordinator::pane_matches(&coordinator, p)) {
-        bail!("the project's workspace is not open; run `open {}` first", project.slug);
+    let coordinator = project
+        .coordinator()
+        .context("the project has never been opened")?;
+    if !view.panes.iter().any(|p| {
+        p.workspace_id == coordinator.workspace_id && coordinator::pane_matches(&coordinator, p)
+    }) {
+        bail!(
+            "the project's workspace is not open; run `open {}` first",
+            project.slug
+        );
     }
     let folder = project.dir().join("threads").join(&record.id);
     {
         let _lock = project.lock()?;
         if !folder.is_dir() {
-            std::fs::create_dir(&folder).with_context(|| format!("could not create {}", folder.display()))?;
+            std::fs::create_dir(&folder)
+                .with_context(|| format!("could not create {}", folder.display()))?;
         }
     }
     let folder = std::fs::canonicalize(&folder)?;
-    let created = view.herdr.tab_create(&coordinator.workspace_id, &folder, &record.title, false)?;
+    let created =
+        view.herdr
+            .tab_create(&coordinator.workspace_id, &folder, &record.title, false)?;
     let cwd = view.herdr.pane_cwd(&created.pane_id).unwrap_or_default();
-    let cwd = if cwd.is_empty() { folder.to_string_lossy().into_owned() } else { cwd };
+    let cwd = if cwd.is_empty() {
+        folder.to_string_lossy().into_owned()
+    } else {
+        cwd
+    };
     thread::update(project, &record.id, |t| {
         t.cwd = cwd;
         t.workspace_id = created.workspace_id;
@@ -273,11 +446,16 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
 /// Creates the thread directory, keeps it out of git, writes `brief.md`.
 fn write_brief_local(ctx: &Ctx, project: &Project, placed: &Thread, restart: bool) -> Result<()> {
     let dir = thread::thread_dir(&placed.cwd, &project.slug, &placed.id);
-    let with_dir = Thread { thread_dir: dir.clone(), ..placed.clone() };
+    let with_dir = Thread {
+        thread_dir: dir.clone(),
+        ..placed.clone()
+    };
     let task = std::fs::read_to_string(thread::task_path(project, &placed.id)).unwrap_or_default();
-    let brief = thread::brief_for(project, &with_dir, &task, restart)?;
+    let prefix = coordinator::current_prefix(&ctx.root)?;
+    let brief = thread::brief_for_with_prefix(project, &with_dir, &task, restart, &prefix)?;
 
-    std::fs::create_dir_all(Path::new(&dir).join("library")).with_context(|| format!("could not create {dir}"))?;
+    std::fs::create_dir_all(Path::new(&dir).join("library"))
+        .with_context(|| format!("could not create {dir}"))?;
     if placed.kind != Kind::Tab {
         exclude_from_git(ctx.runner, &placed.cwd)?;
     }
@@ -289,7 +467,12 @@ fn write_brief_local(ctx: &Ctx, project: &Project, placed: &Thread, restart: boo
 /// Adds `.herdr-project/` to the repository's `info/exclude` if it is not
 /// already listed, so nothing in the thread directory is ever committed.
 pub fn exclude_from_git(runner: &dyn Runner, cwd: &str) -> Result<()> {
-    let Ok(path) = git(runner, cwd, &["rev-parse", "--git-path", "info/exclude"], GIT_TIMEOUT) else {
+    let Ok(path) = git(
+        runner,
+        cwd,
+        &["rev-parse", "--git-path", "info/exclude"],
+        GIT_TIMEOUT,
+    ) else {
         return Ok(()); // not inside a git repository
     };
     let path = Path::new(cwd).join(path);
@@ -319,7 +502,7 @@ fn finish_placement(project: &Project, view: &SessionView, id: &str) -> Result<T
         t.last_state.clear();
         t.last_state_change = project::now();
     })?;
-    report_thread_tokens(&view.herdr, &thread, &project.slug, Group::Working);
+    report_thread_tokens(&view.herdr, project, &thread, &project.slug, Group::Working);
     Ok(thread)
 }
 
@@ -334,7 +517,12 @@ pub enum RestartPlan {
 }
 
 /// What `thread restart` does, from what the record shows was reached.
-pub fn restart_plan(thread: &Thread, live: &Live, branch_exists: bool, now: jiff::Timestamp) -> Result<RestartPlan> {
+pub fn restart_plan(
+    thread: &Thread,
+    live: &Live,
+    branch_exists: bool,
+    now: jiff::Timestamp,
+) -> Result<RestartPlan> {
     match thread.kind {
         Kind::Adopted => bail!("an adopted thread cannot be restarted; adopt a new pane instead"),
         Kind::Worktree | Kind::Tab => {}
@@ -342,15 +530,26 @@ pub fn restart_plan(thread: &Thread, live: &Live, branch_exists: bool, now: jiff
     if thread.status == Status::Resolved {
         bail!("{} is resolved; `thread resolve --reopen` first", thread.id);
     }
-    if thread.status == Status::Starting && thread::seconds_since(&thread.created, now) < thread::STARTING_TIMEOUT_SECS {
+    if thread.status == Status::Starting
+        && thread::seconds_since(&thread.created, now) < thread::STARTING_TIMEOUT_SECS
+    {
         bail!("{} is still starting", thread.id);
     }
     // (d)
     if live.agent_state.is_some() {
         bail!("{} is running: its pane has an agent in it", thread.id);
     }
-    if live.pane_exists && thread.prompt_pending && thread.launch_attempts < thread::MAX_LAUNCH_ATTEMPTS && thread.status == Status::Open {
-        bail!("{} is being launched by the ticker (attempt {} of {})", thread.id, thread.launch_attempts, thread::MAX_LAUNCH_ATTEMPTS);
+    if live.pane_exists
+        && thread.prompt_pending
+        && thread.launch_attempts < thread::MAX_LAUNCH_ATTEMPTS
+        && thread.status == Status::Open
+    {
+        bail!(
+            "{} is being launched by the ticker (attempt {} of {})",
+            thread.id,
+            thread.launch_attempts,
+            thread::MAX_LAUNCH_ATTEMPTS
+        );
     }
     if thread.kind == Kind::Worktree && thread.worktree_path.is_empty() {
         if branch_exists {
@@ -378,13 +577,28 @@ fn lists_for(view: &SessionView, record: &Thread) -> Result<(Vec<Agent>, Vec<Pan
         return Ok((view.agents.clone(), view.panes.clone()));
     }
     let herdr = view.herdr.on_machine(&record.machine);
-    let unreachable = |e: crate::herdr::HerdrError| anyhow::anyhow!("machine `{}` is unreachable: {e}", record.machine);
-    Ok((herdr.agent_list().map_err(unreachable)?, herdr.pane_list().map_err(unreachable)?))
+    let unreachable = |e: crate::herdr::HerdrError| {
+        anyhow::anyhow!("machine `{}` is unreachable: {e}", record.machine)
+    };
+    Ok((
+        herdr.agent_list().map_err(unreachable)?,
+        herdr.pane_list().map_err(unreachable)?,
+    ))
 }
 
 pub fn restart(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
+    organizations::validate_machine_spawn(record.role, record.can_spawn, &record.machine)?;
+    let safety = project.safety(&ctx.config_dir)?;
+    crate::agent_profile::AgentProfile {
+        harness: record.agent.clone(),
+        model: record.model.clone(),
+        reasoning_effort: record.reasoning_effort.clone(),
+        permission_profile: record.permission_profile.clone(),
+        raw_agent_args: record.raw_agent_args.clone(),
+    }
+    .argv(&safety.thread_agent_args)?;
     ticker::start(ctx)?;
     let view = require_session(ctx, &project)?;
     let (agents, panes) = lists_for(&view, &record)?;
@@ -393,10 +607,26 @@ pub fn restart(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
     let branch_exists = record.kind == Kind::Worktree && record.worktree_path.is_empty() && {
         let branch = thread::branch_name(slug, id, &record.title);
         if record.is_remote() {
-            let target = remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
+            let target = remote::ssh_target(
+                ctx.runner,
+                &ctx.env.herdr_bin(),
+                &ctx.config_dir,
+                &record.machine,
+            )?;
             remote::branch_exists(ctx.runner, &target, &record.repo, &branch)?
         } else {
-            git(ctx.runner, &record.repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], GIT_TIMEOUT).is_ok()
+            git(
+                ctx.runner,
+                &record.repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+                GIT_TIMEOUT,
+            )
+            .is_ok()
         }
     };
 
@@ -405,7 +635,11 @@ pub fn restart(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
         RestartPlan::ReusePane => {}
         RestartPlan::Reopen => match record.kind {
             Kind::Worktree => {
-                let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_open(&record.repo, &record.worktree_path, &record.title)?;
+                let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_open(
+                    &record.repo,
+                    &record.worktree_path,
+                    &record.title,
+                )?;
                 thread::update(&project, id, |t| {
                     t.worktree_path = path;
                     t.cwd = cwd;
@@ -455,7 +689,11 @@ pub fn prompt_state(record: &Thread, agents: &[Agent]) -> Result<String> {
         .find(|a| thread::agent_matches(record, a))
         .with_context(|| format!("no agent is detected in {}'s pane; text is never typed at a bare shell prompt (try `thread restart`)", record.id))?;
     match agent.agent_status.as_str() {
-        "blocked" => bail!("agent_blocked: {} is waiting on the user in its pane ({})", record.id, record.pane_id),
+        "blocked" => bail!(
+            "agent_blocked: {} is waiting on the user in its pane ({})",
+            record.id,
+            record.pane_id
+        ),
         "unknown" => bail!("{}'s agent state is unknown; not sending", record.id),
         state => Ok(state.to_string()),
     }
@@ -463,7 +701,9 @@ pub fn prompt_state(record: &Thread, agents: &[Agent]) -> Result<String> {
 
 pub fn ack(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
-    let record = thread::update(&project, id, |t| t.acked_report_hash = t.report_hash.clone())?;
+    let record = thread::update(&project, id, |t| {
+        t.acked_report_hash = t.report_hash.clone()
+    })?;
     if record.report_hash.is_empty() {
         println!("{id} has no report yet; nothing to acknowledge");
     } else {
@@ -475,14 +715,36 @@ pub fn ack(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
 #[derive(Default)]
 pub struct ResolveArgs {
     pub reopen: bool,
+    pub close_view: bool,
     pub remove_worktree: bool,
     pub skip_copy: bool,
     pub discard_uncopied: bool,
 }
 
+fn close_thread_view(view: &SessionView<'_>, slug: &str, thread: &Thread) -> Result<()> {
+    let herdr = view.herdr.on_machine(&thread.machine);
+    match thread.kind {
+        Kind::Worktree => herdr.workspace_close(&thread.workspace_id),
+        Kind::Tab => herdr.tab_close(&thread.tab_id),
+        Kind::Adopted => herdr.pane_close(&thread.pane_id),
+    }
+    .map_err(|error| anyhow::anyhow!(error))
+    .with_context(|| {
+        format!(
+            "{} could not close its Herdr view; retry with `node resolve {slug} {} --close-view`",
+            thread.id, thread.id
+        )
+    })
+}
+
 pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
+    if args.close_view && args.remove_worktree {
+        bail!(
+            "--close-view cannot be combined with --remove-worktree; removing a worktree already closes its workspace"
+        );
+    }
     if args.reopen {
         if record.status != Status::Resolved {
             bail!("{id} is not resolved");
@@ -491,14 +753,19 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
             t.status = Status::Open;
             t.resolved_reason.clear();
         })?;
-        println!("{id} is open again. Nothing was started; `thread restart {slug} {id}` brings its agent back.");
+        println!(
+            "{id} is open again. Nothing was started; `thread restart {slug} {id}` brings its agent back."
+        );
         return Ok(());
     }
     if args.skip_copy && args.remove_worktree {
         bail!("--skip-copy cannot be combined with --remove-worktree");
     }
     if args.remove_worktree && record.kind != Kind::Worktree {
-        bail!("--remove-worktree is only for worktree threads; {id} is a {:?} thread", record.kind);
+        bail!(
+            "--remove-worktree is only for worktree threads; {id} is a {:?} thread",
+            record.kind
+        );
     }
 
     // Every path that resolves a thread performs a final copy first.
@@ -512,11 +779,15 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
                     println!("  - {note}");
                 }
                 if args.remove_worktree && !args.discard_uncopied {
-                    bail!("refusing --remove-worktree: removing the worktree would delete what was not copied. Pass --discard-uncopied to accept that loss.");
+                    bail!(
+                        "refusing --remove-worktree: removing the worktree would delete what was not copied. Pass --discard-uncopied to accept that loss."
+                    );
                 }
             }
             CopyOutcome::Failed(error) => {
-                bail!("the final copy failed ({error}); not resolving. `--skip-copy` resolves without it.");
+                bail!(
+                    "the final copy failed ({error}); not resolving. `--skip-copy` resolves without it."
+                );
             }
         }
     }
@@ -526,18 +797,39 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         // The record says what exists: `delete` lists leftovers from it.
         thread::update(&project, id, |t| t.worktree_path.clear())?;
     }
+    let view = if args.close_view {
+        let view = require_session(ctx, &project)?;
+        clear_thread_tokens(&view.herdr, &record);
+        close_thread_view(&view, slug, &record)?;
+        Some(view)
+    } else {
+        session_view(ctx, &project)
+    };
     let resolved = thread::update(&project, id, |t| {
         t.status = Status::Resolved;
         t.resolved_reason = "manual".into();
         t.prompt_pending = false;
     })?;
-    if let Some(view) = session_view(ctx, &project) {
+    if !args.close_view
+        && let Some(view) = view
+    {
         clear_thread_tokens(&view.herdr, &resolved);
     }
     println!("{id} resolved.");
-    if !args.remove_worktree {
+    if args.close_view {
+        println!(
+            "Its Herdr {} was closed; recorded Git artifacts were left unchanged.",
+            match resolved.kind {
+                Kind::Worktree => "workspace",
+                Kind::Tab => "tab",
+                Kind::Adopted => "pane",
+            }
+        );
+    } else if !args.remove_worktree {
         match resolved.kind {
-            Kind::Worktree if resolved.worktree_path.is_empty() => println!("No worktree was recorded for it, so there is nothing to close or remove."),
+            Kind::Worktree if resolved.worktree_path.is_empty() => {
+                println!("No worktree was recorded for it, so there is nothing to close or remove.")
+            }
             Kind::Worktree => println!(
                 "Its pane, workspace, worktree ({}) and branch ({}) were left alone. Close the workspace in herdr, or run `thread resolve {slug} {id} --remove-worktree`.",
                 resolved.worktree_path, resolved.branch
@@ -545,7 +837,10 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
             _ => println!("Its pane and tab were left alone; close them in herdr."),
         }
     } else {
-        println!("The worktree {} was removed; the branch {} was kept.", record.worktree_path, resolved.branch);
+        println!(
+            "The worktree {} was removed; the branch {} was kept.",
+            record.worktree_path, resolved.branch
+        );
     }
     Ok(())
 }
@@ -553,9 +848,17 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
 /// The final report and library copy, storing the new report hash.
 pub fn final_copy(ctx: &Ctx, project: &Project, record: &Thread) -> thread::Copied {
     let copied = if record.is_remote() {
-        match remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine) {
+        match remote::ssh_target(
+            ctx.runner,
+            &ctx.env.herdr_bin(),
+            &ctx.config_dir,
+            &record.machine,
+        ) {
             Ok(target) => thread::copy_home_remote(project, record, true, ctx.runner, &target),
-            Err(error) => thread::Copied { outcome: CopyOutcome::Failed(format!("{error:#}")), report_hash: None },
+            Err(error) => thread::Copied {
+                outcome: CopyOutcome::Failed(format!("{error:#}")),
+                report_hash: None,
+            },
         }
     } else {
         thread::copy_home_local(project, record, true, ctx.runner)
@@ -579,20 +882,42 @@ fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread) -> Result<()> 
     }
     let view = require_session(ctx, project)?;
     let (_, panes) = lists_for(&view, record)?;
-    let workspace_open = panes.iter().any(|p| p.workspace_id == record.workspace_id && Path::new(&p.cwd).starts_with(&record.worktree_path));
+    let workspace_open = panes.iter().any(|p| {
+        p.workspace_id == record.workspace_id
+            && Path::new(&p.cwd).starts_with(&record.worktree_path)
+    });
     if workspace_open {
-        return view.herdr.on_machine(&record.machine).worktree_remove(&record.workspace_id).map_err(|error| anyhow::anyhow!("{error}"));
+        return view
+            .herdr
+            .on_machine(&record.machine)
+            .worktree_remove(&record.workspace_id)
+            .map_err(|error| anyhow::anyhow!("{error}"));
     }
     if record.is_remote() {
-        let target = remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
-        let script = format!("cd {} && git worktree remove {}", remote::quote(&record.repo), remote::quote(&record.worktree_path));
+        let target = remote::ssh_target(
+            ctx.runner,
+            &ctx.env.herdr_bin(),
+            &ctx.config_dir,
+            &record.machine,
+        )?;
+        let script = format!(
+            "cd {} && git worktree remove {}",
+            remote::quote(&record.repo),
+            remote::quote(&record.worktree_path)
+        );
         let out = remote::ssh(ctx.runner, &target, &script, None, Duration::from_secs(20))?;
         if !out.success() {
             bail!("{}", out.error_text());
         }
         return Ok(());
     }
-    git(ctx.runner, &record.repo, &["worktree", "remove", &record.worktree_path], Duration::from_secs(20)).map(|_| ())
+    git(
+        ctx.runner,
+        &record.repo,
+        &["worktree", "remove", &record.worktree_path],
+        Duration::from_secs(20),
+    )
+    .map(|_| ())
 }
 
 /// A thread with its live state and group, for `thread list`, `thread show`
@@ -614,22 +939,45 @@ pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
 
 fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     // Before the first poll a thread that is waiting for its launch is Working.
-    let recorded = Group::from_token(&t.last_group).unwrap_or(if t.prompt_pending { Group::Working } else { Group::Idle });
+    let recorded = Group::from_token(&t.last_group).unwrap_or(if t.prompt_pending {
+        Group::Working
+    } else {
+        Group::Idle
+    });
     if t.status == Status::Resolved {
-        return Row { thread: t.clone(), group: Group::Resolved, note: t.resolved_reason.clone() };
+        return Row {
+            thread: t.clone(),
+            group: Group::Resolved,
+            note: t.resolved_reason.clone(),
+        };
     }
     let Some(view) = view else {
         // Records are still printed; panes are not treated as gone.
-        return Row { thread: t.clone(), group: recorded, note: "session unreachable".into() };
+        return Row {
+            thread: t.clone(),
+            group: recorded,
+            note: "session unreachable".into(),
+        };
     };
     if t.is_remote() {
         // Remote state is what the ticker last polled; the CLI makes no ssh call.
-        let state = if t.last_state.is_empty() { "not polled yet" } else { &t.last_state };
-        return Row { thread: t.clone(), group: recorded, note: format!("{state}, on {}", t.machine) };
+        let state = if t.last_state.is_empty() {
+            "not polled yet"
+        } else {
+            &t.last_state
+        };
+        return Row {
+            thread: t.clone(),
+            group: recorded,
+            note: format!("{state}, on {}", t.machine),
+        };
     }
     let live = thread::live_state(t, &view.agents, &view.panes, now);
     // A report the ticker has not hashed yet still counts, as it does for the ticker.
-    let fresh = Thread { report_hash: thread::local_report_hash(t).unwrap_or_else(|| t.report_hash.clone()), ..t.clone() };
+    let fresh = Thread {
+        report_hash: thread::local_report_hash(t).unwrap_or_else(|| t.report_hash.clone()),
+        ..t.clone()
+    };
     let group = thread::group(&fresh, &live, now);
     let note = if t.status == Status::Failed {
         format!("failed: {}", t.error)
@@ -638,13 +986,46 @@ fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     } else {
         live.agent_state.unwrap_or_else(|| "no agent".into())
     };
-    Row { thread: t.clone(), group, note }
+    Row {
+        thread: t.clone(),
+        group,
+        note,
+    }
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     for row in rows(ctx, &project) {
-        println!("{}\t{}\t{}\t{}", row.thread.id, row.group.label(), row.note, row.thread.title);
+        println!(
+            "{}\t{}\t{}\t{}",
+            row.thread.id,
+            row.group.label(),
+            row.note,
+            row.thread.title
+        );
+    }
+    Ok(())
+}
+
+pub fn print_node_list(ctx: &Ctx, slug: &str) -> Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let entries = organizations::tree(&project)?;
+    let rows = rows(ctx, &project);
+    for entry in entries {
+        let group = rows
+            .iter()
+            .find(|row| row.thread.id == entry.thread.id)
+            .map(|row| row.group.label())
+            .unwrap_or("Unknown");
+        println!(
+            "{}{}\t{}\tparent={}\t{}\t{}",
+            entry.prefix,
+            entry.thread.id,
+            entry.thread.role.as_str(),
+            organizations::parent_id(&entry.thread),
+            group,
+            entry.thread.title
+        );
     }
     Ok(())
 }
@@ -685,79 +1066,166 @@ mod tests {
     }
 
     fn gone() -> Live {
-        Live { pane_exists: false, agent_state: None, state_secs: 0 }
+        Live {
+            pane_exists: false,
+            agent_state: None,
+            state_secs: 0,
+        }
     }
 
     fn shell() -> Live {
-        Live { pane_exists: true, agent_state: None, state_secs: 0 }
+        Live {
+            pane_exists: true,
+            agent_state: None,
+            state_secs: 0,
+        }
     }
 
     #[test]
     fn restart_case_a_nothing_created() {
-        let t = Thread { status: Status::Failed, worktree_path: String::new(), ..worktree_thread() };
-        assert_eq!(restart_plan(&t, &gone(), false, now()).unwrap(), RestartPlan::Create);
+        let t = Thread {
+            status: Status::Failed,
+            worktree_path: String::new(),
+            ..worktree_thread()
+        };
+        assert_eq!(
+            restart_plan(&t, &gone(), false, now()).unwrap(),
+            RestartPlan::Create
+        );
     }
 
     #[test]
     fn restart_case_b_branch_without_worktree_needs_a_human() {
-        let t = Thread { status: Status::Failed, worktree_path: String::new(), ..worktree_thread() };
-        let error = restart_plan(&t, &gone(), true, now()).unwrap_err().to_string();
+        let t = Thread {
+            status: Status::Failed,
+            worktree_path: String::new(),
+            ..worktree_thread()
+        };
+        let error = restart_plan(&t, &gone(), true, now())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("thread resolve"), "{error}");
     }
 
     #[test]
     fn restart_case_c_reuses_a_pane_at_a_shell_prompt() {
-        assert_eq!(restart_plan(&worktree_thread(), &shell(), false, now()).unwrap(), RestartPlan::ReusePane);
+        assert_eq!(
+            restart_plan(&worktree_thread(), &shell(), false, now()).unwrap(),
+            RestartPlan::ReusePane
+        );
     }
 
     #[test]
     fn restart_case_d_refuses_a_running_thread() {
-        let running = Live { pane_exists: true, agent_state: Some("working".into()), state_secs: 0 };
+        let running = Live {
+            pane_exists: true,
+            agent_state: Some("working".into()),
+            state_secs: 0,
+        };
         assert!(restart_plan(&worktree_thread(), &running, false, now()).is_err());
     }
 
     #[test]
     fn restart_case_e_reopens_the_worktree() {
-        assert_eq!(restart_plan(&worktree_thread(), &gone(), false, now()).unwrap(), RestartPlan::Reopen);
-        let tab = Thread { kind: Kind::Tab, worktree_path: String::new(), ..worktree_thread() };
-        assert_eq!(restart_plan(&tab, &gone(), false, now()).unwrap(), RestartPlan::Reopen);
+        assert_eq!(
+            restart_plan(&worktree_thread(), &gone(), false, now()).unwrap(),
+            RestartPlan::Reopen
+        );
+        let tab = Thread {
+            kind: Kind::Tab,
+            worktree_path: String::new(),
+            ..worktree_thread()
+        };
+        assert_eq!(
+            restart_plan(&tab, &gone(), false, now()).unwrap(),
+            RestartPlan::Reopen
+        );
     }
 
     #[test]
     fn restart_refuses_a_launch_in_progress_adopted_resolved_and_young_starting() {
-        let launching = Thread { prompt_pending: true, launch_attempts: 1, ..worktree_thread() };
+        let launching = Thread {
+            prompt_pending: true,
+            launch_attempts: 1,
+            ..worktree_thread()
+        };
         assert!(restart_plan(&launching, &shell(), false, now()).is_err());
-        let exhausted = Thread { prompt_pending: true, launch_attempts: 3, ..worktree_thread() };
-        assert_eq!(restart_plan(&exhausted, &shell(), false, now()).unwrap(), RestartPlan::ReusePane);
+        let exhausted = Thread {
+            prompt_pending: true,
+            launch_attempts: 3,
+            ..worktree_thread()
+        };
+        assert_eq!(
+            restart_plan(&exhausted, &shell(), false, now()).unwrap(),
+            RestartPlan::ReusePane
+        );
 
-        let adopted = Thread { kind: Kind::Adopted, ..worktree_thread() };
+        let adopted = Thread {
+            kind: Kind::Adopted,
+            ..worktree_thread()
+        };
         assert!(restart_plan(&adopted, &gone(), false, now()).is_err());
-        let resolved = Thread { status: Status::Resolved, ..worktree_thread() };
+        let resolved = Thread {
+            status: Status::Resolved,
+            ..worktree_thread()
+        };
         assert!(restart_plan(&resolved, &gone(), false, now()).is_err());
 
-        let young = Thread { status: Status::Starting, created: "2026-09-17T11:59:00Z".into(), worktree_path: String::new(), ..worktree_thread() };
+        let young = Thread {
+            status: Status::Starting,
+            created: "2026-09-17T11:59:00Z".into(),
+            worktree_path: String::new(),
+            ..worktree_thread()
+        };
         assert!(restart_plan(&young, &gone(), false, now()).is_err());
-        let stale = Thread { created: "2026-09-17T11:00:00Z".into(), ..young };
-        assert_eq!(restart_plan(&stale, &gone(), false, now()).unwrap(), RestartPlan::Create);
+        let stale = Thread {
+            created: "2026-09-17T11:00:00Z".into(),
+            ..young
+        };
+        assert_eq!(
+            restart_plan(&stale, &gone(), false, now()).unwrap(),
+            RestartPlan::Create
+        );
     }
 
     fn agent(state: &str) -> Agent {
-        Agent { pane_id: "w2:p1".into(), agent_status: state.into(), ..Agent::default() }
+        Agent {
+            pane_id: "w2:p1".into(),
+            agent_status: state.into(),
+            ..Agent::default()
+        }
     }
 
     #[test]
     fn prompt_refusals_and_sending_while_working() {
-        let t = Thread { agent_name: String::new(), kind: Kind::Adopted, ..worktree_thread() };
-        assert!(prompt_state(&t, &[]).unwrap_err().to_string().contains("bare shell prompt"));
+        let t = Thread {
+            agent_name: String::new(),
+            kind: Kind::Adopted,
+            ..worktree_thread()
+        };
+        assert!(
+            prompt_state(&t, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("bare shell prompt")
+        );
         assert!(prompt_state(&t, &[agent("unknown")]).is_err());
-        assert!(prompt_state(&t, &[agent("blocked")]).unwrap_err().to_string().contains("agent_blocked"));
+        assert!(
+            prompt_state(&t, &[agent("blocked")])
+                .unwrap_err()
+                .to_string()
+                .contains("agent_blocked")
+        );
         assert_eq!(prompt_state(&t, &[agent("working")]).unwrap(), "working");
         assert_eq!(prompt_state(&t, &[agent("idle")]).unwrap(), "idle");
     }
 
     #[test]
     fn token_values_and_ranks() {
-        let tokens = thread_tokens(&worktree_thread(), "demo", Group::WaitingOnYou);
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let thread = world.thread(&project, world.home.path(), |_| {});
+        let tokens = thread_tokens(&project, &thread, "demo", Group::WaitingOnYou);
         assert_eq!(
             tokens,
             vec![
@@ -765,6 +1233,10 @@ mod tests {
                 ("thread".to_string(), "t-0001".to_string()),
                 ("review".to_string(), "waiting-on-you".to_string()),
                 ("rank".to_string(), "2".to_string()),
+                ("depth".to_string(), "1".to_string()),
+                ("parent".to_string(), "root".to_string()),
+                ("role".to_string(), "worker".to_string()),
+                ("tree-order".to_string(), "1".to_string()),
             ]
         );
     }
@@ -772,7 +1244,14 @@ mod tests {
     #[test]
     fn exclude_is_added_once() {
         let repo = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(repo.path()).args(args).output().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
         run(&["init", "-q"]);
         let cwd = repo.path().to_string_lossy().into_owned();
         exclude_from_git(&crate::runner::RealRunner, &cwd).unwrap();
