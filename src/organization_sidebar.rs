@@ -9,11 +9,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::herdr::{Herdr, Pane};
@@ -38,6 +41,7 @@ const TOKEN_WORKSPACE: &str = "org_workspace";
 const TOKEN_HEARTBEAT: &str = "org_heartbeat";
 const TOKEN_TTL: Duration = Duration::from_secs(60);
 const TOKEN_REFRESH: Duration = Duration::from_secs(10);
+const VIEW_REFRESH: Duration = Duration::from_secs(5);
 const LOCK_WAIT: Duration = Duration::from_millis(50);
 const LOCK_ATTEMPTS: usize = 40;
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
@@ -445,7 +449,7 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("could not enable sidebar input")?;
         let guard = Self;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen) {
+        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
             let _ = terminal::disable_raw_mode();
             return Err(error).context("could not open organization sidebar screen");
         }
@@ -457,6 +461,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             io::stdout(),
+            Show,
             LeaveAlternateScreen,
             ResetColor,
             SetAttribute(Attribute::Reset)
@@ -532,6 +537,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let mut last_heartbeat = Instant::now();
     let mut last_size = None;
     let mut dirty = true;
+    let mut rendered_frame = Vec::new();
 
     loop {
         let (width, height) = terminal::size().unwrap_or((40, 24));
@@ -539,10 +545,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         if last_size != Some(size) {
             last_size = Some(size);
             dirty = true;
+            rendered_frame.clear();
         }
         if dirty {
-            render(
+            render_incremental(
                 &mut io::stdout(),
+                &mut rendered_frame,
                 &screen,
                 &settings,
                 &message,
@@ -556,7 +564,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             let _ = report_identity(&herdr, pane_id, slug, workspace);
             last_heartbeat = Instant::now();
         }
-        if last_refresh.elapsed() >= Duration::from_secs(5) {
+        if last_refresh.elapsed() >= VIEW_REFRESH {
             if let Screen::Tree {
                 view: tree_view,
                 selected,
@@ -584,11 +592,19 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             }
             last_refresh = Instant::now();
         }
-        if !event::poll(Duration::from_millis(250))? {
+        let poll_timeout = VIEW_REFRESH
+            .saturating_sub(last_refresh.elapsed())
+            .min(TOKEN_REFRESH.saturating_sub(last_heartbeat.elapsed()));
+        if !event::poll(poll_timeout)? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Resize(_, _) => {
+                dirty = true;
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -808,6 +824,7 @@ fn toggle_collapse(
     }
 }
 
+#[cfg(test)]
 fn render(
     writer: &mut impl Write,
     screen: &Screen,
@@ -816,7 +833,63 @@ fn render(
     width: usize,
     height: usize,
 ) -> Result<()> {
-    execute!(writer, MoveTo(0, 0), Clear(ClearType::All))?;
+    render_incremental(
+        writer,
+        &mut Vec::new(),
+        screen,
+        settings,
+        message,
+        width,
+        height,
+    )
+}
+
+fn render_incremental(
+    writer: &mut impl Write,
+    previous: &mut Vec<Vec<u8>>,
+    screen: &Screen,
+    settings: &SidebarSettings,
+    message: &str,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    let frame = build_frame(screen, settings, message, width, height)?;
+    if *previous == frame {
+        return Ok(());
+    }
+    execute!(writer, BeginSynchronizedUpdate)?;
+    for (row, content) in frame.iter().enumerate() {
+        if previous.get(row) == Some(content) {
+            continue;
+        }
+        execute!(
+            writer,
+            MoveTo(0, row.min(u16::MAX as usize) as u16),
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::CurrentLine)
+        )?;
+        writer.write_all(content)?;
+    }
+    execute!(
+        writer,
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+        EndSynchronizedUpdate
+    )?;
+    writer.flush()?;
+    *previous = frame;
+    Ok(())
+}
+
+fn build_frame(
+    screen: &Screen,
+    settings: &SidebarSettings,
+    message: &str,
+    width: usize,
+    height: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let mut frame = vec![Vec::new(); height.max(1)];
     match screen {
         Screen::Tree {
             view,
@@ -824,14 +897,15 @@ fn render(
             root_collapsed,
             selected,
         } => {
-            write_line(
-                writer,
+            set_plain_row(
+                &mut frame,
+                0,
                 &format!("{}  ⚙ Settings [s]", project_label(&view.project)),
                 width,
-            )?;
-            write_line(writer, "Organization", width)?;
+            );
+            set_plain_row(&mut frame, 1, "Organization", width);
             let rows = visible_rows(view, collapsed, *root_collapsed);
-            let body_capacity = height.saturating_sub(4).max(1);
+            let body_capacity = height.saturating_sub(5).max(1);
             let range = visible_range(rows.len(), *selected, body_capacity);
             let row_context = TreeRowContext {
                 view,
@@ -840,62 +914,134 @@ fn render(
                 root_collapsed: *root_collapsed,
                 width,
             };
-            for (index, row) in rows.iter().enumerate().take(range.end).skip(range.start) {
-                write_tree_row(writer, row, index == *selected, &row_context)?;
+            for (visible_index, (index, row)) in rows
+                .iter()
+                .enumerate()
+                .take(range.end)
+                .skip(range.start)
+                .enumerate()
+            {
+                set_styled_row(
+                    &mut frame,
+                    2 + visible_index,
+                    tree_row_bytes(row, index == *selected, &row_context)?,
+                );
             }
             if view.omitted_nodes > 0 {
-                write_line(
-                    writer,
+                set_plain_row(
+                    &mut frame,
+                    2 + range.len(),
                     &format!("… {} more nodes", view.omitted_nodes),
                     width,
-                )?;
+                );
             }
             if message.is_empty() {
-                write_at_bottom(
-                    writer,
+                set_plain_row(
+                    &mut frame,
+                    height.saturating_sub(3),
                     "↑/↓ or j/k move · Enter focus · Space fold",
                     width,
-                    height.saturating_sub(2),
-                )?;
-                write_at_bottom(writer, "s settings · q/Esc close", width, height)?;
+                );
+                set_plain_row(
+                    &mut frame,
+                    height.saturating_sub(1),
+                    "s settings · q/Esc close",
+                    width,
+                );
             } else {
-                write_at_bottom(writer, message, width, height)?;
+                set_plain_row(&mut frame, height.saturating_sub(1), message, width);
             }
         }
         Screen::Settings { selected } => {
-            write_line(writer, "⚙ Organization sidebar settings", width)?;
-            write_line(writer, "Select an option; ←/→ or Space changes it", width)?;
+            set_plain_row(&mut frame, 0, "⚙ Organization sidebar settings", width);
+            set_plain_row(
+                &mut frame,
+                1,
+                "Select an option; ←/→ or Space changes it",
+                width,
+            );
             for (index, label) in setting_labels(settings).iter().enumerate() {
-                write_selectable_line(writer, label, width, index == *selected)?;
+                set_styled_row(
+                    &mut frame,
+                    index + 2,
+                    selectable_row_bytes(label, width, index == *selected)?,
+                );
             }
-            write_line(writer, "Keyboard shortcuts", width)?;
-            write_line(
-                writer,
+            let shortcuts_row = 2 + SETTINGS_COUNT;
+            set_plain_row(&mut frame, shortcuts_row, "Keyboard shortcuts", width);
+            set_plain_row(
+                &mut frame,
+                shortcuts_row + 1,
                 "Global picker: organizations (Ctrl+B, Shift+O)",
                 width,
-            )?;
-            write_line(writer, "Project tree: organization-sidebar", width)?;
-            write_line(writer, "Suggested: Ctrl+B, Shift+H", width)?;
-            write_line(
-                writer,
+            );
+            set_plain_row(
+                &mut frame,
+                shortcuts_row + 2,
+                "Project tree: organization-sidebar",
+                width,
+            );
+            set_plain_row(
+                &mut frame,
+                shortcuts_row + 3,
+                "Suggested: Ctrl+B, Shift+H",
+                width,
+            );
+            set_plain_row(
+                &mut frame,
+                shortcuts_row + 4,
                 "Bind in Herdr; dock/width apply after reopening",
                 width,
-            )?;
+            );
             if message.is_empty() {
-                write_at_bottom(
-                    writer,
+                set_plain_row(
+                    &mut frame,
+                    height.saturating_sub(3),
                     "↑/↓ move · ←/→ change · Space toggle",
                     width,
-                    height.saturating_sub(2),
-                )?;
-                write_at_bottom(writer, "Esc back · q close", width, height)?;
+                );
+                set_plain_row(
+                    &mut frame,
+                    height.saturating_sub(1),
+                    "Esc back · q close",
+                    width,
+                );
             } else {
-                write_at_bottom(writer, message, width, height)?;
+                set_plain_row(&mut frame, height.saturating_sub(1), message, width);
             }
         }
     }
-    writer.flush()?;
-    Ok(())
+    Ok(frame)
+}
+
+fn set_plain_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
+    if let Some(target) = frame.get_mut(row) {
+        *target = organizations_ui::fit_terminal_row(value, width).into_bytes();
+    }
+}
+
+fn set_styled_row(frame: &mut [Vec<u8>], row: usize, value: Vec<u8>) {
+    if let Some(target) = frame.get_mut(row) {
+        *target = value;
+    }
+}
+
+fn tree_row_bytes(
+    row: &VisibleRow<'_>,
+    selected: bool,
+    context: &TreeRowContext<'_>,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    write_tree_row(&mut output, row, selected, context)?;
+    output.truncate(output.len().saturating_sub(2));
+    Ok(output)
+}
+
+fn selectable_row_bytes(value: &str, width: usize, selected: bool) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    write_selectable_line(&mut output, value, width, selected)?;
+    output.truncate(output.len().saturating_sub(2));
+    Ok(output)
 }
 
 struct TreeRowContext<'a> {
@@ -1103,15 +1249,6 @@ fn modify_setting(settings: &mut SidebarSettings, selected: usize, direction: is
     }
 }
 
-fn write_line(writer: &mut impl Write, value: &str, width: usize) -> Result<()> {
-    write!(
-        writer,
-        "{}\r\n",
-        organizations_ui::fit_terminal_row(value, width)
-    )?;
-    Ok(())
-}
-
 fn write_selectable_line(
     writer: &mut impl Write,
     value: &str,
@@ -1130,22 +1267,6 @@ fn write_selectable_line(
         execute!(writer, SetAttribute(Attribute::Reset))?;
     }
     write!(writer, "\r\n")?;
-    Ok(())
-}
-
-fn write_at_bottom(
-    writer: &mut impl Write,
-    value: &str,
-    width: usize,
-    height: usize,
-) -> Result<()> {
-    let row = height.saturating_sub(1).min(u16::MAX as usize) as u16;
-    execute!(writer, MoveTo(0, row))?;
-    write!(
-        writer,
-        "{}",
-        organizations_ui::fit_terminal_row(value, width)
-    )?;
     Ok(())
 }
 
@@ -1282,6 +1403,56 @@ mod tests {
             .groups
             .insert("t-0001".into(), Group::ReadyForReview);
         assert!(tree_view_changed(&current, &changed));
+    }
+
+    #[test]
+    fn moving_selection_repaints_only_the_two_changed_rows() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            entries: organizations::tree_from(&[thread_model::Thread {
+                id: "t-0001".into(),
+                title: "Worker".into(),
+                ..thread_model::Thread::default()
+            }])
+            .unwrap(),
+            groups: HashMap::from([("t-0001".into(), Group::Working)]),
+            omitted_nodes: 0,
+        };
+        let settings = SidebarSettings::default();
+        let collapsed = BTreeSet::new();
+        let mut previous = Vec::new();
+        let mut output = Vec::new();
+        let initial = Screen::Tree {
+            view: view.clone(),
+            collapsed: collapsed.clone(),
+            root_collapsed: false,
+            selected: 0,
+        };
+        render_incremental(&mut output, &mut previous, &initial, &settings, "", 80, 24).unwrap();
+        let full_render_bytes = output.len();
+
+        output.clear();
+        let moved = Screen::Tree {
+            view,
+            collapsed,
+            root_collapsed: false,
+            selected: 1,
+        };
+        render_incremental(&mut output, &mut previous, &moved, &settings, "", 80, 24).unwrap();
+        let mut clear_sequence = Vec::new();
+        execute!(&mut clear_sequence, Clear(ClearType::CurrentLine)).unwrap();
+        let changed_rows = output
+            .windows(clear_sequence.len())
+            .filter(|window| *window == clear_sequence)
+            .count();
+        assert_eq!(changed_rows, 2);
+        assert!(output.len() < full_render_bytes);
+
+        output.clear();
+        render_incremental(&mut output, &mut previous, &moved, &settings, "", 80, 24).unwrap();
+        assert!(output.is_empty());
     }
 
     #[test]
