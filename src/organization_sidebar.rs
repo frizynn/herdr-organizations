@@ -1,6 +1,6 @@
 //! Contextual, docked organization tree for the Herdr project workspace.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
@@ -33,6 +33,8 @@ pub const AUTO_OPEN_ACTION_ID: &str = "organization-sidebar-auto-open";
 
 const PROJECT_ENV: &str = "HERDR_ORGANIZATIONS_PROJECT";
 const WORKSPACE_ENV: &str = "HERDR_ORGANIZATIONS_WORKSPACE";
+const TAB_ENV: &str = "HERDR_ORGANIZATIONS_TAB";
+const SELECTED_PANE_ENV: &str = "HERDR_ORGANIZATIONS_SELECTED_PANE";
 const CONFIG_FILE: &str = "organization-sidebar.json";
 const LOCK_FILE_PREFIX: &str = ".organization-sidebar-";
 const STATE_FILE_PREFIX: &str = ".organization-sidebar-state-";
@@ -122,6 +124,9 @@ struct SidebarState {
     slug: String,
     workspace: String,
     socket: String,
+    open: bool,
+    panes: BTreeMap<String, String>,
+    // Read old state files once and migrate them through workspace discovery.
     pane_id: String,
 }
 
@@ -154,24 +159,10 @@ fn load_sidebar_state(config_dir: &Path, workspace: &str) -> Option<SidebarState
     project::read_json(&sidebar_state_path(config_dir, workspace))
 }
 
-fn save_sidebar_state(
-    config_dir: &Path,
-    slug: &str,
-    workspace: &str,
-    socket: &str,
-    pane_id: &str,
-) -> Result<()> {
+fn save_sidebar_state(config_dir: &Path, state: &SidebarState) -> Result<()> {
     fs::create_dir_all(config_dir)
         .with_context(|| format!("could not create {}", config_dir.display()))?;
-    project::write_json(
-        &sidebar_state_path(config_dir, workspace),
-        &SidebarState {
-            slug: slug.to_string(),
-            workspace: workspace.to_string(),
-            socket: socket.to_string(),
-            pane_id: pane_id.to_string(),
-        },
-    )
+    project::write_json(&sidebar_state_path(config_dir, &state.workspace), state)
 }
 
 pub fn load_settings(ctx: &Ctx) -> Result<SidebarSettings> {
@@ -200,27 +191,43 @@ pub fn save_settings(ctx: &Ctx, settings: &SidebarSettings) -> Result<()> {
     project::write_json(&path, &settings)
 }
 
-pub fn toggle(ctx: &Ctx, slug: &str, workspace: &str, source_pane: &str) -> Result<ToggleResult> {
-    operate(ctx, slug, workspace, source_pane, Operation::Toggle)
+pub fn toggle(
+    ctx: &Ctx,
+    slug: &str,
+    workspace: &str,
+    tab: &str,
+    source_pane: &str,
+) -> Result<ToggleResult> {
+    operate(ctx, slug, workspace, tab, source_pane, Operation::Toggle)
 }
 
 pub fn ensure_auto_open(
     ctx: &Ctx,
     slug: Option<&str>,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
 ) -> Result<ToggleResult> {
     if slug.is_none() || workspace.is_empty() || ctx.env.var("HERDR_PLUGIN_CONFIG_DIR").is_none() {
         return Ok(ToggleResult::AlreadyOpen);
     }
     let settings = load_settings(ctx)?;
-    if !settings.auto_open {
+    let sticky_open = config_dir(ctx)
+        .ok()
+        .and_then(|dir| load_sidebar_state(&dir, workspace))
+        .is_some_and(|state| {
+            state.slug == slug.unwrap_or_default()
+                && state.socket == ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("")
+                && state.open
+        });
+    if !settings.auto_open && !sticky_open {
         return Ok(ToggleResult::AlreadyOpen);
     }
     operate_with_settings(
         ctx,
         slug.expect("checked above"),
         workspace,
+        tab,
         source_pane,
         Operation::Ensure,
         settings,
@@ -231,24 +238,26 @@ fn operate(
     ctx: &Ctx,
     slug: &str,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
     operation: Operation,
 ) -> Result<ToggleResult> {
     let settings = load_settings(ctx)?;
-    operate_with_settings(ctx, slug, workspace, source_pane, operation, settings)
+    operate_with_settings(ctx, slug, workspace, tab, source_pane, operation, settings)
 }
 
 fn operate_with_settings(
     ctx: &Ctx,
     slug: &str,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
     operation: Operation,
     settings: SidebarSettings,
 ) -> Result<ToggleResult> {
     project::validate_slug(slug)?;
-    if workspace.is_empty() {
-        bail!("Herdr did not provide a workspace for the organization sidebar");
+    if workspace.is_empty() || tab.is_empty() {
+        bail!("Herdr did not provide a workspace and tab for the organization sidebar");
     }
     let config_dir = config_dir(ctx)?;
     let _lock = OperationLock::acquire(&config_dir, workspace)?;
@@ -257,60 +266,91 @@ fn operate_with_settings(
         .var("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set for this Herdr action")?;
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
-    let state = load_sidebar_state(&config_dir, workspace);
-    let matching_state = state.as_ref().filter(|state| {
-        state.slug == slug && state.workspace == workspace && state.socket == socket
+    let loaded = load_sidebar_state(&config_dir, workspace);
+    let matching = loaded.as_ref().is_some_and(|state| {
+        state.slug == slug
+            && state.workspace == workspace
+            && state.socket == socket
+            && state.pane_id.is_empty()
     });
-    let mut discovered_panes = None;
-    let mut own_panes = Vec::new();
-    if let Some(state) = matching_state.filter(|state| !state.pane_id.is_empty()) {
-        match herdr.pane_get(&state.pane_id) {
-            Ok(pane) if pane.workspace_id == workspace => own_panes.push(pane),
-            Ok(_) => {
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-            }
-            Err(error) if error.code == "pane_not_found" => {
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-            }
-            Err(error) => return Err(anyhow::anyhow!("{error}")),
+    let mut state = if matching {
+        loaded.unwrap()
+    } else {
+        SidebarState {
+            slug: slug.to_string(),
+            workspace: workspace.to_string(),
+            socket: socket.to_string(),
+            ..SidebarState::default()
         }
-    } else if matching_state.is_none() {
+    };
+    let mut discovered_panes = None;
+    if !matching {
         let panes = herdr
             .pane_list_workspace(workspace)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        own_panes = panes
+        for pane in panes
             .iter()
             .filter(|pane| sidebar_pane(pane, slug, workspace))
-            .cloned()
-            .collect();
-        discovered_panes = Some(panes);
-        if let Some(pane) = own_panes.first() {
-            save_sidebar_state(&config_dir, slug, workspace, socket, &pane.pane_id)?;
-        } else {
-            save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
+        {
+            state
+                .panes
+                .insert(pane.tab_id.clone(), pane.pane_id.clone());
         }
+        state.open = !state.panes.is_empty();
+        discovered_panes = Some(panes);
+        save_sidebar_state(&config_dir, &state)?;
     }
-    own_panes.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
 
-    if !own_panes.is_empty() {
-        match operation {
-            Operation::Ensure => return Ok(ToggleResult::AlreadyOpen),
-            Operation::Toggle
-                if settings.strict_toggle || own_panes.iter().any(|pane| pane.focused) =>
-            {
-                for pane in own_panes {
-                    close_sidebar_pane(&herdr, &pane.pane_id)?;
-                }
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-                return Ok(ToggleResult::Closed);
+    if matches!(operation, Operation::Toggle)
+        && state.open
+        && !settings.strict_toggle
+        && settings.focus_on_open
+        && let Some(pane_id) = state.panes.get(tab)
+    {
+        herdr
+            .plugin_pane_focus(pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(ToggleResult::Focused);
+    }
+
+    if matches!(operation, Operation::Toggle) && state.open {
+        for pane_id in state.panes.values() {
+            close_sidebar_pane(&herdr, pane_id)?;
+        }
+        state.open = false;
+        state.panes.clear();
+        save_sidebar_state(&config_dir, &state)?;
+        return Ok(ToggleResult::Closed);
+    }
+
+    if matches!(operation, Operation::Toggle) || settings.auto_open {
+        state.open = true;
+    }
+    if !state.open {
+        return Ok(ToggleResult::AlreadyOpen);
+    }
+
+    if let Some(pane_id) = state.panes.get(tab).cloned() {
+        if discovered_panes.as_ref().is_some_and(|panes| {
+            panes.iter().any(|pane| {
+                pane.pane_id == pane_id && pane.workspace_id == workspace && pane.tab_id == tab
+            })
+        }) {
+            return Ok(ToggleResult::AlreadyOpen);
+        }
+        match herdr.pane_get(&pane_id) {
+            Ok(pane) if pane.workspace_id == workspace && pane.tab_id == tab => {
+                return Ok(ToggleResult::AlreadyOpen);
             }
-            Operation::Toggle if settings.focus_on_open => {
-                herdr
-                    .plugin_pane_focus(&own_panes[0].pane_id)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
-                return Ok(ToggleResult::Focused);
+            Ok(_) => {
+                state.panes.remove(tab);
+                save_sidebar_state(&config_dir, &state)?;
             }
-            Operation::Toggle => return Ok(ToggleResult::AlreadyOpen),
+            Err(error) if error.code == "pane_not_found" => {
+                state.panes.remove(tab);
+                save_sidebar_state(&config_dir, &state)?;
+            }
+            Err(error) => return Err(anyhow::anyhow!("{error}")),
         }
     }
 
@@ -340,19 +380,33 @@ fn operate_with_settings(
     let created = herdr
         .pane_split(source_id, "right", ratio, source_cwd)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    save_sidebar_state(&config_dir, slug, workspace, socket, &created.pane_id)?;
+    state.panes.insert(tab.to_string(), created.pane_id.clone());
+    save_sidebar_state(&config_dir, &state)?;
 
     if settings.dock_side == DockSide::Left
         && let Err(error) = herdr.pane_swap(&created.pane_id, source_id)
     {
         let _ = herdr.pane_close(&created.pane_id);
-        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
+        state.panes.remove(tab);
+        let _ = save_sidebar_state(&config_dir, &state);
         return Err(anyhow::anyhow!("{error}"));
     }
-    let command = launch_argv(ctx, &created.pane_id, slug, workspace, &config_dir, socket)?;
+    let command = launch_argv(
+        ctx,
+        &created.pane_id,
+        slug,
+        workspace,
+        TabLaunchContext {
+            tab,
+            selected_pane: source_pane,
+        },
+        &config_dir,
+        socket,
+    )?;
     if let Err(error) = herdr.pane_run(&created.pane_id, &command) {
         let _ = herdr.pane_close(&created.pane_id);
-        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
+        state.panes.remove(tab);
+        let _ = save_sidebar_state(&config_dir, &state);
         return Err(anyhow::anyhow!("{error}"));
     }
 
@@ -421,11 +475,18 @@ fn report_identity(herdr: &Herdr<'_>, pane: &str, slug: &str, workspace: &str) -
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+#[derive(Clone, Copy)]
+struct TabLaunchContext<'a> {
+    tab: &'a str,
+    selected_pane: &'a str,
+}
+
 fn launch_argv(
     ctx: &Ctx,
     pane: &str,
     slug: &str,
     workspace: &str,
+    tab_context: TabLaunchContext<'_>,
     config_dir: &Path,
     socket: &str,
 ) -> Result<Vec<String>> {
@@ -435,6 +496,8 @@ fn launch_argv(
         ("HERDR_WORKSPACE_ID", workspace.to_string()),
         (PROJECT_ENV, slug.to_string()),
         (WORKSPACE_ENV, workspace.to_string()),
+        (TAB_ENV, tab_context.tab.to_string()),
+        (SELECTED_PANE_ENV, tab_context.selected_pane.to_string()),
         (
             "HERDR_PLUGIN_CONFIG_DIR",
             config_dir.to_string_lossy().into_owned(),
@@ -572,6 +635,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         .env
         .var("HERDR_PANE_ID")
         .context("Herdr did not provide the organization sidebar pane id")?;
+    let tab = ctx
+        .env
+        .var(TAB_ENV)
+        .or_else(|| ctx.env.var("HERDR_TAB_ID"))
+        .unwrap_or("");
+    let selected_pane = ctx.env.var(SELECTED_PANE_ENV).unwrap_or("");
     let mut settings = load_settings(ctx)?;
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut view = if interactive {
@@ -583,12 +652,16 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         view: view.clone(),
         collapsed: BTreeSet::new(),
         root_collapsed: false,
-        selected: 0,
+        selected: selected_index_for_pane(&view, selected_pane),
     };
 
     if !interactive {
         print_snapshot(&view, &settings);
         return Ok(());
+    }
+
+    if tab.is_empty() {
+        bail!("Herdr did not provide the organization sidebar tab id");
     }
 
     let socket = ctx
@@ -802,8 +875,41 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     }
 
     drop(guard);
-    let _ = save_sidebar_state(&config_dir(ctx)?, slug, workspace, socket, "");
+    if let Ok(config_dir) = config_dir(ctx)
+        && let Ok(_lock) = OperationLock::acquire(&config_dir, workspace)
+        && let Some(mut state) = load_sidebar_state(&config_dir, workspace)
+        && state.slug == slug
+        && state.socket == socket
+    {
+        state.open = false;
+        let other_panes = state
+            .panes
+            .iter()
+            .filter(|(state_tab, _)| state_tab.as_str() != tab)
+            .map(|(_, pane)| pane.clone())
+            .collect::<Vec<_>>();
+        state.panes.clear();
+        let _ = save_sidebar_state(&config_dir, &state);
+        for other_pane in other_panes {
+            let _ = close_sidebar_pane(&herdr, &other_pane);
+        }
+    }
     close_sidebar_pane(&herdr, pane_id)
+}
+
+fn selected_index_for_pane(view: &TreeView, pane_id: &str) -> usize {
+    if pane_id.is_empty()
+        || view
+            .project
+            .coordinator()
+            .is_some_and(|record| record.pane_id == pane_id)
+    {
+        return 0;
+    }
+    view.entries
+        .iter()
+        .position(|entry| entry.thread.pane_id == pane_id)
+        .map_or(0, |index| index + 1)
 }
 
 fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
@@ -1569,6 +1675,28 @@ mod tests {
     }
 
     #[test]
+    fn first_frame_selects_the_worker_owned_by_the_current_tab() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let entries = organizations::tree_from(&[thread_model::Thread {
+            id: "t-0001".into(),
+            title: "Current worker".into(),
+            pane_id: "w1:p-worker".into(),
+            ..thread_model::Thread::default()
+        }])
+        .unwrap();
+        let view = TreeView {
+            project,
+            entries,
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+
+        assert_eq!(selected_index_for_pane(&view, "w1:p-worker"), 1);
+        assert_eq!(selected_index_for_pane(&view, "w1:p1"), 0);
+    }
+
+    #[test]
     fn moving_selection_repaints_only_the_two_changed_rows() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -1845,7 +1973,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
 
-        let result = toggle(&ctx, "demo", "w1", "w1:p1").unwrap();
+        let result = toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap();
 
         assert_eq!(result, ToggleResult::Closed);
         let calls = world.runner.calls.borrow();
@@ -1887,7 +2015,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Focused
         );
         assert_eq!(world.runner.count("plugin pane focus"), 1);
@@ -1911,7 +2039,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
 
-        let result = toggle(&ctx, "demo", "w1", "w1:p1").unwrap();
+        let result = toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap();
 
         assert_eq!(result, ToggleResult::Opened);
         let calls = world.runner.calls.borrow();
@@ -1950,6 +2078,16 @@ mod tests {
         assert!(
             run.args
                 .iter()
+                .any(|arg| arg == "HERDR_ORGANIZATIONS_TAB=w1:t1")
+        );
+        assert!(
+            run.args
+                .iter()
+                .any(|arg| arg == "HERDR_ORGANIZATIONS_SELECTED_PANE=w1:p1")
+        );
+        assert!(
+            run.args
+                .iter()
                 .any(|arg| arg == "HERDR_ORGANIZATIONS_PROJECT=demo")
         );
         assert_eq!(
@@ -1964,7 +2102,9 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
-                pane_id: "w1:p2".into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p2".into())]),
+                pane_id: String::new(),
             })
         );
     }
@@ -1982,15 +2122,17 @@ mod tests {
         let ctx = plugin_ctx(&world, &env);
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
-            "",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                ..SidebarState::default()
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
 
@@ -2001,38 +2143,75 @@ mod tests {
     }
 
     #[test]
-    fn cached_open_state_targets_the_exact_pane_without_inventory() {
+    fn sticky_sidebar_prewarms_a_new_tab_without_closing_the_existing_one() {
         let world = World::new();
         world.project("demo", "a.sock");
         world.runner.on(
-            "pane get",
-            ok(r#"{"result":{"pane":{"pane_id":"w1:p-sidebar","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-worker-sidebar","tab_id":"w1:t2","workspace_id":"w1","cwd":"/project"}}}"#),
         );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-root-sidebar".into())]),
+                pane_id: String::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t2", "w1:p-worker").unwrap(),
+            ToggleResult::Opened
+        );
+
+        let state = load_sidebar_state(&config_dir(&ctx).unwrap(), "w1").unwrap();
+        assert!(state.open);
+        assert_eq!(state.panes.get("w1:t1").unwrap(), "w1:p-root-sidebar");
+        assert_eq!(state.panes.get("w1:t2").unwrap(), "w1:p-worker-sidebar");
+        assert_eq!(world.runner.count("pane close"), 0);
+        assert_eq!(world.runner.count("pane list"), 0);
+    }
+
+    #[test]
+    fn sticky_toggle_closes_cached_panes_without_inventory() {
+        let world = World::new();
+        world.project("demo", "a.sock");
         world.runner.on("pane close", ok(r#"{"result":{}}"#));
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
-            "w1:p-sidebar",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-sidebar".into())]),
+                pane_id: String::new(),
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Closed
         );
 
         assert_eq!(world.runner.count("pane list"), 0);
-        assert_eq!(world.runner.count("pane get"), 1);
+        assert_eq!(world.runner.count("pane get"), 0);
         assert_eq!(world.runner.count("pane close"), 1);
         assert_eq!(
             load_sidebar_state(&config_dir(&ctx).unwrap(), "w1")
                 .unwrap()
-                .pane_id,
-            ""
+                .panes,
+            BTreeMap::new()
         );
     }
 
@@ -2049,15 +2228,19 @@ mod tests {
         let ctx = plugin_ctx(&world, &env);
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            "/tmp/another-session.sock",
-            "w1:p-old",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: "/tmp/another-session.sock".into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-old".into())]),
+                pane_id: String::new(),
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
 
@@ -2094,7 +2277,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
         let calls = world.runner.calls.borrow();
@@ -2126,7 +2309,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::AlreadyOpen
         );
         assert_eq!(world.runner.calls.borrow().len(), 0);
@@ -2143,7 +2326,7 @@ mod tests {
         *world.panes.borrow_mut() = serde_json::json!([own]).to_string();
 
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::AlreadyOpen
         );
         assert_eq!(world.runner.count("pane close"), 0);
@@ -2174,7 +2357,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
         assert_eq!(world.runner.count("pane split"), 1);

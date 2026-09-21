@@ -87,6 +87,8 @@ Run **Herdr Organizations: organization tree** from Herdr's action menu to brows
 
 Inside a project workspace, run **Herdr Organizations: toggle project hierarchy sidebar** to show a right split scoped to that project. It defaults to 30% width and does not steal focus on open.
 
+The open state is sticky across tabs in the same workspace. The first visit to a tab creates its local split in the background; later switches reuse that already-rendered split and select the coordinator or worker for the active tab. Closing with the shortcut, `q`, or Esc closes the complete sticky set.
+
 - Up and Down or `j` and `k` move through visible rows; Enter focuses or reopens a node while leaving the tree available.
 - Space folds or expands a coordinator. `s` opens the visible gear/settings surface.
 - `q` or Esc closes the split. Settings can move the dock, change width, control auto-open and focus behavior, include resolved nodes, hide status or role, and change strict toggle behavior.
@@ -110,7 +112,7 @@ description = "Toggle Herdr Organizations hierarchy sidebar"
 
 With Herdr's default prefix, press `Ctrl+B`, release it, then press `Shift+O` or `Shift+Y`. `Shift+H` is intentionally avoided because Herdr already uses `prefix+shift+h` to swap the active pane left.
 
-Sidebar settings are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default and checks project/workspace metadata before creating a split.
+Sidebar settings and the sticky per-tab pane map are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default; an explicitly open sticky sidebar still follows newly visited tabs after that setting is disabled. Project, workspace and Herdr session metadata are checked before any cached pane is reused.
 
 ## Preserve existing projects
 

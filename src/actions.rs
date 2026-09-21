@@ -37,6 +37,7 @@ pub struct Handoff {
 #[serde(default)]
 struct ActionContext {
     workspace_id: String,
+    tab_id: String,
     workspace_label: String,
     workspace_cwd: String,
     focused_pane_id: String,
@@ -136,6 +137,13 @@ fn current_pane(ctx: &Ctx, context: &ActionContext) -> String {
         .to_string()
 }
 
+fn current_tab(ctx: &Ctx, context: &ActionContext) -> String {
+    ctx.env
+        .var("HERDR_TAB_ID")
+        .unwrap_or(&context.tab_id)
+        .to_string()
+}
+
 pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
     let context = action_context(ctx);
     let base = Handoff {
@@ -150,16 +158,19 @@ pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
                 "this action needs a Herdr Organizations project workspace; use `organizations` to browse all projects",
             )?;
             let workspace = current_workspace(ctx, &context);
+            let tab = current_tab(ctx, &context);
             let pane = current_pane(ctx, &context);
-            organization_sidebar::toggle(ctx, &slug, &workspace, &pane).map(|_| ())
+            organization_sidebar::toggle(ctx, &slug, &workspace, &tab, &pane).map(|_| ())
         }
         organization_sidebar::AUTO_OPEN_ACTION_ID => {
             let workspace = current_workspace(ctx, &context);
+            let tab = current_tab(ctx, &context);
             let pane = current_pane(ctx, &context);
             organization_sidebar::ensure_auto_open(
                 ctx,
                 current_slug(ctx).as_deref(),
                 &workspace,
+                &tab,
                 &pane,
             )
             .map(|_| ())
