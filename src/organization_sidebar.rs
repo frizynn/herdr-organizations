@@ -209,7 +209,7 @@ fn operate_with_settings(
         .context("HERDR_SOCKET_PATH is not set for this Herdr action")?;
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
     let panes = herdr
-        .pane_list()
+        .pane_list_workspace(workspace)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut own_panes = panes
         .iter()
@@ -263,7 +263,6 @@ fn operate_with_settings(
         let _ = herdr.pane_close(&created.pane_id);
         return Err(anyhow::anyhow!("{error}"));
     }
-    let _ = herdr.pane_rename(&created.pane_id, "Organization");
     let command = launch_argv(ctx, &created.pane_id, slug, workspace, &config_dir, socket)?;
     if let Err(error) = herdr.pane_run(&created.pane_id, &command) {
         let _ = herdr.pane_close(&created.pane_id);
@@ -324,9 +323,10 @@ fn report_identity(herdr: &Herdr<'_>, pane: &str, slug: &str, workspace: &str) -
         .as_secs()
         .to_string();
     herdr
-        .pane_report_tokens_from(
+        .pane_report_tokens_with_title_from(
             pane,
             METADATA_SOURCE,
+            Some("Organization"),
             &[
                 (TOKEN_ID, "v1"),
                 (TOKEN_PROJECT, slug),
@@ -514,7 +514,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         .var("HERDR_PANE_ID")
         .context("Herdr did not provide the organization sidebar pane id")?;
     let mut settings = load_settings(ctx)?;
-    let mut view = load_view(ctx, slug, settings.show_resolved)?;
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut view = if interactive {
+        load_recorded_view(ctx, slug, settings.show_resolved)?
+    } else {
+        load_view(ctx, slug, settings.show_resolved)?
+    };
     let mut screen = Screen::Tree {
         view: view.clone(),
         collapsed: BTreeSet::new(),
@@ -522,7 +527,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         selected: 0,
     };
 
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+    if !interactive {
         print_snapshot(&view, &settings);
         return Ok(());
     }
@@ -532,10 +537,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         .var("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set for the organization sidebar")?;
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
-    let _ = report_identity(&herdr, pane_id, slug, workspace);
     let guard = TerminalGuard::enter()?;
     let mut message = String::new();
-    let mut last_refresh = Instant::now();
+    // Paint persisted state first, then immediately hydrate from live Herdr
+    // state. The first frame no longer waits for agent and pane inventory.
+    let mut last_refresh = Instant::now()
+        .checked_sub(VIEW_REFRESH)
+        .unwrap_or_else(Instant::now);
     let mut last_heartbeat = Instant::now();
     let mut last_size = None;
     let mut dirty = true;
@@ -593,6 +601,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 }
             }
             last_refresh = Instant::now();
+            if dirty {
+                continue;
+            }
         }
         let poll_timeout = VIEW_REFRESH
             .saturating_sub(last_refresh.elapsed())
@@ -741,6 +752,28 @@ fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
     let groups = threads::rows(ctx, &project)
         .into_iter()
         .map(|row| (row.thread.id, row.group))
+        .collect();
+    Ok(TreeView {
+        project,
+        entries,
+        groups,
+        omitted_nodes,
+    })
+}
+
+fn load_recorded_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
+    let project = Project::load(&ctx.root, slug)?;
+    let mut entries = organizations_ui::tree_entries(&project, show_resolved)?;
+    let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
+    entries.truncate(MAX_RENDERED_NODES);
+    let groups = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.thread.id.clone(),
+                threads::recorded_group(&entry.thread),
+            )
+        })
         .collect();
     Ok(TreeView {
         project,
@@ -1476,6 +1509,21 @@ mod tests {
     }
 
     #[test]
+    fn first_frame_uses_persisted_groups_without_live_herdr_calls() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        world.thread(&project, world.home.path(), |thread| {
+            thread.last_group = Group::Working.token().into();
+        });
+
+        let view = load_recorded_view(&world.ctx(), "demo", false).unwrap();
+
+        assert_eq!(view.groups.get("t-0001"), Some(&Group::Working));
+        assert_eq!(world.runner.count("agent list"), 0);
+        assert_eq!(world.runner.count("pane list"), 0);
+    }
+
+    #[test]
     fn moving_selection_repaints_only_the_two_changed_rows() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -1824,6 +1872,11 @@ mod tests {
 
         assert_eq!(result, ToggleResult::Opened);
         let calls = world.runner.calls.borrow();
+        let pane_list = calls
+            .iter()
+            .find(|call| call.args.starts_with(&["pane".into(), "list".into()]))
+            .unwrap();
+        assert_eq!(pane_list.args, ["pane", "list", "--workspace", "w1"]);
         let split = calls
             .iter()
             .find(|call| call.args.starts_with(&["pane".into(), "split".into()]))
@@ -1853,6 +1906,7 @@ mod tests {
             })
             .unwrap();
         assert!(metadata.display().contains("--source herdr-projects"));
+        assert!(metadata.display().contains("--title Organization"));
         assert!(metadata.display().contains("org_sidebar=v1"));
         assert!(metadata.display().contains("org_project=demo"));
         assert!(metadata.display().contains("org_workspace=w1"));
@@ -1871,6 +1925,7 @@ mod tests {
             &run.args[run.args.len() - 2..],
             ["pane", "organization-sidebar"]
         );
+        assert_eq!(world.runner.count("pane rename"), 0);
     }
 
     #[test]
