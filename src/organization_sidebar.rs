@@ -35,6 +35,7 @@ const PROJECT_ENV: &str = "HERDR_ORGANIZATIONS_PROJECT";
 const WORKSPACE_ENV: &str = "HERDR_ORGANIZATIONS_WORKSPACE";
 const CONFIG_FILE: &str = "organization-sidebar.json";
 const LOCK_FILE_PREFIX: &str = ".organization-sidebar-";
+const STATE_FILE_PREFIX: &str = ".organization-sidebar-state-";
 const METADATA_SOURCE: &str = crate::herdr::SOURCE;
 const TOKEN_ID: &str = "org_sidebar";
 const TOKEN_PROJECT: &str = "org_project";
@@ -42,6 +43,7 @@ const TOKEN_WORKSPACE: &str = "org_workspace";
 const TOKEN_HEARTBEAT: &str = "org_heartbeat";
 const TOKEN_TTL: Duration = Duration::from_secs(60);
 const TOKEN_REFRESH: Duration = Duration::from_secs(10);
+const TOKEN_RETRY: Duration = Duration::from_millis(100);
 const VIEW_REFRESH: Duration = Duration::from_secs(5);
 const LOCK_WAIT: Duration = Duration::from_millis(50);
 const LOCK_ATTEMPTS: usize = 40;
@@ -114,6 +116,15 @@ enum Operation {
     Ensure,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+struct SidebarState {
+    slug: String,
+    workspace: String,
+    socket: String,
+    pane_id: String,
+}
+
 fn config_dir(ctx: &Ctx) -> Result<PathBuf> {
     ctx.env
         .var("HERDR_PLUGIN_CONFIG_DIR")
@@ -123,6 +134,44 @@ fn config_dir(ctx: &Ctx) -> Result<PathBuf> {
 
 fn settings_path(ctx: &Ctx) -> Result<PathBuf> {
     Ok(config_dir(ctx)?.join(CONFIG_FILE))
+}
+
+fn workspace_suffix(workspace: &str) -> String {
+    workspace
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .collect()
+}
+
+fn sidebar_state_path(config_dir: &Path, workspace: &str) -> PathBuf {
+    config_dir.join(format!(
+        "{STATE_FILE_PREFIX}{}.json",
+        workspace_suffix(workspace)
+    ))
+}
+
+fn load_sidebar_state(config_dir: &Path, workspace: &str) -> Option<SidebarState> {
+    project::read_json(&sidebar_state_path(config_dir, workspace))
+}
+
+fn save_sidebar_state(
+    config_dir: &Path,
+    slug: &str,
+    workspace: &str,
+    socket: &str,
+    pane_id: &str,
+) -> Result<()> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("could not create {}", config_dir.display()))?;
+    project::write_json(
+        &sidebar_state_path(config_dir, workspace),
+        &SidebarState {
+            slug: slug.to_string(),
+            workspace: workspace.to_string(),
+            socket: socket.to_string(),
+            pane_id: pane_id.to_string(),
+        },
+    )
 }
 
 pub fn load_settings(ctx: &Ctx) -> Result<SidebarSettings> {
@@ -208,14 +257,39 @@ fn operate_with_settings(
         .var("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set for this Herdr action")?;
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
-    let panes = herdr
-        .pane_list_workspace(workspace)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let mut own_panes = panes
-        .iter()
-        .filter(|pane| sidebar_pane(pane, slug, workspace))
-        .cloned()
-        .collect::<Vec<_>>();
+    let state = load_sidebar_state(&config_dir, workspace);
+    let matching_state = state.as_ref().filter(|state| {
+        state.slug == slug && state.workspace == workspace && state.socket == socket
+    });
+    let mut discovered_panes = None;
+    let mut own_panes = Vec::new();
+    if let Some(state) = matching_state.filter(|state| !state.pane_id.is_empty()) {
+        match herdr.pane_get(&state.pane_id) {
+            Ok(pane) if pane.workspace_id == workspace => own_panes.push(pane),
+            Ok(_) => {
+                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
+            }
+            Err(error) if error.code == "pane_not_found" => {
+                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
+            }
+            Err(error) => return Err(anyhow::anyhow!("{error}")),
+        }
+    } else if matching_state.is_none() {
+        let panes = herdr
+            .pane_list_workspace(workspace)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        own_panes = panes
+            .iter()
+            .filter(|pane| sidebar_pane(pane, slug, workspace))
+            .cloned()
+            .collect();
+        discovered_panes = Some(panes);
+        if let Some(pane) = own_panes.first() {
+            save_sidebar_state(&config_dir, slug, workspace, socket, &pane.pane_id)?;
+        } else {
+            save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
+        }
+    }
     own_panes.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
 
     if !own_panes.is_empty() {
@@ -227,6 +301,7 @@ fn operate_with_settings(
                 for pane in own_panes {
                     close_sidebar_pane(&herdr, &pane.pane_id)?;
                 }
+                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
                 return Ok(ToggleResult::Closed);
             }
             Operation::Toggle if settings.focus_on_open => {
@@ -239,37 +314,45 @@ fn operate_with_settings(
         }
     }
 
-    let source = panes
-        .iter()
-        .find(|pane| pane.pane_id == source_pane && pane.workspace_id == workspace)
-        .or_else(|| {
-            panes
-                .iter()
-                .find(|pane| pane.workspace_id == workspace && pane.focused)
-        })
-        .or_else(|| panes.iter().find(|pane| pane.workspace_id == workspace))
-        .with_context(|| format!("no live Herdr pane was found in workspace `{workspace}`"))?;
+    if source_pane.is_empty() {
+        bail!("Herdr did not provide a source pane for the organization sidebar");
+    }
+    let source = discovered_panes.as_ref().and_then(|panes| {
+        panes
+            .iter()
+            .find(|pane| pane.pane_id == source_pane && pane.workspace_id == workspace)
+            .or_else(|| {
+                panes
+                    .iter()
+                    .find(|pane| pane.workspace_id == workspace && pane.focused)
+            })
+            .or_else(|| panes.iter().find(|pane| pane.workspace_id == workspace))
+    });
+    let source_id = source.map_or(source_pane, |pane| pane.pane_id.as_str());
+    let project_dir = ctx.root.join(slug);
+    let source_cwd = source
+        .map(|pane| pane.cwd.as_str())
+        .unwrap_or_else(|| project_dir.to_str().unwrap_or(""));
     let ratio = match settings.dock_side {
         DockSide::Right => 1.0 - f64::from(settings.width_percent) / 100.0,
         DockSide::Left => f64::from(settings.width_percent) / 100.0,
     };
     let created = herdr
-        .pane_split(&source.pane_id, "right", ratio, &source.cwd)
+        .pane_split(source_id, "right", ratio, source_cwd)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
+    save_sidebar_state(&config_dir, slug, workspace, socket, &created.pane_id)?;
 
     if settings.dock_side == DockSide::Left
-        && let Err(error) = herdr.pane_swap(&created.pane_id, &source.pane_id)
+        && let Err(error) = herdr.pane_swap(&created.pane_id, source_id)
     {
         let _ = herdr.pane_close(&created.pane_id);
+        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
         return Err(anyhow::anyhow!("{error}"));
     }
     let command = launch_argv(ctx, &created.pane_id, slug, workspace, &config_dir, socket)?;
     if let Err(error) = herdr.pane_run(&created.pane_id, &command) {
         let _ = herdr.pane_close(&created.pane_id);
-        return Err(anyhow::anyhow!("{error}"));
-    }
-    if let Err(error) = report_identity_after_split(&herdr, &created.pane_id, slug, workspace) {
-        let _ = herdr.pane_close(&created.pane_id);
+        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
         return Err(anyhow::anyhow!("{error}"));
     }
 
@@ -279,7 +362,7 @@ fn operate_with_settings(
     };
     if settings.focus_on_open {
         herdr
-            .pane_focus_direction(&source.pane_id, direction)
+            .pane_focus_direction(source_id, direction)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     } else if settings.dock_side == DockSide::Left {
         herdr
@@ -338,27 +421,6 @@ fn report_identity(herdr: &Herdr<'_>, pane: &str, slug: &str, workspace: &str) -
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-fn report_identity_after_split(
-    herdr: &Herdr<'_>,
-    pane: &str,
-    slug: &str,
-    workspace: &str,
-) -> Result<()> {
-    let mut last_error = None;
-    for _ in 0..10 {
-        match report_identity(herdr, pane, slug, workspace) {
-            Ok(()) => return Ok(()),
-            Err(error) => last_error = Some(error),
-        }
-        // A split response can arrive before the new pane is visible to the
-        // metadata registry. Refreshing the pane inventory synchronizes that
-        // registry before the next bounded retry.
-        let _ = herdr.pane_list();
-        thread::sleep(Duration::from_millis(25));
-    }
-    Err(last_error.expect("identity reporting was attempted"))
-}
-
 fn launch_argv(
     ctx: &Ctx,
     pane: &str,
@@ -406,10 +468,7 @@ impl OperationLock {
     fn acquire(config_dir: &Path, workspace: &str) -> Result<Self> {
         fs::create_dir_all(config_dir)
             .with_context(|| format!("could not create {}", config_dir.display()))?;
-        let suffix = workspace
-            .chars()
-            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-            .collect::<String>();
+        let suffix = workspace_suffix(workspace);
         let path = config_dir.join(format!("{LOCK_FILE_PREFIX}{suffix}.lock"));
         for _ in 0..LOCK_ATTEMPTS {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -544,7 +603,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let mut last_refresh = Instant::now()
         .checked_sub(VIEW_REFRESH)
         .unwrap_or_else(Instant::now);
-    let mut last_heartbeat = Instant::now();
+    // Identity is registered only after the first frame has been flushed. It
+    // remains outside the shortcut's critical path while the persisted state
+    // file makes an immediate second toggle safe.
+    let mut last_heartbeat = Instant::now()
+        .checked_sub(TOKEN_REFRESH)
+        .unwrap_or_else(Instant::now);
     let mut last_size = None;
     let mut dirty = true;
     let mut rendered_frame = Vec::new();
@@ -571,8 +635,14 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
 
         if last_heartbeat.elapsed() >= TOKEN_REFRESH {
-            let _ = report_identity(&herdr, pane_id, slug, workspace);
-            last_heartbeat = Instant::now();
+            let reported = report_identity(&herdr, pane_id, slug, workspace).is_ok();
+            let now = Instant::now();
+            last_heartbeat = if reported {
+                now
+            } else {
+                now.checked_sub(TOKEN_REFRESH.saturating_sub(TOKEN_RETRY))
+                    .unwrap_or(now)
+            };
         }
         if last_refresh.elapsed() >= VIEW_REFRESH {
             if let Screen::Tree {
@@ -732,6 +802,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     }
 
     drop(guard);
+    let _ = save_sidebar_state(&config_dir(ctx)?, slug, workspace, socket, "");
     close_sidebar_pane(&herdr, pane_id)
 }
 
@@ -1385,10 +1456,8 @@ fn visible_range(count: usize, selected: usize, capacity: usize) -> Range<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-    use std::rc::Rc;
 
-    use crate::runner::fake::{FakeRunner, fail, ok};
+    use crate::runner::fake::ok;
     use crate::scenarios::World;
 
     fn plugin_env(world: &World) -> crate::paths::Env {
@@ -1417,30 +1486,6 @@ mod tests {
         tokens.insert(TOKEN_PROJECT.into(), serde_json::json!(slug));
         tokens.insert(TOKEN_WORKSPACE.into(), serde_json::json!(workspace));
         serde_json::Value::Object(tokens)
-    }
-
-    #[test]
-    fn a_new_split_retries_metadata_until_herdr_registers_the_pane() {
-        let runner = FakeRunner::new();
-        let attempts = Rc::new(Cell::new(0));
-        let recorded_attempts = Rc::clone(&attempts);
-        runner.on_fn(
-            |command| command.display().contains("report-metadata"),
-            move |_| {
-                let attempt = recorded_attempts.get() + 1;
-                recorded_attempts.set(attempt);
-                Ok(if attempt < 3 {
-                    fail(1, "pane not registered yet")
-                } else {
-                    ok(r#"{"result":{}}"#)
-                })
-            },
-        );
-        let herdr = Herdr::new("herdr", "/tmp/herdr.sock", &runner);
-
-        report_identity_after_split(&herdr, "w1:p2", "demo", "w1").unwrap();
-
-        assert_eq!(attempts.get(), 3);
     }
 
     #[test]
@@ -1851,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_opens_a_right_split_and_stamps_project_workspace_identity() {
+    fn toggle_opens_a_right_split_and_caches_its_exact_pane() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let source: serde_json::Value =
@@ -1862,8 +1907,6 @@ mod tests {
             "pane split",
             ok(r#"{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
         );
-        world.runner.on("pane rename", ok(r#"{"result":{}}"#));
-        world.runner.on("report-metadata", ok(r#"{"result":{}}"#));
         world.runner.on("pane run", ok(r#"{"result":{}}"#));
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
@@ -1898,18 +1941,6 @@ mod tests {
         assert_eq!(split.args[9], source_cwd);
         assert!(split.display().contains("--ratio 0.7"));
         assert!(split.display().contains("--no-focus"));
-        let metadata = calls
-            .iter()
-            .find(|call| {
-                call.args
-                    .starts_with(&["pane".into(), "report-metadata".into()])
-            })
-            .unwrap();
-        assert!(metadata.display().contains("--source herdr-projects"));
-        assert!(metadata.display().contains("--title Organization"));
-        assert!(metadata.display().contains("org_sidebar=v1"));
-        assert!(metadata.display().contains("org_project=demo"));
-        assert!(metadata.display().contains("org_workspace=w1"));
         let run = calls
             .iter()
             .find(|call| call.args.starts_with(&["pane".into(), "run".into()]))
@@ -1926,6 +1957,113 @@ mod tests {
             ["pane", "organization-sidebar"]
         );
         assert_eq!(world.runner.count("pane rename"), 0);
+        assert_eq!(world.runner.count("report-metadata"), 0);
+        assert_eq!(
+            load_sidebar_state(&config_dir(&ctx).unwrap(), "w1"),
+            Some(SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                pane_id: "w1:p2".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn reopening_from_a_known_closed_state_skips_pane_inventory() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on(
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+        );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            "demo",
+            "w1",
+            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            ToggleResult::Opened
+        );
+
+        assert_eq!(world.runner.count("pane list"), 0);
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane split"), 1);
+        assert_eq!(world.runner.count("pane run"), 1);
+    }
+
+    #[test]
+    fn cached_open_state_targets_the_exact_pane_without_inventory() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on(
+            "pane get",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-sidebar","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+        );
+        world.runner.on("pane close", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            "demo",
+            "w1",
+            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
+            "w1:p-sidebar",
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            ToggleResult::Closed
+        );
+
+        assert_eq!(world.runner.count("pane list"), 0);
+        assert_eq!(world.runner.count("pane get"), 1);
+        assert_eq!(world.runner.count("pane close"), 1);
+        assert_eq!(
+            load_sidebar_state(&config_dir(&ctx).unwrap(), "w1")
+                .unwrap()
+                .pane_id,
+            ""
+        );
+    }
+
+    #[test]
+    fn cached_pane_from_another_session_is_never_targeted() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on(
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+        );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            "demo",
+            "w1",
+            "/tmp/another-session.sock",
+            "w1:p-old",
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            ToggleResult::Opened
+        );
+
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane close"), 0);
+        assert_eq!(world.runner.count("pane split"), 1);
     }
 
     #[test]

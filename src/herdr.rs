@@ -280,6 +280,10 @@ impl<'a> Herdr<'a> {
         self.call_as(&["pane", "list", "--workspace", workspace], "panes")
     }
 
+    pub fn pane_get(&self, pane: &str) -> Result<Pane, HerdrError> {
+        self.call_as(&["pane", "get", pane], "pane")
+    }
+
     /// Split a pane and return the new Herdr pane id from the response.
     pub fn pane_split(
         &self,
