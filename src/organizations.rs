@@ -13,6 +13,8 @@ use crate::project::{self, Project};
 use crate::thread::{self, Kind, NodeRole, Status, Thread};
 
 pub const ROOT_ID: &str = "root";
+pub const MAX_NODE_RULES_BYTES: usize = 8 * 1024;
+pub const MAX_SUMMARY_CHARS: usize = 1_500;
 pub const MAX_SCOPED_MEMORY_FILE_BYTES: usize = 8 * 1024;
 pub const MAX_SCOPED_MEMORY_TOTAL_BYTES: usize = 32_000;
 pub const MAX_SCOPED_MEMORY_FILES: usize = 64;
@@ -47,6 +49,7 @@ pub struct CreateNode {
     pub machine: String,
     pub base: String,
     pub task: String,
+    pub rules: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +393,9 @@ fn profile_for_record(
 }
 
 pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
+    if args.rules.len() > MAX_NODE_RULES_BYTES {
+        bail!("--rules-file is over {MAX_NODE_RULES_BYTES} bytes");
+    }
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
     }
@@ -428,7 +434,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope) {
+    let nodes_created = match create_node_scope(&scope, &args.rules) {
         Ok(created) => created,
         Err(error) => {
             thread::remove_record_locked(project, &record.id);
@@ -452,7 +458,16 @@ pub fn node_scope_dir(project: &Project, id: &str) -> PathBuf {
     project.dir().join("nodes").join(id)
 }
 
-fn create_node_scope(scope: &Path) -> Result<bool> {
+pub(crate) fn node_instructions(rules: &str) -> String {
+    let rules = rules.trim();
+    if rules.is_empty() {
+        "# Node instructions\n\nStanding instructions for this node and its descendants.\n".into()
+    } else {
+        format!("# Node instructions\n\n{rules}\n")
+    }
+}
+
+fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
     let nodes = scope.parent().context("node scope has no parent")?;
     let nodes_created = ensure_directory(nodes)?;
     if let Err(error) = std::fs::create_dir(scope) {
@@ -471,7 +486,7 @@ fn create_node_scope(scope: &Path) -> Result<bool> {
         })?;
         project::write_atomic(
             &scope.join("INSTRUCTIONS.md"),
-            b"# Node instructions\n\nStanding instructions for this node and its descendants.\n",
+            node_instructions(rules).as_bytes(),
         )?;
         project::write_atomic(&scope.join("MEMORY.md"), b"# Node memory\n")?;
         Ok(())
@@ -483,6 +498,34 @@ fn create_node_scope(scope: &Path) -> Result<bool> {
         }
     }
     result.map(|()| nodes_created)
+}
+
+pub fn report_summary(report: &str) -> Option<String> {
+    let mut in_summary = false;
+    let mut lines = Vec::new();
+    for line in report.lines() {
+        if !in_summary {
+            in_summary = line == "## Summary";
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        lines.push(line);
+    }
+    if !in_summary {
+        return None;
+    }
+    let summary = lines.join("\n").trim().to_string();
+    if summary.is_empty() {
+        return None;
+    }
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        let capped: String = summary.chars().take(MAX_SUMMARY_CHARS).collect();
+        Some(format!("{capped}\n[summary cut at 1500 characters]"))
+    } else {
+        Some(summary)
+    }
 }
 
 fn ensure_directory(path: &Path) -> Result<bool> {
@@ -864,6 +907,135 @@ mod tests {
         }
     }
 
+    fn make_node(
+        project: &Project,
+        parent_id: &str,
+        role: NodeRole,
+        can_spawn: Option<bool>,
+        title: &str,
+        rules: &str,
+    ) -> Thread {
+        let mut request = request(parent_id, role);
+        request.can_spawn = can_spawn;
+        create_node(
+            project,
+            &CreateNode {
+                request,
+                title: title.into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+                rules: rules.into(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn create_node_writes_rules_into_instructions() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let created = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Worker,
+            None,
+            "Worker",
+            "  Check accessibility.  \n",
+        );
+
+        let instructions =
+            std::fs::read_to_string(node_scope_dir(&project, &created.id).join("INSTRUCTIONS.md"))
+                .unwrap();
+        assert_eq!(
+            instructions,
+            "# Node instructions\n\nCheck accessibility.\n"
+        );
+    }
+
+    #[test]
+    fn descendant_context_includes_ancestor_rules_but_not_sibling_rules() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let frontend = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Coordinator,
+            Some(true),
+            "Frontend",
+            "frontend",
+        );
+        let _backend = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Worker,
+            None,
+            "Backend",
+            "backend",
+        );
+        let descendant = make_node(
+            &project,
+            &frontend.id,
+            NodeRole::Worker,
+            None,
+            "Frontend worker",
+            "",
+        );
+
+        let context = scoped_context(&project, &descendant).unwrap();
+        assert!(context.instructions.contains("frontend"));
+        assert!(!context.instructions.contains("backend"));
+    }
+
+    #[test]
+    fn rules_over_limit_are_rejected_without_creating_a_record() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let error = create_node(
+            &project,
+            &CreateNode {
+                request: request(ROOT_ID, NodeRole::Worker),
+                title: "Too many rules".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+                rules: "x".repeat(MAX_NODE_RULES_BYTES + 1),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, "--rules-file is over 8192 bytes");
+        assert!(thread::list(&project).is_empty());
+        assert!(!project.dir().join("nodes").exists());
+    }
+
+    #[test]
+    fn report_summary_extracts_section() {
+        let report = "# Work\n\n## Summary\nStatus: done\nResult: Updated the flow.\n\n## Report\nLong details.";
+        assert_eq!(
+            report_summary(report).as_deref(),
+            Some("Status: done\nResult: Updated the flow.")
+        );
+    }
+
+    #[test]
+    fn report_summary_missing_returns_none() {
+        assert_eq!(report_summary("## Report\nDetails"), None);
+        assert_eq!(report_summary("## Summary\n \n## Report\nDetails"), None);
+    }
+
+    #[test]
+    fn report_summary_is_capped() {
+        let report = format!("## Summary\n{}\n## Report\ndetails", "é".repeat(1501));
+        let expected = format!("{}\n[summary cut at 1500 characters]", "é".repeat(1500));
+        assert_eq!(report_summary(&report).as_deref(), Some(expected.as_str()));
+    }
+
     #[test]
     fn traversal_is_recursive_and_stable_at_sixteen_levels() {
         let world = World::new();
@@ -880,6 +1052,7 @@ mod tests {
                     machine: String::new(),
                     base: String::new(),
                     task: "continue".into(),
+                    rules: String::new(),
                 },
             )
             .unwrap();
@@ -973,6 +1146,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -987,6 +1161,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "must not persist".into(),
+                rules: String::new(),
             },
         )
         .unwrap_err()
@@ -1009,6 +1184,7 @@ mod tests {
             machine: "build-server".into(),
             base: String::new(),
             task: "Coordinate remote work".into(),
+            rules: String::new(),
         };
         let error = create_node(&project, &remote_coordinator)
             .unwrap_err()
@@ -1026,6 +1202,7 @@ mod tests {
             machine: "build-server".into(),
             base: String::new(),
             task: "Implement a scoped task".into(),
+            rules: String::new(),
         };
         let worker = create_node(&project, &remote_worker).unwrap();
         assert_eq!(worker.role, NodeRole::Worker);
@@ -1047,6 +1224,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "work".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1071,6 +1249,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1103,6 +1282,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate without children".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1117,6 +1297,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "must not persist".into(),
+                rules: String::new(),
             },
         )
         .unwrap_err()
@@ -1156,6 +1337,7 @@ mod tests {
                     machine: String::new(),
                     base: String::new(),
                     task: "rejected".into(),
+                    rules: String::new(),
                 },
             )
             .unwrap_err()
@@ -1202,6 +1384,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "ancestor task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1215,6 +1398,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "sibling task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1228,6 +1412,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "target task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1241,6 +1426,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "descendant task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1315,6 +1501,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1401,6 +1588,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "sibling".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1414,6 +1602,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "target".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1472,6 +1661,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1520,6 +1710,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1542,6 +1733,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "work".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1593,6 +1785,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate".into(),
+                rules: String::new(),
             },
         )
         .unwrap();
@@ -1616,6 +1809,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "work".into(),
+                rules: String::new(),
             },
         )
         .unwrap();

@@ -315,6 +315,7 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "Coordinate this area".into(),
+                rules: String::new(),
             },
         )
         .unwrap();

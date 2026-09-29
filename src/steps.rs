@@ -423,7 +423,7 @@ pub fn nudge_parent_coordinators(
             .collect::<Vec<_>>()
             .join(", ");
         let prompt = format!(
-            "{PARENT_NUDGE_PREFIX} for {parent_id}: {summary}. Do not poll, sleep, run `herdr agent wait`, or repeatedly read child panes. Inspect each changed child once with `{prefix} node show {} <id>` and read `threads/<id>.md` only when its state is Ready for review. Then continue coordination and return idle; the ticker will wake you for later changes.",
+            "{PARENT_NUDGE_PREFIX} for {parent_id}: {summary}. Do not poll, sleep, run `herdr agent wait`, or repeatedly read child panes. Inspect each changed child once with `{prefix} node summary {} <id>`. Open `threads/<id>.md` in full only when the summary asks for a decision, reports a blocker, or is missing. Then continue coordination and return idle; the ticker will wake you for later changes.",
             project.slug
         );
         herdr.agent_prompt(&agent.pane_id, &prompt)?;
@@ -820,6 +820,10 @@ mod tests {
             .unwrap();
         assert!(prompt.contains(PARENT_NUDGE_PREFIX));
         assert!(prompt.contains(&format!("{}=Ready for review", child.id)));
+        assert!(prompt.contains("node summary demo <id>"));
+        assert!(prompt.contains(
+            "Open `threads/<id>.md` in full only when the summary asks for a decision, reports a blocker, or is missing."
+        ));
         assert!(prompt.contains("Do not poll"));
         assert!(!prompt.contains("herdr agent read"));
         drop(calls);

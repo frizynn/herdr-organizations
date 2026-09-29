@@ -89,6 +89,143 @@ fn node_resolve_exposes_the_non_destructive_close_view_option() {
 }
 
 #[test]
+fn node_summary_reports_a_missing_report_and_missing_summary() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    let threads = root.join("demo/threads");
+    std::fs::create_dir_all(&threads).unwrap();
+    std::fs::write(threads.join("t-0001.toml"), "id = \"t-0001\"\n").unwrap();
+
+    let missing_report = hp(
+        home.path(),
+        &["--root", root_arg, "node", "summary", "demo", "t-0001"],
+    );
+    assert!(missing_report.status.success());
+    assert_eq!(
+        String::from_utf8(missing_report.stdout).unwrap(),
+        "no report yet\n"
+    );
+
+    let report = "# Existing report\n\nNo summary yet.\n";
+    let report_path = threads.join("t-0001.md");
+    std::fs::write(&report_path, report).unwrap();
+    let output = hp(
+        home.path(),
+        &["--root", root_arg, "node", "summary", "demo", "t-0001"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "no ## Summary in report ({} characters at {}); ask the node to add one\n",
+            report.chars().count(),
+            report_path.display()
+        )
+    );
+}
+
+#[test]
+fn node_rules_reads_and_replaces_instructions() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    let threads = root.join("demo/threads");
+    std::fs::create_dir_all(&threads).unwrap();
+    std::fs::write(threads.join("t-0001.toml"), "id = \"t-0001\"\n").unwrap();
+    let instructions = root.join("demo/nodes/t-0001/INSTRUCTIONS.md");
+    std::fs::create_dir_all(instructions.parent().unwrap()).unwrap();
+    std::fs::write(&instructions, "# Node instructions\n\nOriginal rules.\n").unwrap();
+
+    let read = hp(
+        home.path(),
+        &["--root", root_arg, "node", "rules", "demo", "t-0001"],
+    );
+    assert!(read.status.success());
+    assert_eq!(
+        String::from_utf8(read.stdout).unwrap(),
+        "# Node instructions\n\nOriginal rules.\n"
+    );
+
+    let rules_file = home.path().join("rules.md");
+    std::fs::write(&rules_file, "  Keep reports short.  \n").unwrap();
+    let replace = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "node",
+            "rules",
+            "demo",
+            "t-0001",
+            "--text-file",
+            rules_file.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replace.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replace.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(instructions).unwrap(),
+        "# Node instructions\n\nKeep reports short.\n"
+    );
+}
+
+#[test]
+fn node_start_rejects_rules_file_stdin_before_starting_the_ticker() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    let task_file = home.path().join("task.md");
+    std::fs::write(&task_file, "Task body.\n").unwrap();
+
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "node",
+            "start",
+            "demo",
+            "--title",
+            "Child",
+            "--task-file",
+            task_file.to_str().unwrap(),
+            "--rules-file",
+            "-",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--rules-file does not read standard input; --task-file may")
+    );
+    assert!(!root.join(".ticker.lock").exists());
+    assert!(!root.join("demo/threads/t-0001.toml").exists());
+}
+
+#[test]
 fn peek_records_nothing_and_context_records_seen_items() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");

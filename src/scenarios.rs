@@ -197,6 +197,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
             base: None,
             task: "Do the thing.".into(),
             node: crate::organizations::NodeRequest::default(),
+            rules: "  Node rules  ".into(),
         },
     )
     .unwrap();
@@ -213,6 +214,11 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
         std::fs::read_to_string(worktree.join(".herdr-project/demo-t-0001/brief.md")).unwrap();
     assert!(brief.contains("Do the thing."));
     assert!(brief.contains("# Project instructions"));
+    let instructions = std::fs::read_to_string(
+        crate::organizations::node_scope_dir(&project, &started.id).join("INSTRUCTIONS.md"),
+    )
+    .unwrap();
+    assert_eq!(instructions, "# Node instructions\n\nNode rules\n");
     // The hostile title reaches herdr as one argument, unchanged.
     let calls = world.runner.calls.borrow();
     let create = calls
@@ -323,6 +329,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 role: crate::thread::NodeRole::Coordinator,
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap();
@@ -341,6 +348,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 role: crate::thread::NodeRole::Worker,
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap();
@@ -361,6 +369,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 role: crate::thread::NodeRole::Worker,
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap_err()
@@ -406,6 +415,7 @@ fn invalid_harness_profile_fails_before_ticker_or_node_creation() {
                 },
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap_err()
@@ -447,6 +457,7 @@ fn project_safety_args_cannot_override_a_permission_profile_before_node_creation
                 },
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap_err()
@@ -478,6 +489,7 @@ fn remote_recursive_coordinator_start_is_refused_before_any_placement_or_record(
                 role: crate::thread::NodeRole::Coordinator,
                 ..crate::organizations::NodeRequest::default()
             },
+            rules: String::new(),
         },
     )
     .unwrap_err()
@@ -926,6 +938,7 @@ fn thread_start_is_refused_when_paused() {
         base: None,
         task: "t".into(),
         node: crate::organizations::NodeRequest::default(),
+        rules: String::new(),
     };
     let error = threads::start(&world.ctx(), "demo", args)
         .unwrap_err()
@@ -1793,6 +1806,7 @@ fn a_remote_thread_without_a_repo_is_refused() {
         base: None,
         task: "t".into(),
         node: crate::organizations::NodeRequest::default(),
+        rules: String::new(),
     };
     assert!(
         threads::start(&world.ctx(), "demo", args)

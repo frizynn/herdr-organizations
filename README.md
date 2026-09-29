@@ -40,6 +40,8 @@ TASK
 
 New descendants inherit omitted profile fields from their parent. Use `--no-spawn` for a coordinator that must remain a leaf. Permission profiles validate the harness argv; they are not OS isolation. `thread start` remains a backward-compatible way to start a worker directly under the project root.
 
+Pass a child's instructions at creation with `--rules-file frontend-rules.md`. Use `node rules <slug> <id>` to read them or add `--text-file <f>` to replace them. `node summary <slug> <id>` prints the report's `## Summary` section, capped at 1,500 characters, and explains when the section is missing.
+
 ## Organization tree
 
 Herdr's **Herdr Organizations: organization tree** action remains the global project picker popup. It lists projects and then shows the selected project's root and descendants. Use Up/Down or `j`/`k` to move, Enter to open, Esc or `q` to go back or close, and `r` to refresh. Enter focuses a live agent, opens an existing tab without an agent, or recreates an active node whose tab was closed. The popup closes after a successful open. Mouse selection and double-click work when the Herdr client forwards terminal mouse events.
