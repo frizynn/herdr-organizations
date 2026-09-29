@@ -28,6 +28,8 @@ A node brief composes project context, then each ancestor from root to parent, t
 
 Node scopes are treated as regular directories. Symbolic links for a node scope or its memory directory are refused, and symbolic-link memory files are skipped. This prevents a node brief from reading through a redirected scope.
 
+`node start --rules-file <file>` stores trimmed rules in `nodes/<id>/INSTRUCTIONS.md`, which the existing ancestor context includes for descendants. `node rules <slug> <id>` reads those instructions; `--text-file <file>` replaces them for the next brief or restart. Reports can include a `## Summary` section. `node summary <slug> <id>` prints that section up to 1,500 characters and points out when it is missing.
+
 ## Agent profiles
 
 Each node stores the effective harness, model, reasoning effort, permission profile and raw argv components inherited from its parent. Raw argv components are inherited only while the harness stays the same. Creation can override any supported value. Repeatable `--raw-agent-arg` values remain separate argv entries. The implementation never turns profile fields into a shell command string.

@@ -14,6 +14,16 @@ When you finish, and whenever you stop to wait for the user, write your report t
 The report format:
 
 - An optional first line `PR: <url>` when you opened a pull request, with the full `https://github.com/<owner>/<repo>/pull/<number>` URL.
+- A `## Summary` section of at most 1500 characters, with exactly these lines:
+  ```text
+  Status: done | blocked | needs-decision | in-progress
+  Result: one or two sentences
+  Evidence: commits, PR URLs, test commands or file paths
+  Blockers: none, or what blocks
+  Decision: none, or the question for the parent
+  Next: the next step
+  ```
+  The parent reads only this section. Put the full detail in `## Report`.
 - A `## Report` section: what you did, what you found, what is left, and anything the user must decide.
 - An optional `## Remember` section: short, durable lessons for future threads.
 

@@ -6,11 +6,11 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::agent_profile::ProfileOverrides;
 use crate::coordinator::{self, OpenOptions};
-use crate::organizations::NodeRequest;
+use crate::organizations::{self, NodeRequest};
 use crate::paths::{self, Ctx, Env, SessionFlags};
 use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
-use crate::thread::NodeRole;
+use crate::thread::{self, NodeRole};
 use crate::threads::{self, ResolveArgs, StartArgs};
 use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, ticker};
 
@@ -304,6 +304,8 @@ struct NodeStartArgs {
     /// The task; `-` reads standard input
     #[arg(long, value_name = "FILE")]
     task_file: String,
+    #[arg(long, value_name = "FILE")]
+    rules_file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -324,6 +326,15 @@ enum NodeCommand {
     List { slug: String },
     /// Show one node's record
     Show { slug: String, id: String },
+    /// Changes apply to the next brief or restart of this node and its descendants, not to an ongoing conversation
+    Rules {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "FILE")]
+        text_file: Option<String>,
+    },
+    /// Print a child's short summary from its report
+    Summary { slug: String, id: String },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
     /// Resolve a node, or reopen a resolved one
@@ -500,6 +511,7 @@ pub fn run() -> Result<()> {
                         agent,
                         base,
                         task,
+                        rules: String::new(),
                         node: NodeRequest::default(),
                     },
                 )?;
@@ -583,7 +595,15 @@ pub fn run() -> Result<()> {
                     machine,
                     base,
                     task_file,
+                    rules_file,
                 } = *args;
+                let rules = match rules_file {
+                    Some(f) if f == "-" => {
+                        bail!("--rules-file does not read standard input; --task-file may")
+                    }
+                    Some(f) => read_text(&f)?,
+                    None => String::new(),
+                };
                 let task = read_text(&task_file)?;
                 let role = role.into();
                 let can_spawn = if can_spawn {
@@ -615,6 +635,7 @@ pub fn run() -> Result<()> {
                         agent: None,
                         base,
                         task,
+                        rules,
                         node,
                     },
                 )?;
@@ -656,6 +677,65 @@ pub fn run() -> Result<()> {
             }
             NodeCommand::List { slug } => threads::print_node_list(&ctx, &slug),
             NodeCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
+            NodeCommand::Rules {
+                slug,
+                id,
+                text_file,
+            } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                if let Some(text_file) = text_file {
+                    let rules = read_text(&text_file)?;
+                    if rules.len() > organizations::MAX_NODE_RULES_BYTES {
+                        bail!(
+                            "--rules-file is over {} bytes",
+                            organizations::MAX_NODE_RULES_BYTES
+                        );
+                    }
+                    let _lock = project.lock()?;
+                    thread::load(&project, &id)?;
+                    let instructions =
+                        organizations::node_scope_dir(&project, &id).join("INSTRUCTIONS.md");
+                    project::write_atomic(
+                        &instructions,
+                        organizations::node_instructions(&rules).as_bytes(),
+                    )?;
+                } else {
+                    thread::load(&project, &id)?;
+                    let instructions =
+                        organizations::node_scope_dir(&project, &id).join("INSTRUCTIONS.md");
+                    print!("{}", std::fs::read_to_string(instructions)?);
+                }
+                Ok(())
+            }
+            NodeCommand::Summary { slug, id } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                thread::load(&project, &id)?;
+                let report_path = thread::home_report_path(&project, &id);
+                let report = match std::fs::read_to_string(&report_path) {
+                    Ok(report) => report,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        println!("no report yet");
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "could not read report at {}: {error}",
+                            report_path.display()
+                        );
+                        return Ok(());
+                    }
+                };
+                if let Some(summary) = organizations::report_summary(&report) {
+                    println!("{summary}");
+                } else {
+                    println!(
+                        "no ## Summary in report ({} characters at {}); ask the node to add one",
+                        report.chars().count(),
+                        report_path.display()
+                    );
+                }
+                Ok(())
+            }
             NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
             NodeCommand::Resolve {
                 slug,
