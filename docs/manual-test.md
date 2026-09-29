@@ -58,6 +58,8 @@ Open **Herdr Organizations: organization tree** from Herdr's action menu.
 6. With auto-open enabled, focus a project tab and confirm the sidebar is ensured once. With it disabled, focus the tab and confirm no split is created.
 7. Close and reopen the sidebar repeatedly from a warm release build. Confirm the first toggle adopts any existing sidebar, later toggles do not scan the workspace, the tree paints before identity and live-status hydration, and the UI remains interactive without flashing, clearing or repainting unchanged rows.
 8. Leave the sidebar open, switch from the root coordinator tab to a worker tab and back. Confirm each tab has one sidebar, the row belonging to that tab is selected immediately, and returning to a visited tab neither recreates the split nor flashes. Close from either tab and confirm every sidebar in that workspace closes.
+9. Restart Herdr while the sidebar is open, then use the sidebar toggle shortcut. Confirm it does not close a different pane.
+10. Collapse a coordinator, close and reopen the sidebar, and confirm that coordinator remains collapsed.
 
 ## Existing behavior
 
