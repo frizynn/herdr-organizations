@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{
@@ -38,6 +38,7 @@ const SELECTED_PANE_ENV: &str = "HERDR_ORGANIZATIONS_SELECTED_PANE";
 const CONFIG_FILE: &str = "organization-sidebar.json";
 const LOCK_FILE_PREFIX: &str = ".organization-sidebar-";
 const STATE_FILE_PREFIX: &str = ".organization-sidebar-state-";
+const VIEW_FILE_PREFIX: &str = ".organization-sidebar-view-";
 const METADATA_SOURCE: &str = crate::herdr::SOURCE;
 const TOKEN_ID: &str = "org_sidebar";
 const TOKEN_PROJECT: &str = "org_project";
@@ -124,10 +125,19 @@ struct SidebarState {
     slug: String,
     workspace: String,
     socket: String,
+    socket_instance: String,
     open: bool,
     panes: BTreeMap<String, String>,
     // Read old state files once and migrate them through workspace discovery.
     pane_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+struct SidebarViewState {
+    collapsed: BTreeSet<String>,
+    root_collapsed: bool,
+    selected_id: String,
 }
 
 fn config_dir(ctx: &Ctx) -> Result<PathBuf> {
@@ -155,14 +165,64 @@ fn sidebar_state_path(config_dir: &Path, workspace: &str) -> PathBuf {
     ))
 }
 
+fn sidebar_view_path(config_dir: &Path, slug: &str) -> PathBuf {
+    config_dir.join(format!("{VIEW_FILE_PREFIX}{slug}.json"))
+}
+
 fn load_sidebar_state(config_dir: &Path, workspace: &str) -> Option<SidebarState> {
     project::read_json(&sidebar_state_path(config_dir, workspace))
+}
+
+fn socket_instance(socket: &str) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = std::fs::metadata(socket) else {
+            return String::new();
+        };
+        let mtime_nanos = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
+        format!("{}:{mtime_nanos}", metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        String::new()
+    }
 }
 
 fn save_sidebar_state(config_dir: &Path, state: &SidebarState) -> Result<()> {
     fs::create_dir_all(config_dir)
         .with_context(|| format!("could not create {}", config_dir.display()))?;
     project::write_json(&sidebar_state_path(config_dir, &state.workspace), state)
+}
+
+fn filter_sidebar_view(mut state: SidebarViewState, view: &TreeView) -> SidebarViewState {
+    state
+        .collapsed
+        .retain(|id| view.entries.iter().any(|entry| entry.thread.id == *id));
+    if state.selected_id != organizations::ROOT_ID
+        && !view
+            .entries
+            .iter()
+            .any(|entry| entry.thread.id == state.selected_id)
+    {
+        state.selected_id.clear();
+    }
+    state
+}
+
+fn load_sidebar_view(config_dir: &Path, slug: &str, view: &TreeView) -> SidebarViewState {
+    filter_sidebar_view(
+        project::read_json(&sidebar_view_path(config_dir, slug)).unwrap_or_default(),
+        view,
+    )
+}
+
+fn save_sidebar_view(config_dir: &Path, slug: &str, state: &SidebarViewState) -> Result<()> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("could not create {}", config_dir.display()))?;
+    project::write_json(&sidebar_view_path(config_dir, slug), state)
 }
 
 pub fn load_settings(ctx: &Ctx) -> Result<SidebarSettings> {
@@ -212,12 +272,15 @@ pub fn ensure_auto_open(
         return Ok(ToggleResult::AlreadyOpen);
     }
     let settings = load_settings(ctx)?;
+    let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+    let instance = socket_instance(socket);
     let sticky_open = config_dir(ctx)
         .ok()
         .and_then(|dir| load_sidebar_state(&dir, workspace))
         .is_some_and(|state| {
             state.slug == slug.unwrap_or_default()
-                && state.socket == ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("")
+                && state.socket == socket
+                && state.socket_instance == instance
                 && state.open
         });
     if !settings.auto_open && !sticky_open {
@@ -265,12 +328,14 @@ fn operate_with_settings(
         .env
         .var("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set for this Herdr action")?;
+    let instance = socket_instance(socket);
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
     let loaded = load_sidebar_state(&config_dir, workspace);
     let matching = loaded.as_ref().is_some_and(|state| {
         state.slug == slug
             && state.workspace == workspace
             && state.socket == socket
+            && state.socket_instance == instance
             && state.pane_id.is_empty()
     });
     let mut state = if matching {
@@ -280,6 +345,7 @@ fn operate_with_settings(
             slug: slug.to_string(),
             workspace: workspace.to_string(),
             socket: socket.to_string(),
+            socket_instance: instance.clone(),
             ..SidebarState::default()
         }
     };
@@ -573,7 +639,12 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("could not enable sidebar input")?;
         let guard = Self;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            event::EnableMouseCapture,
+            Hide
+        ) {
             let _ = terminal::disable_raw_mode();
             return Err(error).context("could not open organization sidebar screen");
         }
@@ -586,6 +657,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             Show,
+            event::DisableMouseCapture,
             LeaveAlternateScreen,
             ResetColor,
             SetAttribute(Attribute::Reset)
@@ -648,11 +720,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     } else {
         load_view(ctx, slug, settings.show_resolved)?
     };
+    let sidebar_config_dir = config_dir(ctx)?;
+    let mut sidebar_view = load_sidebar_view(&sidebar_config_dir, slug, &view);
     let mut screen = Screen::Tree {
         view: view.clone(),
-        collapsed: BTreeSet::new(),
-        root_collapsed: false,
-        selected: selected_index_for_pane(&view, selected_pane),
+        collapsed: sidebar_view.collapsed.clone(),
+        root_collapsed: sidebar_view.root_collapsed,
+        selected: selected_index_for_saved_view(&view, &sidebar_view, selected_pane),
     };
 
     if !interactive {
@@ -756,6 +830,36 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
         let key = match event::read()? {
             Event::Key(key) => key,
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                } = &mut screen
+                {
+                    let rows = visible_rows(view, collapsed, *root_collapsed);
+                    let height = terminal::size()
+                        .map(|(_, height)| height as usize)
+                        .unwrap_or_default();
+                    if let Some(index) =
+                        mouse_selection(mouse.row as usize, height, rows.len(), *selected)
+                        && *selected != index
+                    {
+                        *selected = index;
+                        dirty = true;
+                        message.clear();
+                        sidebar_view = sidebar_view_state_for_selection(
+                            view,
+                            collapsed,
+                            *root_collapsed,
+                            *selected,
+                        );
+                        let _ = save_sidebar_view(&sidebar_config_dir, slug, &sidebar_view);
+                    }
+                }
+                continue;
+            }
             Event::Resize(_, _) => {
                 dirty = true;
                 continue;
@@ -765,16 +869,21 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        let previous_tree_selection = match &screen {
+            Screen::Tree { selected, .. } => Some(*selected),
+            Screen::Settings { .. } => None,
+        };
         dirty = true;
         message.clear();
         match (&mut screen, key.code) {
             (_, KeyCode::Char('q')) => break,
             (Screen::Settings { .. }, KeyCode::Esc) => {
+                sidebar_view = filter_sidebar_view(sidebar_view, &view);
                 screen = Screen::Tree {
                     view: view.clone(),
-                    collapsed: BTreeSet::new(),
-                    root_collapsed: false,
-                    selected: 0,
+                    collapsed: sidebar_view.collapsed.clone(),
+                    root_collapsed: sidebar_view.root_collapsed,
+                    selected: selected_index_for_saved_view(&view, &sidebar_view, ""),
                 };
             }
             (Screen::Tree { .. }, KeyCode::Esc) => break,
@@ -856,11 +965,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 match load_view(ctx, slug, settings.show_resolved) {
                     Ok(refreshed) => {
                         view = refreshed.clone();
+                        sidebar_view = filter_sidebar_view(sidebar_view, &refreshed);
                         screen = Screen::Tree {
-                            view: refreshed,
-                            collapsed: BTreeSet::new(),
-                            root_collapsed: false,
-                            selected: 0,
+                            view: refreshed.clone(),
+                            collapsed: sidebar_view.collapsed.clone(),
+                            root_collapsed: sidebar_view.root_collapsed,
+                            selected: selected_index_for_saved_view(&refreshed, &sidebar_view, ""),
                         };
                     }
                     Err(error) => message = format!("Refresh failed: {error:#}"),
@@ -868,8 +978,26 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             }
             _ => {}
         }
-        if let Screen::Tree { view: tree, .. } = &screen {
+        let current_tree_selection = match &screen {
+            Screen::Tree { selected, .. } => Some(*selected),
+            Screen::Settings { .. } => None,
+        };
+        let selection_changed =
+            previous_tree_selection.is_some() && previous_tree_selection != current_tree_selection;
+        let collapse_toggled = previous_tree_selection.is_some() && key.code == KeyCode::Char(' ');
+        if let Screen::Tree {
+            view: tree,
+            collapsed,
+            root_collapsed,
+            selected,
+        } = &screen
+        {
             view = tree.clone();
+            if selection_changed || collapse_toggled {
+                sidebar_view =
+                    sidebar_view_state_for_selection(tree, collapsed, *root_collapsed, *selected);
+                let _ = save_sidebar_view(&sidebar_config_dir, slug, &sidebar_view);
+            }
         }
         last_refresh = Instant::now();
     }
@@ -898,11 +1026,10 @@ pub fn run(ctx: &Ctx) -> Result<()> {
 }
 
 fn selected_index_for_pane(view: &TreeView, pane_id: &str) -> usize {
-    if pane_id.is_empty()
-        || view
-            .project
-            .coordinator()
-            .is_some_and(|record| record.pane_id == pane_id)
+    if view
+        .project
+        .coordinator()
+        .is_some_and(|record| record.pane_id == pane_id)
     {
         return 0;
     }
@@ -910,6 +1037,51 @@ fn selected_index_for_pane(view: &TreeView, pane_id: &str) -> usize {
         .iter()
         .position(|entry| entry.thread.pane_id == pane_id)
         .map_or(0, |index| index + 1)
+}
+
+fn selected_index_for_saved_view(
+    view: &TreeView,
+    state: &SidebarViewState,
+    selected_pane: &str,
+) -> usize {
+    let selected_by_pane = selected_index_for_pane(view, selected_pane);
+    let pane_is_coordinator = view
+        .project
+        .coordinator()
+        .is_some_and(|record| record.pane_id == selected_pane);
+    if !selected_pane.is_empty() && (selected_by_pane > 0 || pane_is_coordinator) {
+        return selected_by_pane;
+    }
+    visible_rows(view, &state.collapsed, state.root_collapsed)
+        .iter()
+        .position(|row| match row {
+            VisibleRow::Root => state.selected_id == organizations::ROOT_ID,
+            VisibleRow::Entry(entry) => state.selected_id == entry.thread.id,
+        })
+        .unwrap_or(0)
+}
+
+fn sidebar_view_state_for_selection(
+    view: &TreeView,
+    collapsed: &BTreeSet<String>,
+    root_collapsed: bool,
+    selected: usize,
+) -> SidebarViewState {
+    let selected_id = visible_rows(view, collapsed, root_collapsed)
+        .get(selected)
+        .map(|row| match row {
+            VisibleRow::Root => organizations::ROOT_ID.to_string(),
+            VisibleRow::Entry(entry) => entry.thread.id.clone(),
+        })
+        .unwrap_or_default();
+    filter_sidebar_view(
+        SidebarViewState {
+            collapsed: collapsed.clone(),
+            root_collapsed,
+            selected_id,
+        },
+        view,
+    )
 }
 
 fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
@@ -1559,6 +1731,17 @@ fn visible_range(count: usize, selected: usize, capacity: usize) -> Range<usize>
     start..start + capacity
 }
 
+fn mouse_selection(row: usize, height: usize, count: usize, selected: usize) -> Option<usize> {
+    let content_row = row.checked_sub(2)?;
+    let capacity = height.saturating_sub(5).max(1);
+    if content_row >= capacity {
+        return None;
+    }
+    let range = visible_range(count, selected, capacity);
+    let index = range.start + content_row;
+    (index < range.end).then_some(index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,6 +1767,10 @@ mod tests {
             runner: &world.runner,
             detached_ticker: false,
         }
+    }
+
+    fn current_socket_instance(ctx: &Ctx<'_>) -> String {
+        socket_instance(ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""))
     }
 
     fn identity_tokens(slug: &str, workspace: &str) -> serde_json::Value {
@@ -1694,6 +1881,109 @@ mod tests {
 
         assert_eq!(selected_index_for_pane(&view, "w1:p-worker"), 1);
         assert_eq!(selected_index_for_pane(&view, "w1:p1"), 0);
+    }
+
+    #[test]
+    fn view_state_round_trip_drops_unknown_ids() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            entries: organizations::tree_from(&[thread_model::Thread {
+                id: "t-0001".into(),
+                title: "Current worker".into(),
+                ..thread_model::Thread::default()
+            }])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let config_dir = world.home.path().join("plugins").join("herdr-projects");
+        let state = SidebarViewState {
+            collapsed: BTreeSet::from(["t-0001".into(), "t-9999".into()]),
+            root_collapsed: true,
+            selected_id: "t-9999".into(),
+        };
+        save_sidebar_view(&config_dir, "demo", &state).unwrap();
+
+        let loaded = load_sidebar_view(&config_dir, "demo", &view);
+
+        assert_eq!(loaded.collapsed, BTreeSet::from(["t-0001".into()]));
+        assert!(loaded.root_collapsed);
+        assert!(loaded.selected_id.is_empty());
+    }
+
+    #[test]
+    fn selected_pane_env_wins_over_saved_selection() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            entries: organizations::tree_from(&[
+                thread_model::Thread {
+                    id: "t-0001".into(),
+                    title: "First worker".into(),
+                    pane_id: "w1:p-first".into(),
+                    ..thread_model::Thread::default()
+                },
+                thread_model::Thread {
+                    id: "t-0002".into(),
+                    title: "Second worker".into(),
+                    pane_id: "w1:p-second".into(),
+                    ..thread_model::Thread::default()
+                },
+            ])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let state = SidebarViewState {
+            selected_id: "t-0001".into(),
+            ..SidebarViewState::default()
+        };
+        let env =
+            crate::paths::Env::for_test(world.home.path(), &[(SELECTED_PANE_ENV, "w1:p-second")]);
+
+        assert_eq!(
+            selected_index_for_saved_view(&view, &state, env.var(SELECTED_PANE_ENV).unwrap_or(""),),
+            2
+        );
+    }
+
+    #[test]
+    fn mouse_selection_persists_the_clicked_visible_row() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            entries: organizations::tree_from(&[
+                thread_model::Thread {
+                    id: "t-0001".into(),
+                    title: "First worker".into(),
+                    ..thread_model::Thread::default()
+                },
+                thread_model::Thread {
+                    id: "t-0002".into(),
+                    title: "Second worker".into(),
+                    ..thread_model::Thread::default()
+                },
+            ])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let collapsed = BTreeSet::new();
+        let selected =
+            mouse_selection(3, 24, visible_rows(&view, &collapsed, false).len(), 0).unwrap();
+        let config_dir = world.home.path().join("plugins").join("herdr-projects");
+        let state = sidebar_view_state_for_selection(&view, &collapsed, false, selected);
+        save_sidebar_view(&config_dir, "demo", &state).unwrap();
+
+        assert_eq!(selected, 1);
+        assert_eq!(
+            load_sidebar_view(&config_dir, "demo", &view).selected_id,
+            "t-0001"
+        );
     }
 
     #[test]
@@ -2102,6 +2392,7 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
                 open: true,
                 panes: BTreeMap::from([("w1:t1".into(), "w1:p2".into())]),
                 pane_id: String::new(),
@@ -2120,12 +2411,14 @@ mod tests {
         world.runner.on("pane run", ok(r#"{"result":{}}"#));
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
+        assert!(!current_socket_instance(&ctx).is_empty());
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
             &SidebarState {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
                 ..SidebarState::default()
             },
         )
@@ -2159,6 +2452,7 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
                 open: true,
                 panes: BTreeMap::from([("w1:t1".into(), "w1:p-root-sidebar".into())]),
                 pane_id: String::new(),
@@ -2192,6 +2486,7 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
                 open: true,
                 panes: BTreeMap::from([("w1:t1".into(), "w1:p-sidebar".into())]),
                 pane_id: String::new(),
@@ -2232,6 +2527,7 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: "/tmp/another-session.sock".into(),
+                socket_instance: String::new(),
                 open: true,
                 panes: BTreeMap::from([("w1:t1".into(), "w1:p-old".into())]),
                 pane_id: String::new(),
@@ -2247,6 +2543,73 @@ mod tests {
         assert_eq!(world.runner.count("pane get"), 0);
         assert_eq!(world.runner.count("pane close"), 0);
         assert_eq!(world.runner.count("pane split"), 1);
+    }
+
+    #[test]
+    fn stale_state_from_previous_server_instance_is_not_reused() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on(
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+        );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: "old".into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-old".into())]),
+                ..SidebarState::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
+            ToggleResult::Opened
+        );
+
+        assert_eq!(world.runner.count("pane list --workspace w1"), 1);
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane close"), 0);
+        assert_eq!(world.runner.count("pane split"), 1);
+    }
+
+    #[test]
+    fn same_server_instance_keeps_fast_path() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on("pane close", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-sidebar".into())]),
+                ..SidebarState::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
+            ToggleResult::Closed
+        );
+
+        assert_eq!(world.runner.count("pane list"), 0);
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane close"), 1);
     }
 
     #[test]
