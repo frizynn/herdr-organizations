@@ -782,6 +782,10 @@ pub fn stop(ctx: &Ctx, slug: &str, id: &str) -> Result<Vec<String>> {
         }
         clear_thread_tokens(&view.herdr, &entry.thread);
         close_thread_view(&view, slug, &entry.thread)?;
+        // A brief still waiting for delivery has no agent left to receive it.
+        if entry.thread.prompt_pending {
+            thread::update(&project, &entry.thread.id, |t| t.prompt_pending = false)?;
+        }
         stopped.push(entry.thread.id.clone());
     }
     Ok(stopped)
