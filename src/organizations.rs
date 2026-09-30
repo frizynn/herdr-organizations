@@ -891,7 +891,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
     } else if record.role == NodeRole::Coordinator && record.can_spawn {
         text.push_str(&format!(
-            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --model <model> --reasoning-effort <effort> --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. The profile flags are `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Set `--model` and `--reasoning-effort` on every child following `Choosing a child's model` in the coordinator skill, using the cheapest tier that can do the work. Omitted profile fields inherit the parent profile at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
+            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --model <model> --reasoning-effort <effort> --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. The profile flags are `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Set `--model` on every child, and `--reasoning-effort` on Codex children (the Claude adapter rejects it), following `Choosing a child's model` in the coordinator skill. Use the cheapest tier that can do the work. Omitted profile fields inherit the parent profile at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
             record.id, record.id
         ));
     } else if record.role == NodeRole::Coordinator {
@@ -1921,9 +1921,11 @@ mod tests {
         );
 
         assert!(protocol.contains("--model <model> --reasoning-effort <effort>"));
-        assert!(protocol.contains(
-            "Set `--model` and `--reasoning-effort` on every child following `Choosing a child's model` in the coordinator skill"
-        ));
+        assert!(
+            protocol.contains(
+                "Set `--model` on every child, and `--reasoning-effort` on Codex children"
+            )
+        );
     }
 
     #[test]

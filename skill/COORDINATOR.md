@@ -63,7 +63,7 @@ New nodes inherit harness, model, reasoning effort, permission profile and raw a
 
 ## Choosing a child's model
 
-Pass `--model` and `--reasoning-effort` explicitly on every `node start`. Inheritance copies your own profile, which is usually the most expensive one.
+Pass `--model` explicitly on every `node start`, and `--reasoning-effort` on every Codex child. The Claude adapter rejects `--reasoning-effort`, so leave it out for Claude children. Inheritance copies your own profile, which is usually the most expensive one.
 
 | Kind of work | Tier | Effort |
 | --- | --- | --- |
