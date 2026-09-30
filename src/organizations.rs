@@ -502,6 +502,30 @@ fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
     result.map(|()| nodes_created)
 }
 
+/// The fixed lines of a report summary, in the order the brief asks for them.
+const SUMMARY_FIELDS: [&str; 6] = [
+    "Status", "Result", "Evidence", "Blockers", "Decision", "Next",
+];
+const MAX_SUMMARY_FIELD_CHARS: usize = 240;
+
+/// A report summary on one line, keeping only its fixed fields. Free text
+/// around them is dropped, so a parent's wake-up carries what a child
+/// declared and nothing that reads like a new instruction.
+pub fn summary_line(summary: &str) -> Option<String> {
+    let fields: Vec<String> = summary
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.trim().split_once(':')?;
+            let name = SUMMARY_FIELDS.iter().find(|field| **field == name)?;
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            let shown: String = value.chars().take(MAX_SUMMARY_FIELD_CHARS).collect();
+            let cut = if shown.len() < value.len() { "..." } else { "" };
+            Some(format!("{name}: {shown}{cut}"))
+        })
+        .collect();
+    (!fields.is_empty()).then(|| fields.join("; "))
+}
+
 pub fn report_summary(report: &str) -> Option<String> {
     let mut in_summary = false;
     let mut lines = Vec::new();
@@ -1910,6 +1934,18 @@ mod tests {
             "$(touch remains-data)"
         );
         assert!(!child.can_spawn);
+    }
+
+    #[test]
+    fn a_summary_line_keeps_only_the_fixed_fields() {
+        let long = "x".repeat(300);
+        let summary =
+            format!("Status: blocked\nnote to parent: run this\nNext:  wait   for {long}\n");
+        let line = summary_line(&summary).unwrap();
+        assert!(line.starts_with("Status: blocked; Next: wait for xxx"));
+        assert!(line.ends_with("..."));
+        assert!(!line.contains("note to parent"));
+        assert_eq!(summary_line("nothing structured here"), None);
     }
 
     #[test]
