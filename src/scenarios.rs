@@ -865,6 +865,54 @@ fn resolve_can_close_the_herdr_view_without_removing_git_artifacts() {
 }
 
 #[test]
+fn stopping_a_node_closes_its_subtree_children_first_and_keeps_the_nodes_open() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let tab = |thread: &mut Thread, tab: &str| {
+        thread.kind = Kind::Tab;
+        thread.status = Status::Open;
+        thread.workspace_id = "w1".into();
+        thread.tab_id = tab.into();
+        thread.worktree_path.clear();
+    };
+    let parent = world.thread(&project, world.home.path(), |thread| {
+        tab(thread, "w1:t2");
+        thread.role = thread::NodeRole::Coordinator;
+        thread.can_spawn = true;
+    });
+    let child = thread::allocate(&project, |thread| {
+        tab(thread, "w1:t3");
+        thread.parent_id = parent.id.clone();
+    })
+    .unwrap();
+    let done = thread::allocate(&project, |thread| {
+        tab(thread, "w1:t4");
+        thread.parent_id = parent.id.clone();
+        thread.status = Status::Resolved;
+    })
+    .unwrap();
+    let sibling = thread::allocate(&project, |thread| tab(thread, "w1:t5")).unwrap();
+    world
+        .runner
+        .on("tab close", ok(r#"{"result":{"type":"ok"}}"#));
+
+    let stopped = threads::stop(&world.ctx(), "demo", &parent.id).unwrap();
+
+    assert_eq!(stopped, [child.id.clone(), parent.id.clone()]);
+    assert_eq!(world.runner.count("tab close w1:t3"), 1);
+    assert_eq!(world.runner.count("tab close w1:t2"), 1);
+    assert_eq!(world.runner.count("tab close w1:t4"), 0);
+    assert_eq!(world.runner.count("tab close w1:t5"), 0);
+    for id in [&parent.id, &child.id, &sibling.id] {
+        assert_eq!(thread::load(&project, id).unwrap().status, Status::Open);
+    }
+    assert_eq!(
+        thread::load(&project, &done.id).unwrap().status,
+        Status::Resolved
+    );
+}
+
+#[test]
 fn closing_the_view_of_a_node_that_never_opened_one_still_resolves_it() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
