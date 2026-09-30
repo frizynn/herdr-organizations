@@ -865,6 +865,67 @@ fn resolve_can_close_the_herdr_view_without_removing_git_artifacts() {
 }
 
 #[test]
+fn closing_the_view_of_a_node_that_never_opened_one_still_resolves_it() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |t| {
+        t.kind = Kind::Tab;
+        t.tab_id.clear();
+        t.workspace_id.clear();
+        t.pane_id.clear();
+    });
+
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Resolved
+    );
+    assert_eq!(world.runner.count("tab close"), 0);
+}
+
+#[test]
+fn a_view_that_is_already_gone_counts_as_closed() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |_| {});
+    world.runner.on(
+        "workspace close w2",
+        fail(
+            1,
+            r#"{"error":{"code":"workspace_not_found","message":"gone"}}"#,
+        ),
+    );
+
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Resolved
+    );
+}
+
+#[test]
 fn a_failed_view_close_leaves_the_node_open_and_retryable() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
