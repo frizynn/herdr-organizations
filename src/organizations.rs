@@ -50,6 +50,7 @@ pub struct CreateNode {
     pub base: String,
     pub task: String,
     pub rules: String,
+    pub template: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,6 +427,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.reasoning_effort = profile.reasoning_effort.clone();
         record.permission_profile = profile.permission_profile.clone();
         record.raw_agent_args = profile.raw_agent_args.clone();
+        record.template = args.template.clone();
     })?;
 
     let scope = node_scope_dir(project, &record.id);
@@ -594,6 +596,22 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
                 "\n\n## Node {} memory\n\n{}",
                 record.id,
                 node_memory.trim()
+            ));
+        }
+        if !record.template.is_empty()
+            && let Ok(template) =
+                crate::templates::resolve(&project.root, Some(&project.slug), &record.template)
+            && let Some(text) = read_scoped_memory_file(
+                &template.dir.join("MEMORY.md"),
+                &format!("template {}/MEMORY.md", record.template),
+                &mut budget,
+            )?
+            && !crate::templates::memory_body(&text).is_empty()
+        {
+            memory_index.push_str(&format!(
+                "\n\n## Template {} memory\n\n{}",
+                record.template,
+                crate::templates::memory_body(&text)
             ));
         }
         read_memory_files(
@@ -928,9 +946,29 @@ mod tests {
                 base: String::new(),
                 task: "task".into(),
                 rules: rules.into(),
+                template: String::new(),
             },
         )
         .unwrap()
+    }
+
+    fn save_template_memory(project: &Project, name: &str, text: &str) {
+        let template = crate::templates::save(
+            &project.root,
+            crate::templates::SaveArgs {
+                name: name.into(),
+                project: Some(project.slug.clone()),
+                spec: crate::templates::TemplateSpec {
+                    role: NodeRole::Coordinator,
+                    can_spawn: true,
+                    ..crate::templates::TemplateSpec::default()
+                },
+                rules: String::new(),
+                force: false,
+            },
+        )
+        .unwrap();
+        crate::templates::set_memory(&template, text).unwrap();
     }
 
     #[test]
@@ -1004,6 +1042,7 @@ mod tests {
                 base: String::new(),
                 task: "task".into(),
                 rules: "x".repeat(MAX_NODE_RULES_BYTES + 1),
+                template: String::new(),
             },
         )
         .unwrap_err()
@@ -1053,6 +1092,7 @@ mod tests {
                     base: String::new(),
                     task: "continue".into(),
                     rules: String::new(),
+                    template: String::new(),
                 },
             )
             .unwrap();
@@ -1147,6 +1187,7 @@ mod tests {
                 base: String::new(),
                 task: "task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1162,6 +1203,7 @@ mod tests {
                 base: String::new(),
                 task: "must not persist".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap_err()
@@ -1185,6 +1227,7 @@ mod tests {
             base: String::new(),
             task: "Coordinate remote work".into(),
             rules: String::new(),
+            template: String::new(),
         };
         let error = create_node(&project, &remote_coordinator)
             .unwrap_err()
@@ -1203,6 +1246,7 @@ mod tests {
             base: String::new(),
             task: "Implement a scoped task".into(),
             rules: String::new(),
+            template: String::new(),
         };
         let worker = create_node(&project, &remote_worker).unwrap();
         assert_eq!(worker.role, NodeRole::Worker);
@@ -1225,6 +1269,7 @@ mod tests {
                 base: String::new(),
                 task: "work".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1250,6 +1295,7 @@ mod tests {
                 base: String::new(),
                 task: "coordinate".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1283,6 +1329,7 @@ mod tests {
                 base: String::new(),
                 task: "coordinate without children".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1298,6 +1345,7 @@ mod tests {
                 base: String::new(),
                 task: "must not persist".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap_err()
@@ -1338,6 +1386,7 @@ mod tests {
                     base: String::new(),
                     task: "rejected".into(),
                     rules: String::new(),
+                    template: String::new(),
                 },
             )
             .unwrap_err()
@@ -1385,6 +1434,7 @@ mod tests {
                 base: String::new(),
                 task: "ancestor task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1399,6 +1449,7 @@ mod tests {
                 base: String::new(),
                 task: "sibling task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1413,6 +1464,7 @@ mod tests {
                 base: String::new(),
                 task: "target task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1427,6 +1479,7 @@ mod tests {
                 base: String::new(),
                 task: "descendant task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1488,6 +1541,97 @@ mod tests {
     }
 
     #[test]
+    fn template_memory_reaches_node_and_descendants() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        save_template_memory(&project, "coordinator", "recordar X");
+
+        let node = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    parent_id: ROOT_ID.into(),
+                    role: NodeRole::Coordinator,
+                    can_spawn: Some(true),
+                    profile: ProfileOverrides::default(),
+                },
+                title: "Coordinator".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "coordinate work".into(),
+                rules: String::new(),
+                template: "coordinator".into(),
+            },
+        )
+        .unwrap();
+        let child = create_node(
+            &project,
+            &CreateNode {
+                request: request(&node.id, NodeRole::Worker),
+                title: "Child".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "finish work".into(),
+                rules: String::new(),
+                template: String::new(),
+            },
+        )
+        .unwrap();
+        let sibling = make_node(&project, ROOT_ID, NodeRole::Worker, None, "Sibling", "");
+
+        let node_context = scoped_context(&project, &node).unwrap();
+        let child_context = scoped_context(&project, &child).unwrap();
+        let sibling_context = scoped_context(&project, &sibling).unwrap();
+        assert!(
+            node_context
+                .memory_index
+                .contains("## Template coordinator memory\n\nrecordar X")
+        );
+        assert!(
+            child_context
+                .memory_index
+                .contains("## Template coordinator memory\n\nrecordar X")
+        );
+        assert!(!sibling_context.memory_index.contains("recordar X"));
+    }
+
+    #[test]
+    fn deleted_template_does_not_break_context() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        save_template_memory(&project, "temporary", "remember X");
+        let node = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    parent_id: ROOT_ID.into(),
+                    role: NodeRole::Coordinator,
+                    can_spawn: Some(true),
+                    profile: ProfileOverrides::default(),
+                },
+                title: "Coordinator".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "coordinate work".into(),
+                rules: String::new(),
+                template: "temporary".into(),
+            },
+        )
+        .unwrap();
+
+        crate::templates::delete(&project.root, Some(&project.slug), "temporary").unwrap();
+
+        let context = scoped_context(&project, &node).unwrap();
+        assert!(!context.memory_index.contains("remember X"));
+    }
+
+    #[test]
     fn scoped_memory_enforces_per_file_and_aggregate_limits_deterministically() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -1502,6 +1646,7 @@ mod tests {
                 base: String::new(),
                 task: "task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1589,6 +1734,7 @@ mod tests {
                 base: String::new(),
                 task: "sibling".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1603,6 +1749,7 @@ mod tests {
                 base: String::new(),
                 task: "target".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1662,6 +1809,7 @@ mod tests {
                 base: String::new(),
                 task: "task".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1711,6 +1859,7 @@ mod tests {
                 base: String::new(),
                 task: "coordinate".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1734,6 +1883,7 @@ mod tests {
                 base: String::new(),
                 task: "work".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1786,6 +1936,7 @@ mod tests {
                 base: String::new(),
                 task: "coordinate".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();
@@ -1810,6 +1961,7 @@ mod tests {
                 base: String::new(),
                 task: "work".into(),
                 rules: String::new(),
+                template: String::new(),
             },
         )
         .unwrap();

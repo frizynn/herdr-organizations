@@ -155,6 +155,7 @@ pub struct StartArgs {
     pub base: Option<String>,
     pub task: String,
     pub rules: String,
+    pub template: String,
     pub node: NodeRequest,
 }
 
@@ -255,6 +256,7 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
             base: args.base.clone().unwrap_or_default(),
             task: args.task.clone(),
             rules: args.rules,
+            template: args.template,
         },
     )?;
     let id = record.id.clone();
@@ -725,11 +727,27 @@ pub struct ResolveArgs {
 
 fn close_thread_view(view: &SessionView<'_>, slug: &str, thread: &Thread) -> Result<()> {
     let herdr = view.herdr.on_machine(&thread.machine);
-    match thread.kind {
-        Kind::Worktree => herdr.workspace_close(&thread.workspace_id),
-        Kind::Tab => herdr.tab_close(&thread.tab_id),
-        Kind::Adopted => herdr.pane_close(&thread.pane_id),
+    let target = match thread.kind {
+        Kind::Worktree => &thread.workspace_id,
+        Kind::Tab => &thread.tab_id,
+        Kind::Adopted => &thread.pane_id,
+    };
+    // A node whose start failed never got a view, and a view closed by hand is already gone.
+    if target.is_empty() {
+        return Ok(());
     }
+    match thread.kind {
+        Kind::Worktree => herdr.workspace_close(target),
+        Kind::Tab => herdr.tab_close(target),
+        Kind::Adopted => herdr.pane_close(target),
+    }
+    .or_else(|error| {
+        if error.code.ends_with("_not_found") {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })
     .map_err(|error| anyhow::anyhow!(error))
     .with_context(|| {
         format!(

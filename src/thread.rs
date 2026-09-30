@@ -106,6 +106,7 @@ pub struct Thread {
     pub pr_state: String,
     pub pr_review: String,
     pub resolved_reason: String,
+    pub template: String,
 }
 
 impl Thread {
@@ -861,6 +862,20 @@ mod tests {
             created: ago(3600),
             ..Thread::default()
         }
+    }
+
+    #[test]
+    fn legacy_thread_record_without_template_loads_an_empty_value() {
+        let root = tempfile::tempdir().unwrap();
+        let project = crate::project::create(root.path(), "Demo", "", vec![]).unwrap();
+        let path = record_path(&project, "t-0001");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "id = \"t-0001\"\ntitle = \"Legacy\"\n").unwrap();
+
+        let record = load(&project, "t-0001").unwrap();
+
+        assert_eq!(record.title, "Legacy");
+        assert_eq!(record.template, "");
     }
 
     fn live(state: Option<&str>, secs: i64) -> Live {

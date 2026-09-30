@@ -36,6 +36,10 @@ Check `start_threads` and `max_parallel_threads` in `hp context <slug>` before c
 - `propose` is the default. List the nodes you suggest, including each role, title, repository and task, then wait. A go-ahead is an unmarked user message that names the work to start. A task delegated by name from `TASKS.md` is also a go-ahead. Only then run `hp node start`.
 - `auto` permits starting after you have explained the work plan. It does not approve unrelated commands or user decisions.
 - Count open nodes across the organization against `max_parallel_threads`. If the limit is reached, explain that and wait before starting more.
+- Before creating a coordinator child, run `hp template list --project <slug>`. If a template fits, use `hp node start <slug> --template <name> --title ... --task-file ...`.
+- Save a node as a template only when the user asks: `hp template save <name> --from-node <slug> <id> --description "..."`.
+- Before resolving a node that came from a template (its record shows `template`), merge its durable lessons into `hp template memory <name>`. Read the current memory, write the merged text with `--text-file`, and stay under 8 KiB. Keep facts, not narrative.
+- Never delete templates unless the user asks.
 
 Start a worker under this root with the task on standard input:
 

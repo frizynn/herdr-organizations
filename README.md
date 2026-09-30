@@ -44,7 +44,9 @@ Pass a child's instructions at creation with `--rules-file frontend-rules.md`. U
 
 ## Templates
 
-Reusable node templates live in .templates/<name>/ or <slug>/templates/<name>/. Each stores its profile in TEMPLATE.toml, instructions in RULES.md and template memory in MEMORY.md. With --project <slug>, a project template takes precedence over a global template of the same name; without it, commands use global templates only. Use template save, list, show, memory and delete to manage them. Creating nodes from templates will arrive in the next change.
+Reusable node templates live in `.templates/<name>/` or `<slug>/templates/<name>/`. Each stores its profile in `TEMPLATE.toml`, instructions in `RULES.md` and template memory in `MEMORY.md`. With `--project <slug>`, a project template takes precedence over a global template of the same name; without it, commands use global templates only. Use `template save`, `list`, `show`, `memory` and `delete` to manage them.
+
+Use `node start <slug> --template <name> --title ... --task-file ...` to create a node from a template. It supplies its role, spawn permission, profile and rules; explicit role, spawn and profile flags take precedence. Do not combine `--template` with `--rules-file`. The node records the template name, and its current `MEMORY.md` is included in that node's context and its descendants, within the existing memory budget. Updating template memory changes future contexts for those nodes; siblings do not receive it. Rules are copied into the node's instructions at creation, so later `RULES.md` changes do not modify existing node instructions.
 
 ## Organization tree
 

@@ -13,6 +13,7 @@ use crate::thread::{self, NodeRole};
 pub const TEMPLATES_DIR: &str = ".templates";
 pub const PROJECT_TEMPLATES_DIR: &str = "templates";
 pub const MAX_TEMPLATE_MEMORY_BYTES: usize = 8 * 1024;
+const MEMORY_HEADER: &str = "# Template memory";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
@@ -96,12 +97,7 @@ pub fn resolve(root: &Path, project: Option<&str>, name: &str) -> Result<Templat
     {
         return Ok(template);
     }
-    bail!(
-        "template {}{}{} not found",
-        char::from(96),
-        name,
-        char::from(96)
-    )
+    bail!("template `{name}` not found")
 }
 
 pub fn rules(template: &Template) -> Result<String> {
@@ -131,10 +127,8 @@ pub fn save(root: &Path, args: SaveArgs) -> Result<Template> {
     let existed = std::fs::symlink_metadata(&dir).is_ok();
     if existed && !args.force {
         bail!(
-            "template {}{}{} exists; pass --force to replace it",
-            char::from(96),
-            args.name,
-            char::from(96)
+            "template `{}` exists; pass --force to replace it",
+            args.name
         );
     }
 
@@ -161,7 +155,7 @@ pub fn save(root: &Path, args: SaveArgs) -> Result<Template> {
     project::write_atomic(&dir.join("RULES.md"), args.rules.as_bytes())?;
     let memory_path = dir.join("MEMORY.md");
     if !memory_path.exists() {
-        project::write_atomic(&memory_path, b"# Template memory\n")?;
+        project::write_atomic(&memory_path, format!("{MEMORY_HEADER}\n").as_bytes())?;
     }
     read_template(
         &dir,
@@ -211,6 +205,12 @@ pub fn spec_from_node(
     ))
 }
 
+/// The memory text without the file's own heading; empty when nothing was learned yet.
+pub fn memory_body(memory: &str) -> &str {
+    let memory = memory.trim();
+    memory.strip_prefix(MEMORY_HEADER).unwrap_or(memory).trim()
+}
+
 pub fn set_memory(template: &Template, text: &str) -> Result<()> {
     if text.len() > MAX_TEMPLATE_MEMORY_BYTES {
         bail!("template memory is over {MAX_TEMPLATE_MEMORY_BYTES} bytes");
@@ -224,25 +224,12 @@ pub fn delete(root: &Path, project_slug: Option<&str>, name: &str) -> Result<()>
         Project::load(root, project_slug)?;
     }
     let dir = dir_for(root, project_slug, name);
-    let metadata = std::fs::symlink_metadata(&dir).with_context(|| {
-        format!(
-            "template {}{}{} not found",
-            char::from(96),
-            name,
-            char::from(96)
-        )
-    })?;
+    let metadata =
+        std::fs::symlink_metadata(&dir).with_context(|| format!("template `{name}` not found"))?;
     if !metadata.file_type().is_dir() || !dir.join("TEMPLATE.toml").is_file() {
         bail!("{} is not a template directory", dir.display());
     }
-    std::fs::remove_dir_all(&dir).with_context(|| {
-        format!(
-            "could not delete template {}{}{}",
-            char::from(96),
-            name,
-            char::from(96)
-        )
-    })
+    std::fs::remove_dir_all(&dir).with_context(|| format!("could not delete template `{name}`"))
 }
 
 fn read_scope(dir: &Path, scope: Scope, project: &str) -> Result<Vec<Template>> {
@@ -318,6 +305,16 @@ mod tests {
     use crate::thread::{Kind, NodeRole};
 
     use super::*;
+
+    #[test]
+    fn memory_body_ignores_the_heading_of_an_empty_memory() {
+        assert_eq!(memory_body("# Template memory\n"), "");
+        assert_eq!(
+            memory_body("# Template memory\n\n- Use pnpm.\n"),
+            "- Use pnpm."
+        );
+        assert_eq!(memory_body("- Use pnpm."), "- Use pnpm.");
+    }
 
     fn spec(name: &str, role: NodeRole) -> TemplateSpec {
         TemplateSpec {
@@ -519,6 +516,7 @@ mod tests {
                 base: String::new(),
                 task: "Implement the frontend.".into(),
                 rules: "Keep changes accessible.".into(),
+                template: String::new(),
             },
         )
         .unwrap();
