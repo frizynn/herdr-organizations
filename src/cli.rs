@@ -12,7 +12,9 @@ use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
 use crate::thread::{self, NodeRole};
 use crate::threads::{self, ResolveArgs, StartArgs};
-use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, templates, ticker};
+use crate::{
+    actions, adopt, doctor, inbox, lifecycle, overview, routine, templates, ticker, usage,
+};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = crate::VERSION, about = "Recursive organizations for herdr")]
@@ -86,6 +88,12 @@ enum Command {
         /// Wait for Enter before exiting (only when on a terminal; used by the popup)
         #[arg(long)]
         wait: bool,
+    },
+    /// Print the tokens each node has used, read from its agent's session logs
+    Usage {
+        slug: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Show only one project's panes in the sidebar, sorted by attention
     Focus { slug: Option<String> },
@@ -607,6 +615,7 @@ pub fn run() -> Result<()> {
         ),
         Command::Context { slug, peek } => coordinator::context(&ctx, &slug, peek),
         Command::Overview { slug, wait } => overview::run(&ctx, slug.as_deref(), wait),
+        Command::Usage { slug, json } => usage::print(&ctx, &slug, json),
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),
         Command::Unfocus { session } => overview::unfocus(&ctx, &session.into()),
         Command::Inbox { command } => match command {

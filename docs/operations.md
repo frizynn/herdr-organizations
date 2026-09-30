@@ -53,6 +53,7 @@ The virtual `root` is the project coordinator. A new worker has `parent_id=root`
 | `thread start <project> ...` | Backward-compatible alias for a worker directly under `root`. Existing thread lifecycle commands remain accepted for old records. |
 | `organizations` action | Project picker and recursive tree popup with keyboard selection, session recovery and focus. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Node work grouped by attention, as text and in the flat sidebar. |
+| `usage <project> [--json]` | Tokens each node has used, with the total of its subtree. See [Token usage](#token-usage). |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |
 | `ticker start \| run \| stop \| status`, `doctor`, `skill` | Housekeeping. |
@@ -66,6 +67,32 @@ Groups, first match wins: Resolved; Working while starting; **Waiting on you** (
 `node start` accepts `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. The child inherits each omitted field from its parent. Raw argv components inherit only when the harness stays the same. Set a profile value to an empty string to clear an inherited value. `--can-spawn` explicitly grants a coordinator permission; `--no-spawn` creates a leaf coordinator. Workers cannot spawn, and the CLI rejects a child under a worker or a coordinator without spawn permission. For a known Herdr node pane, the caller must be a coordinator and its `--parent` must be its own id.
 
 Codex supports model, reasoning effort (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) and permission profiles (`read-only`, `workspace-write`, `full-access`). Claude Code supports model and permission profiles (`default`, `plan`, `accept-edits`, `bypass-permissions`). Claude reasoning effort has no built-in adapter. Other harnesses accept explicit raw argv only. Unsupported built-in values and conflicting permission, sandbox or approval flags are rejected before node placement. Raw values are passed as argv components, never through a shell. Legacy `thread_agent_args` remain appended after profile arguments for unrelated flags. Permission profiles validate argv only; they do not provide OS isolation or remove shell access.
+
+## Token usage
+
+`usage <project>` prints one row per node: model requests, fresh input, cache writes, cache reads, output, the node's total and the total including its descendants. `--json` prints the same rows for other tools.
+
+The numbers come from the session logs that Codex and Claude Code already write under `CODEX_HOME` (default `~/.codex`) and `CLAUDE_CONFIG_DIR` (default `~/.claude`). No agent spends a turn on it. The ticker keeps `.state/usage.json` current and reads only the bytes appended since its last pass. `usage` itself never writes; it brings the recorded state up to date in memory before printing.
+
+A session belongs to a node when Herdr reports it in that node's pane, or when it ran in a working folder that only that node uses. The second rule also finds sessions that ran while no ticker was watching. Sessions in a folder shared by several nodes are counted only while their pane is visible to the ticker. A restarted node keeps the usage of its earlier sessions. Claude subagent logs count toward the session that started them.
+
+Limits:
+
+- Nodes on other machines show no usage, because their logs are not on this machine.
+- Codex subagent sessions are counted only when they run in the node's own folder.
+- Other harnesses are not read.
+
+Cost is shown only for models with a configured price, in USD per million tokens. The table key is a model name prefix and the longest match wins. Prices change and differ by contract, so none are built in:
+
+```toml
+[prices."gpt-5.6-luna"]
+input = 0.0
+cache_write = 0.0
+cache_read = 0.0
+output = 0.0
+```
+
+Add the tables to `~/.config/herdr-projects/config.toml` with your own rates. Token counts are exact; cost is an estimate from that table.
 
 ## Safety settings
 

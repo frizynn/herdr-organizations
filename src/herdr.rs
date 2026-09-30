@@ -169,6 +169,15 @@ pub struct Agent {
     pub agent_status: String,
     #[serde(default)]
     pub cwd: String,
+    /// The agent CLI's own session, which names the log it writes.
+    #[serde(default)]
+    pub agent_session: AgentSession,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub value: String,
 }
 
 impl Agent {

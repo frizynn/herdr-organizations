@@ -619,6 +619,9 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
         None,
     )?;
     first_error = first_error.or(pass.error);
+    if let Err(error) = crate::usage::record(ctx.env, project, &agents) {
+        first_error = first_error.or(Some(error.context("usage")));
+    }
     let coordinator_recorded = usize::from(!record.pane_id.is_empty());
     let coordinator_missing = usize::from(
         coordinator_recorded == 1
