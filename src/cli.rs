@@ -453,7 +453,7 @@ fn template_json(template: &templates::Template) -> Result<serde_json::Value> {
         "reasoning_effort": template.spec.reasoning_effort,
         "permission_profile": template.spec.permission_profile,
         "rules_chars": templates::rules(template)?.chars().count(),
-        "memory_chars": templates::memory(template)?.chars().count(),
+        "memory_chars": templates::memory_body(&templates::memory(template)?).chars().count(),
         "updated": template.spec.updated,
         "dir": template.dir.to_string_lossy(),
     }))

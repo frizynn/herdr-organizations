@@ -606,12 +606,12 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
                 &format!("template {}/MEMORY.md", record.template),
                 &mut budget,
             )?
-            && !text.trim().is_empty()
+            && !crate::templates::memory_body(&text).is_empty()
         {
             memory_index.push_str(&format!(
                 "\n\n## Template {} memory\n\n{}",
                 record.template,
-                text.trim()
+                crate::templates::memory_body(&text)
             ));
         }
         read_memory_files(
