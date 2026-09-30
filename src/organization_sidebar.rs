@@ -745,6 +745,8 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
     let guard = TerminalGuard::enter()?;
     let mut message = String::new();
+    // The node a first `x` asked to stop; a second `x` on it confirms.
+    let mut stop_asked: Option<String> = None;
     // Paint persisted state first, then immediately hydrate from live Herdr
     // state. The first frame no longer waits for agent and pane inventory.
     let mut last_refresh = Instant::now()
@@ -875,6 +877,8 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         };
         dirty = true;
         message.clear();
+        let stop_confirmed = stop_asked.take();
+        let mut reload = false;
         match (&mut screen, key.code) {
             (_, KeyCode::Char('q')) => break,
             (Screen::Settings { .. }, KeyCode::Esc) => {
@@ -961,22 +965,49 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     Err(error) => message = format!("Could not open selection: {error:#}"),
                 }
             }
-            (Screen::Tree { .. }, KeyCode::Char('r')) => {
-                match load_view(ctx, slug, settings.show_resolved) {
-                    Ok(refreshed) => {
-                        view = refreshed.clone();
-                        sidebar_view = filter_sidebar_view(sidebar_view, &refreshed);
-                        screen = Screen::Tree {
-                            view: refreshed.clone(),
-                            collapsed: sidebar_view.collapsed.clone(),
-                            root_collapsed: sidebar_view.root_collapsed,
-                            selected: selected_index_for_saved_view(&refreshed, &sidebar_view, ""),
-                        };
+            (
+                Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                },
+                KeyCode::Char('x'),
+            ) => {
+                let rows = visible_rows(view, collapsed, *root_collapsed);
+                let Some(VisibleRow::Entry(entry)) = rows.get(*selected).copied() else {
+                    message = "Select a node to stop".into();
+                    continue;
+                };
+                let id = entry.thread.id.clone();
+                if stop_confirmed.as_deref() == Some(id.as_str()) {
+                    match threads::stop(ctx, slug, &id) {
+                        Ok(stopped) => message = format!("Stopped {}", stopped.join(", ")),
+                        Err(error) => message = format!("Could not stop {id}: {error:#}"),
                     }
-                    Err(error) => message = format!("Refresh failed: {error:#}"),
+                    reload = true;
+                } else {
+                    message = format!("Press x again to end the agents of {id} and its children");
+                    stop_asked = Some(id);
                 }
             }
+            (Screen::Tree { .. }, KeyCode::Char('r')) => reload = true,
             _ => {}
+        }
+        if reload {
+            match load_view(ctx, slug, settings.show_resolved) {
+                Ok(refreshed) => {
+                    view = refreshed.clone();
+                    sidebar_view = filter_sidebar_view(sidebar_view, &refreshed);
+                    screen = Screen::Tree {
+                        view: refreshed.clone(),
+                        collapsed: sidebar_view.collapsed.clone(),
+                        root_collapsed: sidebar_view.root_collapsed,
+                        selected: selected_index_for_saved_view(&refreshed, &sidebar_view, ""),
+                    };
+                }
+                Err(error) => message = format!("Refresh failed: {error:#}"),
+            }
         }
         let current_tree_selection = match &screen {
             Screen::Tree { selected, .. } => Some(*selected),
@@ -1333,7 +1364,7 @@ fn build_frame(
                 set_muted_row(
                     &mut frame,
                     height.saturating_sub(1),
-                    "s Settings   q Close",
+                    "s Settings   x Stop   q Close",
                     width,
                 );
             } else {

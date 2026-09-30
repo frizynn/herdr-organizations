@@ -757,6 +757,36 @@ fn close_thread_view(view: &SessionView<'_>, slug: &str, thread: &Thread) -> Res
     })
 }
 
+/// Closes the Herdr views of a node and of its open descendants, which ends
+/// their agents. Nothing is resolved, copied or removed: the nodes stay open
+/// and opening one again starts its agent afresh. Children close before their
+/// parent, so a coordinator never outlives the work it would be woken for.
+/// Returns the ids whose views were closed.
+pub fn stop(ctx: &Ctx, slug: &str, id: &str) -> Result<Vec<String>> {
+    let project = Project::load(&ctx.root, slug)?;
+    let view = require_session(ctx, &project)?;
+    let tree = organizations::tree(&project)?;
+    let start = tree
+        .iter()
+        .position(|entry| entry.thread.id == id)
+        .with_context(|| format!("{id} is not a node of `{slug}`"))?;
+    let depth = tree[start].depth;
+    let end = tree[start + 1..]
+        .iter()
+        .position(|entry| entry.depth <= depth)
+        .map_or(tree.len(), |offset| start + 1 + offset);
+    let mut stopped = Vec::new();
+    for entry in tree[start..end].iter().rev() {
+        if entry.thread.status == Status::Resolved {
+            continue;
+        }
+        clear_thread_tokens(&view.herdr, &entry.thread);
+        close_thread_view(&view, slug, &entry.thread)?;
+        stopped.push(entry.thread.id.clone());
+    }
+    Ok(stopped)
+}
+
 pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;

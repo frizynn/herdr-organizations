@@ -352,6 +352,8 @@ enum NodeCommand {
     Summary { slug: String, id: String },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
+    /// End the agents of a node and its descendants by closing their Herdr views; the nodes stay open
+    Stop { slug: String, id: String },
     /// Resolve a node, or reopen a resolved one
     Resolve {
         slug: String,
@@ -910,6 +912,14 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
+            NodeCommand::Stop { slug, id } => {
+                let stopped = threads::stop(&ctx, &slug, &id)?;
+                println!(
+                    "Closed the views of {}. They stay open nodes; `node restart {slug} <id>` starts an agent again.",
+                    stopped.join(", ")
+                );
+                Ok(())
+            }
             NodeCommand::Resolve {
                 slug,
                 id,
