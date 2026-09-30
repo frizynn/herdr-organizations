@@ -140,6 +140,8 @@ impl std::fmt::Display for HerdrError {
 impl std::error::Error for HerdrError {}
 
 pub const AGENT_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Short enough to stay on the first line of any usable agent pane.
+const PROMPT_OPENING_CHARS: usize = 40;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct Pane {
@@ -614,14 +616,17 @@ impl<'a> Herdr<'a> {
         // `agent prompt` can observe a stale startup transition before the
         // agent UI has actually accepted the paste. The rendered prompt is
         // the durable boundary: only clear `prompt_pending` after Herdr can
-        // see the exact initial instruction in the pane.
+        // see the initial instruction in the pane. An agent UI breaks a long
+        // prompt into lines of its own, so the whole text never appears as
+        // one string; its opening words do.
+        let opening: String = text.chars().take(PROMPT_OPENING_CHARS).collect();
         self.call(
             &[
                 "pane",
                 "wait-output",
                 target,
                 "--match",
-                text,
+                &opening,
                 "--timeout",
                 "5000",
             ],
@@ -882,6 +887,35 @@ mod tests {
                 "5000",
             ]
         );
+    }
+
+    #[test]
+    fn a_prompt_longer_than_a_pane_line_is_confirmed_by_its_opening_words() {
+        let runner = crate::runner::fake::FakeRunner::new();
+        runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        runner.on(
+            "pane wait-output",
+            crate::runner::fake::ok(r#"{"result":{}}"#),
+        );
+        let herdr = Herdr::new("herdr", "socket", &runner);
+        let prompt = "You are the coordinator of the herdr project `demo`. Run `/a/long/path/to/the/binary --root /another/long/path skill` and follow what it prints.";
+
+        herdr.agent_prompt_start("w1:p1", prompt).unwrap();
+
+        let calls = runner.calls.borrow();
+        let wait = calls
+            .iter()
+            .find(|call| {
+                call.args
+                    .starts_with(&["pane".into(), "wait-output".into()])
+            })
+            .unwrap();
+        assert_eq!(wait.args[4], "You are the coordinator of the herdr pro");
+        let sent = calls
+            .iter()
+            .find(|call| call.args.starts_with(&["agent".into(), "prompt".into()]))
+            .unwrap();
+        assert_eq!(sent.args[3], prompt);
     }
 
     #[test]
