@@ -281,8 +281,10 @@ struct NodeStartArgs {
     #[arg(long, default_value = "root")]
     parent: String,
     /// Coordinators can create children; workers cannot
-    #[arg(long, value_enum, default_value_t = CliNodeRole::Worker)]
-    role: CliNodeRole,
+    #[arg(long, value_enum)]
+    role: Option<CliNodeRole>,
+    #[arg(long, value_name = "NAME")]
+    template: Option<String>,
     /// Explicitly grant a coordinator permission to create children
     #[arg(long, conflicts_with = "no_spawn")]
     can_spawn: bool,
@@ -457,6 +459,49 @@ fn template_json(template: &templates::Template) -> Result<serde_json::Value> {
     }))
 }
 
+fn node_request_from_template(
+    parent_id: String,
+    role: Option<NodeRole>,
+    can_spawn: bool,
+    no_spawn: bool,
+    overrides: ProfileOverrides,
+    spec: &templates::TemplateSpec,
+) -> NodeRequest {
+    let role = role.unwrap_or(spec.role);
+    let can_spawn = if can_spawn {
+        Some(true)
+    } else if no_spawn {
+        Some(false)
+    } else if role == spec.role {
+        Some(spec.can_spawn)
+    } else {
+        None
+    };
+    NodeRequest {
+        parent_id,
+        role,
+        can_spawn,
+        profile: ProfileOverrides {
+            harness: template_value(overrides.harness, &spec.harness),
+            model: template_value(overrides.model, &spec.model),
+            reasoning_effort: template_value(overrides.reasoning_effort, &spec.reasoning_effort),
+            permission_profile: template_value(
+                overrides.permission_profile,
+                &spec.permission_profile,
+            ),
+            raw_agent_args: if overrides.raw_agent_args.is_empty() {
+                spec.raw_agent_args.clone()
+            } else {
+                overrides.raw_agent_args
+            },
+        },
+    }
+}
+
+fn template_value(flag: Option<String>, spec: &str) -> Option<String> {
+    flag.or_else(|| (!spec.is_empty()).then(|| spec.to_string()))
+}
+
 #[derive(Subcommand)]
 enum RoutineCommand {
     /// Approve a routine's command (a person at a terminal only)
@@ -603,6 +648,7 @@ pub fn run() -> Result<()> {
                         task,
                         rules: String::new(),
                         node: NodeRequest::default(),
+                        template: String::new(),
                     },
                 )?;
                 println!(
@@ -686,35 +732,61 @@ pub fn run() -> Result<()> {
                     base,
                     task_file,
                     rules_file,
+                    template,
                 } = *args;
-                let rules = match rules_file {
-                    Some(f) if f == "-" => {
-                        bail!("--rules-file does not read standard input; --task-file may")
+                let overrides = ProfileOverrides {
+                    harness,
+                    model,
+                    reasoning_effort,
+                    permission_profile,
+                    raw_agent_args,
+                };
+                let (rules, node, template_name) = match template {
+                    Some(name) => {
+                        let template = templates::resolve(&ctx.root, Some(&slug), &name)?;
+                        if rules_file.is_some() {
+                            bail!("pass --rules-file or --template, not both");
+                        }
+                        let rules = templates::rules(&template)?;
+                        let node = node_request_from_template(
+                            parent,
+                            role.map(Into::into),
+                            can_spawn,
+                            no_spawn,
+                            overrides,
+                            &template.spec,
+                        );
+                        (rules, node, template.spec.name.clone())
                     }
-                    Some(f) => read_text(&f)?,
-                    None => String::new(),
+                    None => {
+                        let rules = match rules_file {
+                            Some(f) if f == "-" => {
+                                bail!("--rules-file does not read standard input; --task-file may")
+                            }
+                            Some(f) => read_text(&f)?,
+                            None => String::new(),
+                        };
+                        let role = role.map(Into::into).unwrap_or(NodeRole::Worker);
+                        let can_spawn = if can_spawn {
+                            Some(true)
+                        } else if no_spawn {
+                            Some(false)
+                        } else {
+                            None
+                        };
+                        (
+                            rules,
+                            NodeRequest {
+                                parent_id: parent,
+                                role,
+                                can_spawn,
+                                profile: overrides,
+                            },
+                            String::new(),
+                        )
+                    }
                 };
                 let task = read_text(&task_file)?;
-                let role = role.into();
-                let can_spawn = if can_spawn {
-                    Some(true)
-                } else if no_spawn {
-                    Some(false)
-                } else {
-                    None
-                };
-                let node = NodeRequest {
-                    parent_id: parent,
-                    role,
-                    can_spawn,
-                    profile: ProfileOverrides {
-                        harness,
-                        model,
-                        reasoning_effort,
-                        permission_profile,
-                        raw_agent_args,
-                    },
-                };
                 let node = threads::start(
                     &ctx,
                     &slug,
@@ -727,6 +799,7 @@ pub fn run() -> Result<()> {
                         task,
                         rules,
                         node,
+                        template: template_name,
                     },
                 )?;
                 println!(
@@ -743,6 +816,7 @@ pub fn run() -> Result<()> {
                         "model": node.model,
                         "reasoning_effort": node.reasoning_effort,
                         "permission_profile": node.permission_profile,
+                        "template": node.template,
                     })
                 );
                 Ok(())
@@ -1077,5 +1151,125 @@ pub fn run() -> Result<()> {
             TickerCommand::Stop => ticker::stop(&ctx.root),
             TickerCommand::Status => ticker::status(&ctx.root),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_flags_override_profile_and_empty_spec_values_inherit() {
+        let spec = templates::TemplateSpec {
+            role: NodeRole::Coordinator,
+            can_spawn: true,
+            harness: "codex".into(),
+            model: String::new(),
+            reasoning_effort: "high".into(),
+            permission_profile: "workspace-write".into(),
+            raw_agent_args: vec!["--from-template".into()],
+            ..templates::TemplateSpec::default()
+        };
+        let request = node_request_from_template(
+            "root".into(),
+            None,
+            false,
+            false,
+            ProfileOverrides {
+                harness: Some("claude".into()),
+                model: Some("gpt-test".into()),
+                reasoning_effort: Some("low".into()),
+                permission_profile: Some("read-only".into()),
+                raw_agent_args: vec!["--from-flag".into()],
+            },
+            &spec,
+        );
+
+        assert_eq!(request.role, NodeRole::Coordinator);
+        assert_eq!(request.can_spawn, Some(true));
+        assert_eq!(request.profile.harness.as_deref(), Some("claude"));
+        assert_eq!(request.profile.model.as_deref(), Some("gpt-test"));
+        assert_eq!(request.profile.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            request.profile.permission_profile.as_deref(),
+            Some("read-only")
+        );
+        assert_eq!(request.profile.raw_agent_args, ["--from-flag"]);
+
+        let inherited_spec = node_request_from_template(
+            "root".into(),
+            None,
+            false,
+            false,
+            ProfileOverrides::default(),
+            &spec,
+        );
+        assert_eq!(inherited_spec.profile.harness.as_deref(), Some("codex"));
+        assert_eq!(inherited_spec.profile.model, None);
+        assert_eq!(
+            inherited_spec.profile.reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            inherited_spec.profile.permission_profile.as_deref(),
+            Some("workspace-write")
+        );
+        assert_eq!(inherited_spec.profile.raw_agent_args, ["--from-template"]);
+
+        let mut leaf_spec = spec.clone();
+        leaf_spec.can_spawn = false;
+        let can_spawn = node_request_from_template(
+            "root".into(),
+            None,
+            true,
+            false,
+            ProfileOverrides::default(),
+            &leaf_spec,
+        );
+        assert_eq!(can_spawn.can_spawn, Some(true));
+        let no_spawn = node_request_from_template(
+            "root".into(),
+            None,
+            false,
+            true,
+            ProfileOverrides::default(),
+            &spec,
+        );
+        assert_eq!(no_spawn.can_spawn, Some(false));
+
+        let empty_spec = templates::TemplateSpec::default();
+        let inherited = node_request_from_template(
+            "root".into(),
+            None,
+            false,
+            false,
+            ProfileOverrides::default(),
+            &empty_spec,
+        );
+        assert_eq!(inherited.profile.harness, None);
+        assert_eq!(inherited.profile.model, None);
+        assert_eq!(inherited.profile.reasoning_effort, None);
+        assert_eq!(inherited.profile.permission_profile, None);
+        assert!(inherited.profile.raw_agent_args.is_empty());
+    }
+
+    #[test]
+    fn template_spawn_policy_is_unset_when_role_changes() {
+        let spec = templates::TemplateSpec {
+            role: NodeRole::Coordinator,
+            can_spawn: true,
+            ..templates::TemplateSpec::default()
+        };
+        let request = node_request_from_template(
+            "root".into(),
+            Some(NodeRole::Worker),
+            false,
+            false,
+            ProfileOverrides::default(),
+            &spec,
+        );
+
+        assert_eq!(request.role, NodeRole::Worker);
+        assert_eq!(request.can_spawn, None);
     }
 }

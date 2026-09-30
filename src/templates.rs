@@ -96,12 +96,7 @@ pub fn resolve(root: &Path, project: Option<&str>, name: &str) -> Result<Templat
     {
         return Ok(template);
     }
-    bail!(
-        "template {}{}{} not found",
-        char::from(96),
-        name,
-        char::from(96)
-    )
+    bail!("template `{name}` not found")
 }
 
 pub fn rules(template: &Template) -> Result<String> {
@@ -131,10 +126,8 @@ pub fn save(root: &Path, args: SaveArgs) -> Result<Template> {
     let existed = std::fs::symlink_metadata(&dir).is_ok();
     if existed && !args.force {
         bail!(
-            "template {}{}{} exists; pass --force to replace it",
-            char::from(96),
-            args.name,
-            char::from(96)
+            "template `{}` exists; pass --force to replace it",
+            args.name
         );
     }
 
@@ -224,25 +217,12 @@ pub fn delete(root: &Path, project_slug: Option<&str>, name: &str) -> Result<()>
         Project::load(root, project_slug)?;
     }
     let dir = dir_for(root, project_slug, name);
-    let metadata = std::fs::symlink_metadata(&dir).with_context(|| {
-        format!(
-            "template {}{}{} not found",
-            char::from(96),
-            name,
-            char::from(96)
-        )
-    })?;
+    let metadata =
+        std::fs::symlink_metadata(&dir).with_context(|| format!("template `{name}` not found"))?;
     if !metadata.file_type().is_dir() || !dir.join("TEMPLATE.toml").is_file() {
         bail!("{} is not a template directory", dir.display());
     }
-    std::fs::remove_dir_all(&dir).with_context(|| {
-        format!(
-            "could not delete template {}{}{}",
-            char::from(96),
-            name,
-            char::from(96)
-        )
-    })
+    std::fs::remove_dir_all(&dir).with_context(|| format!("could not delete template `{name}`"))
 }
 
 fn read_scope(dir: &Path, scope: Scope, project: &str) -> Result<Vec<Template>> {
@@ -519,6 +499,7 @@ mod tests {
                 base: String::new(),
                 task: "Implement the frontend.".into(),
                 rules: "Keep changes accessible.".into(),
+                template: String::new(),
             },
         )
         .unwrap();

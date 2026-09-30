@@ -198,6 +198,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
             task: "Do the thing.".into(),
             node: crate::organizations::NodeRequest::default(),
             rules: "  Node rules  ".into(),
+            template: String::new(),
         },
     )
     .unwrap();
@@ -330,6 +331,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap();
@@ -349,6 +351,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap();
@@ -370,6 +373,7 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap_err()
@@ -416,6 +420,7 @@ fn invalid_harness_profile_fails_before_ticker_or_node_creation() {
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap_err()
@@ -458,6 +463,7 @@ fn project_safety_args_cannot_override_a_permission_profile_before_node_creation
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap_err()
@@ -490,6 +496,7 @@ fn remote_recursive_coordinator_start_is_refused_before_any_placement_or_record(
                 ..crate::organizations::NodeRequest::default()
             },
             rules: String::new(),
+            template: String::new(),
         },
     )
     .unwrap_err()
@@ -939,6 +946,7 @@ fn thread_start_is_refused_when_paused() {
         task: "t".into(),
         node: crate::organizations::NodeRequest::default(),
         rules: String::new(),
+        template: String::new(),
     };
     let error = threads::start(&world.ctx(), "demo", args)
         .unwrap_err()
@@ -1807,6 +1815,7 @@ fn a_remote_thread_without_a_repo_is_refused() {
         task: "t".into(),
         node: crate::organizations::NodeRequest::default(),
         rules: String::new(),
+        template: String::new(),
     };
     assert!(
         threads::start(&world.ctx(), "demo", args)

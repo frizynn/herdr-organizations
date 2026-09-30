@@ -54,7 +54,9 @@ These flags are adapters for current CLI interfaces, not a promise that all agen
 
 ## Templates
 
-Global templates are stored under .templates/<name>/ and project templates under <slug>/templates/<name>/. TEMPLATE.toml stores role and profile fields, RULES.md stores node instructions without the generated heading, and MEMORY.md stores template-specific memory. When a project is selected, its template takes precedence over a global template with the same name. Without a project, resolution is global only. The commands are <code>template save &lt;name&gt;</code>, <code>template list</code>, <code>template show &lt;name&gt;</code>, <code>template memory &lt;name&gt;</code> and <code>template delete &lt;name&gt;</code>. Node creation from a template is a later change.
+Global templates are stored under `.templates/<name>/` and project templates under `<slug>/templates/<name>/`. `TEMPLATE.toml` stores role and profile fields, `RULES.md` stores node instructions without the generated heading, and `MEMORY.md` stores template-specific memory. When a project is selected, its template takes precedence over a global template with the same name. Without a project, resolution is global only. The commands are <code>template save &lt;name&gt;</code>, <code>template list</code>, <code>template show &lt;name&gt;</code>, <code>template memory &lt;name&gt;</code> and <code>template delete &lt;name&gt;</code>.
+
+`node start <slug> --template <name> --title ... --task-file ...` creates a node with the template's role, spawn permission, profile and rules. Explicit role, spawn and profile flags take precedence, and `--template` cannot be combined with `--rules-file`. The node record stores the template name so scoped context can include that template's current `MEMORY.md` for the node and its descendants, subject to the existing memory budget. Updating template memory changes future contexts for those nodes; siblings do not receive it. A missing template is ignored when building context. `RULES.md` is copied into the node's instructions at creation, so later changes to `RULES.md` do not change existing node instructions.
 
 ## Organization picker
 

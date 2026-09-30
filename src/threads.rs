@@ -155,6 +155,7 @@ pub struct StartArgs {
     pub base: Option<String>,
     pub task: String,
     pub rules: String,
+    pub template: String,
     pub node: NodeRequest,
 }
 
@@ -255,6 +256,7 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
             base: args.base.clone().unwrap_or_default(),
             task: args.task.clone(),
             rules: args.rules,
+            template: args.template,
         },
     )?;
     let id = record.id.clone();

@@ -226,6 +226,50 @@ fn node_start_rejects_rules_file_stdin_before_starting_the_ticker() {
 }
 
 #[test]
+fn node_start_rejects_template_with_rules_file_before_starting_the_ticker() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "demo"])
+            .status
+            .success()
+    );
+    save_template_cli(home.path(), &root, "x", "Template rules.");
+    let task_file = home.path().join("task.md");
+    let rules_file = home.path().join("rules.md");
+    std::fs::write(&task_file, "Task body.\n").unwrap();
+    std::fs::write(&rules_file, "Other rules.\n").unwrap();
+
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "node",
+            "start",
+            "demo",
+            "--title",
+            "Child",
+            "--task-file",
+            task_file.to_str().unwrap(),
+            "--template",
+            "x",
+            "--rules-file",
+            rules_file.to_str().unwrap(),
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("pass --rules-file or --template, not both")
+    );
+    assert!(!root.join(".ticker.lock").exists());
+    assert!(!root.join("demo/threads/t-0001.toml").exists());
+}
+
+#[test]
 fn peek_records_nothing_and_context_records_seen_items() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");
@@ -566,9 +610,5 @@ fn template_delete_removes_the_template_and_show_fails() {
         &["--root", root.to_str().unwrap(), "template", "show", "x"],
     );
     assert!(!shown.status.success());
-    assert!(String::from_utf8_lossy(&shown.stderr).contains(&format!(
-        "template {}x{} not found",
-        char::from(96),
-        char::from(96)
-    )));
+    assert!(String::from_utf8_lossy(&shown.stderr).contains("template `x` not found"));
 }
