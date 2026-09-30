@@ -53,6 +53,7 @@ The virtual `root` is the project coordinator. A new worker has `parent_id=root`
 | `thread start <project> ...` | Backward-compatible alias for a worker directly under `root`. Existing thread lifecycle commands remain accepted for old records. |
 | `organizations` action | Project picker and recursive tree popup with keyboard selection, session recovery and focus. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Node work grouped by attention, as text and in the flat sidebar. |
+| `node stop <project> <id>` | Close the Herdr views of a node and its open descendants, children first, which ends their agents. The nodes stay open and nothing is resolved or removed. |
 | `usage <project> [--json]` | Tokens each node has used, with the total of its subtree. See [Token usage](#token-usage). |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |

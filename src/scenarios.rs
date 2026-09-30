@@ -883,6 +883,7 @@ fn stopping_a_node_closes_its_subtree_children_first_and_keeps_the_nodes_open() 
     let child = thread::allocate(&project, |thread| {
         tab(thread, "w1:t3");
         thread.parent_id = parent.id.clone();
+        thread.prompt_pending = true;
     })
     .unwrap();
     let done = thread::allocate(&project, |thread| {
@@ -906,6 +907,7 @@ fn stopping_a_node_closes_its_subtree_children_first_and_keeps_the_nodes_open() 
     for id in [&parent.id, &child.id, &sibling.id] {
         assert_eq!(thread::load(&project, id).unwrap().status, Status::Open);
     }
+    assert!(!thread::load(&project, &child.id).unwrap().prompt_pending);
     assert_eq!(
         thread::load(&project, &done.id).unwrap().status,
         Status::Resolved
