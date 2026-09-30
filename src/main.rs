@@ -20,6 +20,7 @@ mod runner;
 #[cfg(test)]
 mod scenarios;
 mod steps;
+mod templates;
 mod thread;
 mod threads;
 mod ticker;

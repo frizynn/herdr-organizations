@@ -405,3 +405,170 @@ fn node_start_rejects_a_missing_parent_before_creating_state_or_starting_the_tic
     assert!(!root.join("demo/nodes").exists());
     assert!(!root.join(".ticker.lock").exists());
 }
+
+fn save_template_cli(home: &Path, root: &Path, name: &str, rules: &str) {
+    let rules_file = home.join(format!("{name}-rules.md"));
+    std::fs::write(&rules_file, rules).unwrap();
+    let output = hp(
+        home,
+        &[
+            "--root",
+            root.to_str().unwrap(),
+            "template",
+            "save",
+            name,
+            "--role",
+            "coordinator",
+            "--rules-file",
+            rules_file.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn template_save_and_list_json_have_the_exact_contract_keys() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    save_template_cli(home.path(), &root, "x", "Keep the plan short.");
+
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root.to_str().unwrap(),
+            "template",
+            "list",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .as_object()
+        .unwrap();
+    let mut keys: Vec<_> = row.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "can_spawn",
+            "description",
+            "dir",
+            "harness",
+            "memory_chars",
+            "model",
+            "name",
+            "permission_profile",
+            "project",
+            "reasoning_effort",
+            "role",
+            "rules_chars",
+            "scope",
+            "updated",
+        ]
+    );
+}
+
+#[test]
+fn template_show_json_includes_rules() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    save_template_cli(home.path(), &root, "x", "Keep the plan short.");
+
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root.to_str().unwrap(),
+            "template",
+            "show",
+            "x",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(shown["rules"], "Keep the plan short.");
+}
+
+#[test]
+fn template_memory_can_be_replaced_and_read() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    save_template_cli(home.path(), &root, "x", "");
+    let memory_file = home.path().join("memory.md");
+    std::fs::write(&memory_file, "Progress: API is ready.\n").unwrap();
+
+    let replaced = hp(
+        home.path(),
+        &[
+            "--root",
+            root.to_str().unwrap(),
+            "template",
+            "memory",
+            "x",
+            "--text-file",
+            memory_file.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+
+    let output = hp(
+        home.path(),
+        &["--root", root.to_str().unwrap(), "template", "memory", "x"],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Progress: API is ready.\n"
+    );
+}
+
+#[test]
+fn template_delete_removes_the_template_and_show_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    save_template_cli(home.path(), &root, "x", "");
+
+    let deleted = hp(
+        home.path(),
+        &["--root", root.to_str().unwrap(), "template", "delete", "x"],
+    );
+    assert!(
+        deleted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+
+    let shown = hp(
+        home.path(),
+        &["--root", root.to_str().unwrap(), "template", "show", "x"],
+    );
+    assert!(!shown.status.success());
+    assert!(String::from_utf8_lossy(&shown.stderr).contains(&format!(
+        "template {}x{} not found",
+        char::from(96),
+        char::from(96)
+    )));
+}
