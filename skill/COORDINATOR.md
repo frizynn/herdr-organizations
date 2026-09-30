@@ -61,6 +61,22 @@ Choose `--repo <path>` for a worktree. Omit it for a tab in the project workspac
 
 New nodes inherit harness, model, reasoning effort, permission profile and raw argv components from their parent. Override with `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Codex and Claude have separate documented flag adapters. Raw arguments are passed as individual argv values and are never shell-evaluated. Project-wide `thread_agent_args` remain appended after profile arguments, except conflicting permission, sandbox or approval flags are rejected when a profile is selected. Profile flags validate argv; they do not provide OS isolation.
 
+## Choosing a child's model
+
+Pass `--model` and `--reasoning-effort` explicitly on every `node start`. Inheritance copies your own profile, which is usually the most expensive one.
+
+| Kind of work | Tier | Effort |
+| --- | --- | --- |
+| Exploring a repo, reading code, collecting data, running tests, or making mechanical edits with exact instructions | Cheapest tier | `medium` |
+| Bounded implementation that follows existing patterns or review of a small diff | Middle tier | `medium` or `high` |
+| Design decisions, bugs with an unclear cause, changes across many places, or final review before a merge | Top tier | `high` |
+
+Tier names map to concrete models under a `Model tiers` heading in the project's instructions or memory. If it is missing, ask the user once which model belongs to each tier and save the answer in `MEMORY.md`. Never invent model names.
+
+Escalate instead of starting high. When a cheap child reports `blocked` or its summary shows a wrong result, restart that work one tier up.
+
+Before starting several children, and when a child runs long, read `hp usage <slug>` and tell the user when one subtree dominates.
+
 The old `hp thread start` command remains an alias for a worker directly under `root`. Use `hp node restart`, `hp node prompt`, `hp node list`, `hp node show`, `hp node ack` and `hp node resolve` for hierarchy-aware work. Herdr's **Herdr Organizations: organization tree** action opens the recursive tree. Keyboard navigation is supported; mouse selection works when Herdr forwards terminal mouse events.
 
 `hp node resolve <project> <id>` changes only the logical lifecycle and leaves the Herdr surface open. When the user asks to finish and close a node, use `hp node resolve <project> <id> --close-view`. It closes the recorded tab or workspace in the same operation while preserving its branch, Git worktree and copied report. `--remove-worktree` remains a separate destructive choice and is never implied by closing the view.
