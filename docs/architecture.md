@@ -52,6 +52,10 @@ Other harness kinds receive raw argv only. Built-in profile fields are rejected 
 
 These flags are adapters for current CLI interfaces, not a promise that all agent CLIs accept the same options. See the [Codex sandbox documentation](https://developers.openai.com/es-419/docs/sandboxing), [Codex configuration reference](https://developers.openai.com/es-419/docs/config-file/config-advanced), and [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-usage).
 
+## Templates
+
+Global templates are stored under .templates/<name>/ and project templates under <slug>/templates/<name>/. TEMPLATE.toml stores role and profile fields, RULES.md stores node instructions without the generated heading, and MEMORY.md stores template-specific memory. When a project is selected, its template takes precedence over a global template with the same name. Without a project, resolution is global only. The commands are <code>template save &lt;name&gt;</code>, <code>template list</code>, <code>template show &lt;name&gt;</code>, <code>template memory &lt;name&gt;</code> and <code>template delete &lt;name&gt;</code>. Node creation from a template is a later change.
+
 ## Organization picker
 
 The `organizations` action remains the global project picker popup. The distinct `organization-sidebar` action resolves its project from the current Herdr workspace and opens a recursive tree in a split pane. Its compact terminal UI supports keyboard navigation, coordinator disclosure, status colors and an in-pane settings screen. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone.

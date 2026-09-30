@@ -1,7 +1,7 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use crate::agent_profile::ProfileOverrides;
@@ -12,7 +12,7 @@ use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
 use crate::thread::{self, NodeRole};
 use crate::threads::{self, ResolveArgs, StartArgs};
-use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, ticker};
+use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, templates, ticker};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = crate::VERSION, about = "Recursive organizations for herdr")]
@@ -108,6 +108,11 @@ enum Command {
     Node {
         #[command(subcommand)]
         command: NodeCommand,
+    },
+    /// Reusable node templates: role, agent profile, rules and memory
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
     },
     /// Routines: scheduled prompts and watched commands
     Routine {
@@ -355,6 +360,69 @@ enum NodeCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum TemplateCommand {
+    /// List templates
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one template
+    Show {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Save or replace a template
+    Save {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, value_name = "SLUG ID", num_args = 2)]
+        from_node: Option<Vec<String>>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long, value_enum)]
+        role: Option<CliNodeRole>,
+        #[arg(long, conflicts_with = "no_spawn")]
+        can_spawn: bool,
+        #[arg(long = "no-spawn", conflicts_with = "can_spawn")]
+        no_spawn: bool,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        #[arg(long)]
+        permission_profile: Option<String>,
+        #[arg(long = "raw-agent-arg")]
+        raw_agent_args: Vec<String>,
+        #[arg(long, value_name = "FILE")]
+        rules_file: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Read or replace a template's memory
+    Memory {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        text_file: Option<String>,
+    },
+    /// Delete a template
+    Delete {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
 /// `-` is standard input; a relative path is relative to the caller's directory.
 fn read_text(file: &str) -> Result<String> {
     use std::io::Read;
@@ -365,6 +433,28 @@ fn read_text(file: &str) -> Result<String> {
     } else {
         std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("could not read {file}: {e}"))
     }
+}
+
+fn template_json(template: &templates::Template) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "name": template.spec.name,
+        "scope": match template.scope {
+            templates::Scope::Global => "global",
+            templates::Scope::Project => "project",
+        },
+        "project": template.project,
+        "description": template.spec.description,
+        "role": template.spec.role,
+        "can_spawn": template.spec.can_spawn,
+        "harness": template.spec.harness,
+        "model": template.spec.model,
+        "reasoning_effort": template.spec.reasoning_effort,
+        "permission_profile": template.spec.permission_profile,
+        "rules_chars": templates::rules(template)?.chars().count(),
+        "memory_chars": templates::memory(template)?.chars().count(),
+        "updated": template.spec.updated,
+        "dir": template.dir.to_string_lossy(),
+    }))
 }
 
 #[derive(Subcommand)]
@@ -757,6 +847,157 @@ pub fn run() -> Result<()> {
                     discard_uncopied,
                 },
             ),
+        },
+        Command::Template { command } => match command {
+            TemplateCommand::List { project, json } => {
+                let templates = templates::list(&ctx.root, project.as_deref())?;
+                if json {
+                    let rows = templates
+                        .iter()
+                        .map(template_json)
+                        .collect::<Result<Vec<_>>>()?;
+                    println!("{}", serde_json::to_string(&rows)?);
+                } else {
+                    for template in templates {
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            template.spec.name,
+                            match template.scope {
+                                templates::Scope::Global => "global",
+                                templates::Scope::Project => "project",
+                            },
+                            template.spec.role.as_str(),
+                            template.spec.description
+                        );
+                    }
+                }
+                Ok(())
+            }
+            TemplateCommand::Show {
+                name,
+                project,
+                json,
+            } => {
+                let template = templates::resolve(&ctx.root, project.as_deref(), &name)?;
+                let rules = templates::rules(&template)?;
+                let memory = templates::memory(&template)?;
+                if json {
+                    let mut object = template_json(&template)?
+                        .as_object()
+                        .cloned()
+                        .context("template JSON did not serialize as an object")?;
+                    object.insert("rules".into(), serde_json::json!(rules));
+                    object.insert("memory".into(), serde_json::json!(memory));
+                    println!("{}", serde_json::Value::Object(object));
+                } else {
+                    print!("{}", toml::to_string(&template.spec)?);
+                    println!("## Rules\n{rules}\n## Memory\n{memory}");
+                }
+                Ok(())
+            }
+            TemplateCommand::Save {
+                name,
+                project,
+                from_node,
+                description,
+                role,
+                can_spawn,
+                no_spawn,
+                harness,
+                model,
+                reasoning_effort,
+                permission_profile,
+                raw_agent_args,
+                rules_file,
+                force,
+            } => {
+                let (mut spec, mut rules) = match from_node.as_deref() {
+                    Some([slug, id]) => templates::spec_from_node(
+                        &ctx.root,
+                        slug,
+                        id,
+                        &name,
+                        description.as_deref().unwrap_or(""),
+                    )?,
+                    Some(_) => bail!("--from-node requires a project slug and node id"),
+                    None => {
+                        let role = role.ok_or_else(|| {
+                            anyhow::anyhow!("--role is required unless --from-node is used")
+                        })?;
+                        (
+                            templates::TemplateSpec {
+                                role: role.into(),
+                                ..templates::TemplateSpec::default()
+                            },
+                            String::new(),
+                        )
+                    }
+                };
+                if let Some(description) = description {
+                    spec.description = description;
+                }
+                if let Some(role) = role {
+                    spec.role = role.into();
+                }
+                if let Some(harness) = harness {
+                    spec.harness = harness;
+                }
+                if let Some(model) = model {
+                    spec.model = model;
+                }
+                if let Some(reasoning_effort) = reasoning_effort {
+                    spec.reasoning_effort = reasoning_effort;
+                }
+                if let Some(permission_profile) = permission_profile {
+                    spec.permission_profile = permission_profile;
+                }
+                if !raw_agent_args.is_empty() {
+                    spec.raw_agent_args = raw_agent_args;
+                }
+                spec.can_spawn = if can_spawn {
+                    true
+                } else if no_spawn {
+                    false
+                } else {
+                    spec.role == NodeRole::Coordinator
+                };
+                if let Some(rules_file) = rules_file {
+                    if rules_file == "-" {
+                        bail!("--rules-file does not read standard input");
+                    }
+                    rules = read_text(&rules_file)?;
+                }
+                let template = templates::save(
+                    &ctx.root,
+                    templates::SaveArgs {
+                        name,
+                        project,
+                        spec,
+                        rules,
+                        force,
+                    },
+                )?;
+                println!("{}", template_json(&template)?);
+                Ok(())
+            }
+            TemplateCommand::Memory {
+                name,
+                project,
+                text_file,
+            } => {
+                let template = templates::resolve(&ctx.root, project.as_deref(), &name)?;
+                if let Some(text_file) = text_file {
+                    let text = read_text(&text_file)?;
+                    templates::set_memory(&template, &text)?;
+                } else {
+                    print!("{}", templates::memory(&template)?);
+                }
+                Ok(())
+            }
+            TemplateCommand::Delete { name, project } => {
+                templates::delete(&ctx.root, project.as_deref(), &name)?;
+                Ok(())
+            }
         },
         Command::Routine { command } => match command {
             RoutineCommand::Approve { slug, name } => {
