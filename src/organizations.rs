@@ -495,20 +495,36 @@ pub const HEADER_LINES: usize = 3;
 const HEADER_LINE_CHARS: usize = 160;
 
 /// True when a report's header says it needs nothing and is not stuck: its
-/// `Needs:` line (the third) starts with nothing, none or nada, and its
-/// `Status:` line (the second) is not blocked or waiting for a decision. A
-/// report without that header needs its coordinator, to be safe.
+/// `Needs:` line starts with nothing, none or nada, and its `Status:` line is
+/// not blocked or waiting for a decision. A report without both lines needs
+/// its coordinator, to be safe.
 pub fn report_needs_nothing(report: &str) -> bool {
     let Some(header) = report_header(report) else {
         return false;
     };
-    let lines: Vec<&str> = header.split(" | ").collect();
-    let value = |line: Option<&&str>| {
-        line.and_then(|l| l.split_once(':'))
-            .map(|(_, v)| v.trim().to_lowercase())
-            .unwrap_or_default()
+    // Read by label, in English or Spanish, never by position.
+    let field = |labels: &[&str]| {
+        header.split(" | ").find_map(|line| {
+            let (label, value) = line.split_once(':')?;
+            let label = label.trim().to_lowercase();
+            labels
+                .iter()
+                .any(|l| label == *l || label.starts_with(&format!("{l} ")))
+                .then(|| value.trim().to_lowercase())
+        })
     };
-    let (status, needs) = (value(lines.get(1)), value(lines.get(2)));
+    let (Some(status), Some(needs)) = (
+        field(&["status", "estado"]),
+        field(&[
+            "needs",
+            "necesito",
+            "qué necesito",
+            "que necesito",
+            "de vos",
+        ]),
+    ) else {
+        return false;
+    };
     let nothing = ["nothing", "none", "nada", "ninguno", "ninguna", "n/a", "-"]
         .iter()
         .any(|word| {
@@ -1107,6 +1123,11 @@ mod tests {
             "PR: none\nStatus: done\nNeeds: nothingness\n"
         ));
         assert!(!report_needs_nothing("Long prose without a header."));
+        // Order does not matter, labels do.
+        assert!(report_needs_nothing(
+            "Estado: en curso\nNecesito de vos: nada por ahora\nPRs Fisgón: #1627\n"
+        ));
+        assert!(!report_needs_nothing("PR: none\nNeeds: nothing\n"));
     }
 
     #[test]
