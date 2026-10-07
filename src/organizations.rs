@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::agent_profile::{AgentProfile, ProfileOverrides};
 use crate::project::{self, Project};
 use crate::thread::{self, Kind, NodeRole, Status, Thread};
 
 pub const ROOT_ID: &str = "root";
+pub const MAX_NODE_RULES_BYTES: usize = 8 * 1024;
 pub const MAX_SCOPED_MEMORY_FILE_BYTES: usize = 8 * 1024;
 pub const MAX_SCOPED_MEMORY_TOTAL_BYTES: usize = 32_000;
 pub const MAX_SCOPED_MEMORY_FILES: usize = 64;
@@ -24,7 +24,6 @@ pub struct NodeRequest {
     pub parent_id: String,
     pub role: NodeRole,
     pub can_spawn: Option<bool>,
-    pub profile: ProfileOverrides,
 }
 
 impl Default for NodeRequest {
@@ -33,7 +32,6 @@ impl Default for NodeRequest {
             parent_id: ROOT_ID.into(),
             role: NodeRole::Worker,
             can_spawn: None,
-            profile: ProfileOverrides::default(),
         }
     }
 }
@@ -47,6 +45,8 @@ pub struct CreateNode {
     pub machine: String,
     pub base: String,
     pub task: String,
+    pub rules: String,
+    pub template: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +211,44 @@ fn compare_ids(left: &str, right: &str) -> Ordering {
     }
 }
 
+/// The operational tree: resolved leaves are hidden, a resolved ancestor
+/// stays while it still gives structure to an open descendant.
+pub fn visible_tree(project: &Project, show_resolved: bool) -> Result<Vec<TreeEntry>> {
+    let all = tree(project)?;
+    if show_resolved {
+        return Ok(all);
+    }
+    let parents: BTreeMap<_, _> = all
+        .iter()
+        .map(|entry| {
+            (
+                entry.thread.id.clone(),
+                parent_id(&entry.thread).to_string(),
+            )
+        })
+        .collect();
+    let mut visible: HashSet<String> = all
+        .iter()
+        .filter(|entry| entry.thread.status != thread::Status::Resolved)
+        .map(|entry| entry.thread.id.clone())
+        .collect();
+    let mut pending: Vec<_> = visible.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        let Some(parent) = parents.get(&id) else {
+            continue;
+        };
+        if parent != ROOT_ID && visible.insert(parent.clone()) {
+            pending.push(parent.clone());
+        }
+    }
+    let records: Vec<_> = all
+        .into_iter()
+        .filter(|entry| visible.contains(&entry.thread.id))
+        .map(|entry| entry.thread)
+        .collect();
+    tree_from(&records)
+}
+
 pub fn parent_id(record: &Thread) -> &str {
     if record.parent_id.is_empty() {
         ROOT_ID
@@ -219,10 +257,11 @@ pub fn parent_id(record: &Thread) -> &str {
     }
 }
 
-pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<(bool, AgentProfile)> {
+/// Checks the parent and returns whether the new node may create children.
+pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<bool> {
     let records = thread::list(project);
     validate_tree(&records)?;
-    prepare_node_from(project, &records, request)
+    prepare_node_from(&records, request)
 }
 
 /// When the caller is a known project pane, keep its child creation beneath
@@ -302,11 +341,7 @@ pub fn validate_machine_spawn(role: NodeRole, can_spawn: bool, machine: &str) ->
     Ok(())
 }
 
-fn prepare_node_from(
-    project: &Project,
-    records: &[Thread],
-    request: &NodeRequest,
-) -> Result<(bool, AgentProfile)> {
+fn prepare_node_from(records: &[Thread], request: &NodeRequest) -> Result<bool> {
     let parent_id = if request.parent_id.is_empty() {
         ROOT_ID
     } else {
@@ -319,23 +354,7 @@ fn prepare_node_from(
     if request.role == NodeRole::Worker && can_spawn {
         bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
     }
-
-    let mut profile = if parent_id == ROOT_ID {
-        root_profile(project, request.role)?
-    } else {
-        profile_for_record(project, records, parent_id)?
-    };
-    if request
-        .profile
-        .harness
-        .as_ref()
-        .is_some_and(|harness| harness != &profile.harness)
-    {
-        profile.raw_agent_args.clear();
-    }
-    profile.apply(&request.profile);
-    profile.argv(&[])?;
-    Ok((can_spawn, profile))
+    Ok(can_spawn)
 }
 
 fn validate_parent(records: &[Thread], parent_id: &str) -> Result<()> {
@@ -356,40 +375,16 @@ fn validate_parent(records: &[Thread], parent_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn root_profile(project: &Project, role: NodeRole) -> Result<AgentProfile> {
-    let (settings, _) = project.read_project_md()?;
-    Ok(AgentProfile {
-        harness: match role {
-            NodeRole::Worker => settings.thread_agent,
-            NodeRole::Coordinator => settings.coordinator_agent,
-        },
-        ..AgentProfile::default()
-    })
-}
-
-fn profile_for_record(
+/// Allocates the record, its scope folder and task file under one lock.
+/// `fill` sets what the caller resolved outside it (the launch profile).
+pub fn create_node(
     project: &Project,
-    records: &[Thread],
-    target_id: &str,
-) -> Result<AgentProfile> {
-    let record = records
-        .iter()
-        .find(|record| record.id == target_id)
-        .with_context(|| format!("node `{target_id}` does not exist"))?;
-    let mut profile = root_profile(project, record.role)?;
-    profile.apply(&ProfileOverrides {
-        harness: (!record.agent.is_empty()).then(|| record.agent.clone()),
-        model: (!record.model.is_empty()).then(|| record.model.clone()),
-        reasoning_effort: (!record.reasoning_effort.is_empty())
-            .then(|| record.reasoning_effort.clone()),
-        permission_profile: (!record.permission_profile.is_empty())
-            .then(|| record.permission_profile.clone()),
-        raw_agent_args: record.raw_agent_args.clone(),
-    });
-    Ok(profile)
-}
-
-pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
+    args: &CreateNode,
+    fill: impl FnOnce(&mut Thread),
+) -> Result<Thread> {
+    if args.rules.len() > MAX_NODE_RULES_BYTES {
+        bail!("--rules-file is over {MAX_NODE_RULES_BYTES} bytes");
+    }
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
     }
@@ -399,7 +394,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     let _lock = project.lock()?;
     let records = thread::list(project);
     validate_tree(&records)?;
-    let (can_spawn, profile) = prepare_node_from(project, &records, &args.request)?;
+    let can_spawn = prepare_node_from(&records, &args.request)?;
     validate_machine_spawn(args.request.role, can_spawn, &args.machine)?;
     let record = thread::allocate_locked(project, |record| {
         record.title = args.title.trim().to_string();
@@ -415,11 +410,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         };
         record.role = args.request.role;
         record.can_spawn = can_spawn;
-        record.agent = profile.harness.clone();
-        record.model = profile.model.clone();
-        record.reasoning_effort = profile.reasoning_effort.clone();
-        record.permission_profile = profile.permission_profile.clone();
-        record.raw_agent_args = profile.raw_agent_args.clone();
+        record.template = args.template.clone();
+        fill(record);
     })?;
 
     let scope = node_scope_dir(project, &record.id);
@@ -428,7 +420,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope) {
+    let nodes_created = match create_node_scope(&scope, &args.rules) {
         Ok(created) => created,
         Err(error) => {
             thread::remove_record_locked(project, &record.id);
@@ -452,7 +444,16 @@ pub fn node_scope_dir(project: &Project, id: &str) -> PathBuf {
     project.dir().join("nodes").join(id)
 }
 
-fn create_node_scope(scope: &Path) -> Result<bool> {
+pub(crate) fn node_instructions(rules: &str) -> String {
+    let rules = rules.trim();
+    if rules.is_empty() {
+        "# Node instructions\n\nStanding instructions for this node and its descendants.\n".into()
+    } else {
+        format!("# Node instructions\n\n{rules}\n")
+    }
+}
+
+fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
     let nodes = scope.parent().context("node scope has no parent")?;
     let nodes_created = ensure_directory(nodes)?;
     if let Err(error) = std::fs::create_dir(scope) {
@@ -471,7 +472,7 @@ fn create_node_scope(scope: &Path) -> Result<bool> {
         })?;
         project::write_atomic(
             &scope.join("INSTRUCTIONS.md"),
-            b"# Node instructions\n\nStanding instructions for this node and its descendants.\n",
+            node_instructions(rules).as_bytes(),
         )?;
         project::write_atomic(&scope.join("MEMORY.md"), b"# Node memory\n")?;
         Ok(())
@@ -483,6 +484,100 @@ fn create_node_scope(scope: &Path) -> Result<bool> {
         }
     }
     result.map(|()| nodes_created)
+}
+
+/// A report's header is its first three lines of text: the fixed
+/// `Status:` / `Needs:` / `PR:` lines the thread brief asks for. Headings and
+/// blank lines are skipped, the header stops at the first line that is not
+/// `Label: value`, each line is cut to `HEADER_LINE_CHARS`, and the
+/// result is one line, so it can ride in a wake-up as data.
+pub const HEADER_LINES: usize = 3;
+const HEADER_LINE_CHARS: usize = 160;
+
+/// True when a report's header says it needs nothing and is not stuck: its
+/// `Needs:` line starts with nothing, none or nada, and its `Status:` line is
+/// not blocked or waiting for a decision. A report without both lines needs
+/// its coordinator, to be safe.
+pub fn report_needs_nothing(report: &str) -> bool {
+    let Some(header) = report_header(report) else {
+        return false;
+    };
+    // Read by label, in English or Spanish, never by position.
+    let field = |labels: &[&str]| {
+        header.split(" | ").find_map(|line| {
+            let (label, value) = line.split_once(':')?;
+            let label = label.trim().to_lowercase();
+            labels
+                .iter()
+                .any(|l| label == *l || label.starts_with(&format!("{l} ")))
+                .then(|| value.trim().to_lowercase())
+        })
+    };
+    let (Some(status), Some(needs)) = (
+        field(&["status", "estado"]),
+        field(&[
+            "needs",
+            "necesito",
+            "qué necesito",
+            "que necesito",
+            "de vos",
+        ]),
+    ) else {
+        return false;
+    };
+    let nothing = ["nothing", "none", "nada", "ninguno", "ninguna", "n/a", "-"]
+        .iter()
+        .any(|word| {
+            needs == *word
+                || needs
+                    .strip_prefix(word)
+                    .is_some_and(|rest| rest.starts_with(|c: char| !c.is_alphanumeric()))
+        });
+    let stuck = [
+        "blocked",
+        "bloque",
+        "needs-decision",
+        "decision",
+        "decisión",
+    ]
+    .iter()
+    .any(|word| status.contains(word));
+    nothing && !stuck
+}
+
+pub fn report_header(report: &str) -> Option<String> {
+    let lines: Vec<String> = report
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .take(HEADER_LINES)
+        // A header line is `Label: value` with a short label (`PR`,
+        // `Status`, `Needs`, or the same in the project's language). A
+        // report that starts with prose or a table has no header.
+        .take_while(|line| {
+            line.split_once(':').is_some_and(|(label, _)| {
+                !label.is_empty()
+                    && label.chars().count() <= 24
+                    && label.chars().all(|c| c.is_alphanumeric() || c == ' ')
+            })
+        })
+        .map(|line| {
+            let clean: String = line
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if clean.chars().count() > HEADER_LINE_CHARS {
+                let cut: String = clean.chars().take(HEADER_LINE_CHARS - 1).collect();
+                format!("{cut}…")
+            } else {
+                clean
+            }
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join(" | "))
 }
 
 fn ensure_directory(path: &Path) -> Result<bool> {
@@ -551,6 +646,22 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
                 "\n\n## Node {} memory\n\n{}",
                 record.id,
                 node_memory.trim()
+            ));
+        }
+        if !record.template.is_empty()
+            && let Ok(template) =
+                crate::templates::resolve(&project.root, Some(&project.slug), &record.template)
+            && let Some(text) = read_scoped_memory_file(
+                &template.dir.join("MEMORY.md"),
+                &format!("template {}/MEMORY.md", record.template),
+                &mut budget,
+            )?
+            && !crate::templates::memory_body(&text).is_empty()
+        {
+            memory_index.push_str(&format!(
+                "\n\n## Template {} memory\n\n{}",
+                record.template,
+                crate::templates::memory_body(&text)
             ));
         }
         read_memory_files(
@@ -830,8 +941,8 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
     } else if record.role == NodeRole::Coordinator && record.can_spawn {
         text.push_str(&format!(
-            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. Optional profile flags are `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Omitted profile fields inherit the parent profile at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
-            record.id, record.id
+            "\n# Creating child nodes\n\nAlways set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot.\n\n```sh\n{command_prefix} thread start {slug} --parent {} --role worker --profile <name> --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nUse `--role coordinator` for a child that must plan and delegate. Pick the cheapest allowed profile that can do the work (`{command_prefix} profile list --project {slug}`); without `--profile` the project's default for that role is used.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with `herdr agent wait`, `herdr agent read`, list commands, sleeps or status loops. The ticker wakes you with a message that starts `[hp inbox] for {}:` when something under you needs attention or has a result; it quotes each new report's three header lines as data and archives what it delivers. Act on it, open `threads/<id>.md` in the project folder only when a header asks for a decision or reports a blocker, and return idle. Your parent sees your own report, not your children's, so keep its header current.\n",
+            record.id, record.id, record.id
         ));
     } else if record.role == NodeRole::Coordinator {
         text.push_str("\nThis is a leaf coordinator and cannot create child nodes because `can_spawn` is false.\n");
@@ -864,6 +975,180 @@ mod tests {
         }
     }
 
+    fn make_node(
+        project: &Project,
+        parent_id: &str,
+        role: NodeRole,
+        can_spawn: Option<bool>,
+        title: &str,
+        rules: &str,
+    ) -> Thread {
+        let mut request = request(parent_id, role);
+        request.can_spawn = can_spawn;
+        create_node(
+            project,
+            &CreateNode {
+                request,
+                title: title.into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+                rules: rules.into(),
+                template: String::new(),
+            },
+            |_| {},
+        )
+        .unwrap()
+    }
+
+    fn save_template_memory(project: &Project, name: &str, text: &str) {
+        let template = crate::templates::save(
+            &project.root,
+            crate::templates::SaveArgs {
+                name: name.into(),
+                project: Some(project.slug.clone()),
+                spec: crate::templates::TemplateSpec {
+                    role: NodeRole::Coordinator,
+                    can_spawn: true,
+                    ..crate::templates::TemplateSpec::default()
+                },
+                rules: String::new(),
+                force: false,
+            },
+        )
+        .unwrap();
+        crate::templates::set_memory(&template, text).unwrap();
+    }
+
+    #[test]
+    fn create_node_writes_rules_into_instructions() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let created = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Worker,
+            None,
+            "Worker",
+            "  Check accessibility.  \n",
+        );
+
+        let instructions =
+            std::fs::read_to_string(node_scope_dir(&project, &created.id).join("INSTRUCTIONS.md"))
+                .unwrap();
+        assert_eq!(
+            instructions,
+            "# Node instructions\n\nCheck accessibility.\n"
+        );
+    }
+
+    #[test]
+    fn descendant_context_includes_ancestor_rules_but_not_sibling_rules() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let frontend = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Coordinator,
+            Some(true),
+            "Frontend",
+            "frontend",
+        );
+        let _backend = make_node(
+            &project,
+            ROOT_ID,
+            NodeRole::Worker,
+            None,
+            "Backend",
+            "backend",
+        );
+        let descendant = make_node(
+            &project,
+            &frontend.id,
+            NodeRole::Worker,
+            None,
+            "Frontend worker",
+            "",
+        );
+
+        let context = scoped_context(&project, &descendant).unwrap();
+        assert!(context.instructions.contains("frontend"));
+        assert!(!context.instructions.contains("backend"));
+    }
+
+    #[test]
+    fn rules_over_limit_are_rejected_without_creating_a_record() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let error = create_node(
+            &project,
+            &CreateNode {
+                request: request(ROOT_ID, NodeRole::Worker),
+                title: "Too many rules".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+                rules: "x".repeat(MAX_NODE_RULES_BYTES + 1),
+                template: String::new(),
+            },
+            |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, "--rules-file is over 8192 bytes");
+        assert!(thread::list(&project).is_empty());
+        assert!(!project.dir().join("nodes").exists());
+    }
+
+    #[test]
+    fn only_a_report_that_asks_for_nothing_and_is_not_stuck_stays_quiet() {
+        assert!(report_needs_nothing(
+            "PR: none\nStatus: in-progress\nNeeds: nothing\n"
+        ));
+        assert!(report_needs_nothing(
+            "PR: none\nEstado: en curso\nQué necesito: nada todavía.\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: done\nNeeds: a merge of #12\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: blocked on CI\nNeeds: nothing\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: done\nNeeds: nothingness\n"
+        ));
+        assert!(!report_needs_nothing("Long prose without a header."));
+        // Order does not matter, labels do.
+        assert!(report_needs_nothing(
+            "Estado: en curso\nNecesito de vos: nada por ahora\nPRs Fisgón: #1627\n"
+        ));
+        assert!(!report_needs_nothing("PR: none\nNeeds: nothing\n"));
+    }
+
+    #[test]
+    fn a_report_header_is_its_first_three_lines_of_text() {
+        let report = "## Report\n\nStatus: NOT VERIFIED, gates queued\nNeeds: nothing\n\nPR: none\nLong details.";
+        assert_eq!(
+            report_header(report).as_deref(),
+            Some("Status: NOT VERIFIED, gates queued | Needs: nothing | PR: none")
+        );
+        let long = format!("Status: {}\u{1b}[2J", "x".repeat(300));
+        let header = report_header(&long).unwrap();
+        assert_eq!(header.chars().count(), 160);
+        assert!(header.ends_with('…') && !header.contains('\u{1b}'));
+        assert_eq!(report_header("# Only a title\n\n"), None);
+        assert_eq!(report_header("| Producto | Antes |\nStatus: x"), None);
+        assert_eq!(
+            report_header("Estado: hecho\nDe vos: nada\nUn párrafo largo.").as_deref(),
+            Some("Estado: hecho | De vos: nada")
+        );
+    }
+
     #[test]
     fn traversal_is_recursive_and_stable_at_sixteen_levels() {
         let world = World::new();
@@ -880,7 +1165,10 @@ mod tests {
                     machine: String::new(),
                     base: String::new(),
                     task: "continue".into(),
+                    rules: String::new(),
+                    template: String::new(),
                 },
+                |_| {},
             )
             .unwrap();
             parent = created.id;
@@ -973,7 +1261,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let before = thread::list(&project);
@@ -987,7 +1278,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "must not persist".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap_err()
         .to_string();
@@ -1009,8 +1303,10 @@ mod tests {
             machine: "build-server".into(),
             base: String::new(),
             task: "Coordinate remote work".into(),
+            rules: String::new(),
+            template: String::new(),
         };
-        let error = create_node(&project, &remote_coordinator)
+        let error = create_node(&project, &remote_coordinator, |_| {})
             .unwrap_err()
             .to_string();
         assert!(error.contains("remote recursive coordinators require a future bridge"));
@@ -1026,8 +1322,10 @@ mod tests {
             machine: "build-server".into(),
             base: String::new(),
             task: "Implement a scoped task".into(),
+            rules: String::new(),
+            template: String::new(),
         };
-        let worker = create_node(&project, &remote_worker).unwrap();
+        let worker = create_node(&project, &remote_worker, |_| {}).unwrap();
         assert_eq!(worker.role, NodeRole::Worker);
         assert_eq!(worker.machine, "build-server");
     }
@@ -1047,7 +1345,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "work".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         thread::update(&project, &worker.id, |record| {
@@ -1071,7 +1372,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         thread::update(&project, &coordinator.id, |record| {
@@ -1103,7 +1407,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "coordinate without children".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let before = thread::list(&project);
@@ -1117,7 +1424,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "must not persist".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap_err()
         .to_string();
@@ -1156,7 +1466,10 @@ mod tests {
                     machine: String::new(),
                     base: String::new(),
                     task: "rejected".into(),
+                    rules: String::new(),
+                    template: String::new(),
                 },
+                |_| {},
             )
             .unwrap_err()
             .to_string();
@@ -1202,7 +1515,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "ancestor task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let sibling = create_node(
@@ -1215,7 +1531,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "sibling task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let target = create_node(
@@ -1228,7 +1547,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "target task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let descendant = create_node(
@@ -1241,7 +1563,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "descendant task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         write_scope_sentinel(
@@ -1302,6 +1627,98 @@ mod tests {
     }
 
     #[test]
+    fn template_memory_reaches_node_and_descendants() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        save_template_memory(&project, "coordinator", "recordar X");
+
+        let node = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    parent_id: ROOT_ID.into(),
+                    role: NodeRole::Coordinator,
+                    can_spawn: Some(true),
+                },
+                title: "Coordinator".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "coordinate work".into(),
+                rules: String::new(),
+                template: "coordinator".into(),
+            },
+            |_| {},
+        )
+        .unwrap();
+        let child = create_node(
+            &project,
+            &CreateNode {
+                request: request(&node.id, NodeRole::Worker),
+                title: "Child".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "finish work".into(),
+                rules: String::new(),
+                template: String::new(),
+            },
+            |_| {},
+        )
+        .unwrap();
+        let sibling = make_node(&project, ROOT_ID, NodeRole::Worker, None, "Sibling", "");
+
+        let node_context = scoped_context(&project, &node).unwrap();
+        let child_context = scoped_context(&project, &child).unwrap();
+        let sibling_context = scoped_context(&project, &sibling).unwrap();
+        assert!(
+            node_context
+                .memory_index
+                .contains("## Template coordinator memory\n\nrecordar X")
+        );
+        assert!(
+            child_context
+                .memory_index
+                .contains("## Template coordinator memory\n\nrecordar X")
+        );
+        assert!(!sibling_context.memory_index.contains("recordar X"));
+    }
+
+    #[test]
+    fn deleted_template_does_not_break_context() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        save_template_memory(&project, "temporary", "remember X");
+        let node = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    parent_id: ROOT_ID.into(),
+                    role: NodeRole::Coordinator,
+                    can_spawn: Some(true),
+                },
+                title: "Coordinator".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "coordinate work".into(),
+                rules: String::new(),
+                template: "temporary".into(),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        crate::templates::delete(&project.root, Some(&project.slug), "temporary").unwrap();
+
+        let context = scoped_context(&project, &node).unwrap();
+        assert!(!context.memory_index.contains("remember X"));
+    }
+
+    #[test]
     fn scoped_memory_enforces_per_file_and_aggregate_limits_deterministically() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -1315,7 +1732,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         std::fs::remove_file(project.dir().join("MEMORY.md")).unwrap();
@@ -1401,7 +1821,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "sibling".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let target = create_node(
@@ -1414,7 +1837,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "target".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         std::fs::remove_file(project.dir().join("MEMORY.md")).unwrap();
@@ -1472,7 +1898,10 @@ mod tests {
                 machine: String::new(),
                 base: String::new(),
                 task: "task".into(),
+                rules: String::new(),
+                template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let linked = project.dir().join("memory/linked.md");
@@ -1496,144 +1925,15 @@ mod tests {
     }
 
     #[test]
-    fn node_profiles_inherit_parent_values_and_allow_child_overrides() {
-        let world = World::new();
-        let project = world.project("demo", "a.sock");
-        let coordinator = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: ROOT_ID.into(),
-                    role: NodeRole::Coordinator,
-                    profile: ProfileOverrides {
-                        harness: Some("codex".into()),
-                        model: Some("gpt-5.6".into()),
-                        reasoning_effort: Some("high".into()),
-                        permission_profile: Some("workspace-write".into()),
-                        raw_agent_args: vec!["--codex-arg".into()],
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Coordinator".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "coordinate".into(),
-            },
-        )
-        .unwrap();
-        let child = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: coordinator.id.clone(),
-                    role: NodeRole::Worker,
-                    profile: ProfileOverrides {
-                        model: Some("gpt-5.6-mini".into()),
-                        raw_agent_args: vec!["$(touch remains-data)".into()],
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Child".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "work".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(child.agent, "codex");
-        assert_eq!(child.model, "gpt-5.6-mini");
-        assert_eq!(child.reasoning_effort, "high");
-        assert_eq!(child.permission_profile, "workspace-write");
-        assert_eq!(
-            child.raw_agent_args,
-            ["--codex-arg", "$(touch remains-data)"]
+    fn node_protocol_guides_child_profile_selection() {
+        let protocol = node_protocol(
+            &node("coordinator", ROOT_ID, NodeRole::Coordinator, true),
+            "hp --root /tmp/project",
+            "demo",
         );
-        assert_eq!(
-            AgentProfile {
-                harness: child.agent.clone(),
-                model: child.model.clone(),
-                reasoning_effort: child.reasoning_effort.clone(),
-                permission_profile: child.permission_profile.clone(),
-                raw_agent_args: child.raw_agent_args.clone(),
-            }
-            .argv(&[])
-            .unwrap()
-            .last()
-            .unwrap(),
-            "$(touch remains-data)"
-        );
-        assert!(!child.can_spawn);
-    }
 
-    #[test]
-    fn changing_harness_drops_raw_args_from_the_previous_cli() {
-        let world = World::new();
-        let project = world.project("demo", "a.sock");
-        let coordinator = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: ROOT_ID.into(),
-                    role: NodeRole::Coordinator,
-                    profile: ProfileOverrides {
-                        harness: Some("codex".into()),
-                        raw_agent_args: vec!["--codex-only".into()],
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Codex coordinator".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "coordinate".into(),
-            },
-        )
-        .unwrap();
-        let child = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: coordinator.id,
-                    role: NodeRole::Worker,
-                    profile: ProfileOverrides {
-                        harness: Some("claude".into()),
-                        reasoning_effort: Some(String::new()),
-                        permission_profile: Some("accept-edits".into()),
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Claude worker".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "work".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(child.agent, "claude");
-        assert!(child.raw_agent_args.is_empty());
-        assert!(
-            AgentProfile {
-                harness: child.agent,
-                model: child.model,
-                reasoning_effort: child.reasoning_effort,
-                permission_profile: child.permission_profile,
-                raw_agent_args: child.raw_agent_args,
-            }
-            .argv(&[])
-            .unwrap()
-            .iter()
-            .all(|arg| arg != "--codex-only")
-        );
+        assert!(protocol.contains("--profile <name>"));
+        assert!(protocol.contains("profile list --project demo"));
     }
 
     #[test]

@@ -1,22 +1,23 @@
 # Release checklist
 
-Use this checklist before publishing Herdr Organizations as a public Herdr plugin.
+The repository is public and carries the `herdr-plugin` topic, so the Herdr marketplace can list it.
 
-- [ ] Confirm the repository is named `herdr-organizations` and its description and homepage match the README.
-- [ ] Keep the manifest id `herdr-projects` and display name `Herdr Organizations`. The id preserves the existing plugin config and project store.
-- [ ] For an upstream replacement, uninstall the upstream plugin before linking this checkout so both registrations never write the same store:
+## Every release
 
-  ```sh
-  herdr plugin uninstall herdr-projects
-  cargo build --release --locked
-  herdr plugin link .
-  ```
+- [ ] `version` agrees in `Cargo.toml`, `herdr-plugin.toml` and `Cargo.lock`.
+- [ ] `cargo build --release --locked` and `cargo test` pass on macOS and on Linux.
+- [ ] Walk through `docs/manual-test.md`, including the client-witnessed checks.
+- [ ] Tag `v<version>` on `main`, push the tag, and create the GitHub release with notes in user terms.
+- [ ] The `Release binaries` workflow passes: it attaches the four binaries and `SHA256SUMS` to the release, and fails when one is missing.
+- [ ] On every machine that runs the plugin from a checkout: `git pull`, `sh scripts/install.sh`, then `herdr-projects doctor` and `doctor --fix`.
 
-- [ ] Confirm the Herdr plugin list shows one `herdr-projects` registration named `Herdr Organizations`, with the existing projects and settings still available.
-- [ ] Add the GitHub topic `herdr-plugin` after the repository is public so the marketplace can discover its manifest.
-- [ ] Verify a clean install from the public repository builds with `cargo build --release --locked` and registers the expected actions and panes.
-- [ ] Walk through [manual validation](manual-test.md), including the checks that require a Herdr client and installed agent CLIs.
-- [ ] Exercise another agent kind, such as Gemini, and record the result in `docs/herdr-notes.md`.
-- [ ] Keep the crate version, manifest version and release tag aligned.
-- [ ] Decide whether to publish prebuilt release binaries so users can install without a Rust toolchain.
-- [ ] Generalize client-specific notes before publication. Tracked files must not contain personal absolute paths or machine-only credentials.
+## Done
+
+- [x] Public repository with the `herdr-plugin` topic, description and homepage set.
+- [x] No "private repository" wording in `README.md` or `docs/getting-started.md`.
+- [x] `v0.2.0`: the Herdr-native redesign.
+
+## Open
+
+- [ ] Verify `herdr plugin install eliasstravik/herdr-projects` from a clean machine: it clones, downloads the prebuilt binary, and registers the actions and popups.
+- [ ] `docs/herdr-notes.md` and `docs/manual-test.md` name the author's machines and home paths. Generalise them.

@@ -1,6 +1,6 @@
 //! Contextual, docked organization tree for the Herdr project workspace.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{
@@ -18,11 +18,10 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::herdr::{Herdr, Pane};
 use crate::organizations::{self, TreeEntry};
-use crate::organizations_ui;
 use crate::paths::Ctx;
 use crate::project::{self, Project, Status};
 use crate::thread::{self as thread_model, Group, NodeRole};
@@ -33,9 +32,12 @@ pub const AUTO_OPEN_ACTION_ID: &str = "organization-sidebar-auto-open";
 
 const PROJECT_ENV: &str = "HERDR_ORGANIZATIONS_PROJECT";
 const WORKSPACE_ENV: &str = "HERDR_ORGANIZATIONS_WORKSPACE";
+const TAB_ENV: &str = "HERDR_ORGANIZATIONS_TAB";
+const SELECTED_PANE_ENV: &str = "HERDR_ORGANIZATIONS_SELECTED_PANE";
 const CONFIG_FILE: &str = "organization-sidebar.json";
 const LOCK_FILE_PREFIX: &str = ".organization-sidebar-";
 const STATE_FILE_PREFIX: &str = ".organization-sidebar-state-";
+const VIEW_FILE_PREFIX: &str = ".organization-sidebar-view-";
 const METADATA_SOURCE: &str = crate::herdr::SOURCE;
 const TOKEN_ID: &str = "org_sidebar";
 const TOKEN_PROJECT: &str = "org_project";
@@ -103,6 +105,57 @@ impl SidebarSettings {
     }
 }
 
+/// The tree view's settings as `set` keys and values, for the popup.
+pub fn setting_values(settings: &SidebarSettings) -> Vec<(&'static str, String)> {
+    let on = |value: bool| value.to_string();
+    vec![
+        ("tree.dock", settings.dock_side.label().to_ascii_lowercase()),
+        ("tree.width", settings.width_percent.to_string()),
+        ("tree.focus_on_open", on(settings.focus_on_open)),
+        ("tree.auto_open", on(settings.auto_open)),
+        ("tree.close_on_shortcut", on(settings.strict_toggle)),
+        ("tree.show_resolved", on(settings.show_resolved)),
+        ("tree.show_status", on(settings.show_status)),
+        ("tree.show_role", on(settings.show_role)),
+    ]
+}
+
+/// `set <project> tree.<key> <value>`: the tree view's settings are this
+/// user's, the same for every project, so the project is not used.
+pub fn set_setting(ctx: &Ctx, key: &str, value: &str) -> Result<()> {
+    let mut settings = load_settings(ctx)?;
+    let flag = |value: &str| match value.trim() {
+        "true" | "on" | "yes" => Ok(true),
+        "false" | "off" | "no" => Ok(false),
+        other => bail!("`{other}` is not true or false"),
+    };
+    match key {
+        "tree.dock" => {
+            settings.dock_side = match value.trim() {
+                "left" => DockSide::Left,
+                "right" => DockSide::Right,
+                other => bail!("`{other}` is not left or right"),
+            }
+        }
+        "tree.width" => {
+            settings.width_percent = value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|w| (15..=50).contains(w))
+                .with_context(|| format!("`{value}` is not a width from 15 to 50 (percent)"))?
+        }
+        "tree.focus_on_open" => settings.focus_on_open = flag(value)?,
+        "tree.auto_open" => settings.auto_open = flag(value)?,
+        "tree.close_on_shortcut" => settings.strict_toggle = flag(value)?,
+        "tree.show_resolved" => settings.show_resolved = flag(value)?,
+        "tree.show_status" => settings.show_status = flag(value)?,
+        "tree.show_role" => settings.show_role = flag(value)?,
+        other => bail!("`{other}` is not a tree setting"),
+    }
+    save_settings(ctx, &settings)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleResult {
     Opened,
@@ -122,7 +175,19 @@ struct SidebarState {
     slug: String,
     workspace: String,
     socket: String,
+    socket_instance: String,
+    open: bool,
+    panes: BTreeMap<String, String>,
+    // Read old state files once and migrate them through workspace discovery.
     pane_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+struct SidebarViewState {
+    collapsed: BTreeSet<String>,
+    root_collapsed: bool,
+    selected_id: String,
 }
 
 fn config_dir(ctx: &Ctx) -> Result<PathBuf> {
@@ -150,28 +215,64 @@ fn sidebar_state_path(config_dir: &Path, workspace: &str) -> PathBuf {
     ))
 }
 
+fn sidebar_view_path(config_dir: &Path, slug: &str) -> PathBuf {
+    config_dir.join(format!("{VIEW_FILE_PREFIX}{slug}.json"))
+}
+
 fn load_sidebar_state(config_dir: &Path, workspace: &str) -> Option<SidebarState> {
     project::read_json(&sidebar_state_path(config_dir, workspace))
 }
 
-fn save_sidebar_state(
-    config_dir: &Path,
-    slug: &str,
-    workspace: &str,
-    socket: &str,
-    pane_id: &str,
-) -> Result<()> {
+fn socket_instance(socket: &str) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = std::fs::metadata(socket) else {
+            return String::new();
+        };
+        let mtime_nanos = metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec();
+        format!("{}:{mtime_nanos}", metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        String::new()
+    }
+}
+
+fn save_sidebar_state(config_dir: &Path, state: &SidebarState) -> Result<()> {
     fs::create_dir_all(config_dir)
         .with_context(|| format!("could not create {}", config_dir.display()))?;
-    project::write_json(
-        &sidebar_state_path(config_dir, workspace),
-        &SidebarState {
-            slug: slug.to_string(),
-            workspace: workspace.to_string(),
-            socket: socket.to_string(),
-            pane_id: pane_id.to_string(),
-        },
+    project::write_json(&sidebar_state_path(config_dir, &state.workspace), state)
+}
+
+fn filter_sidebar_view(mut state: SidebarViewState, view: &TreeView) -> SidebarViewState {
+    state
+        .collapsed
+        .retain(|id| view.entries.iter().any(|entry| entry.thread.id == *id));
+    if state.selected_id != organizations::ROOT_ID
+        && !view
+            .entries
+            .iter()
+            .any(|entry| entry.thread.id == state.selected_id)
+    {
+        state.selected_id.clear();
+    }
+    state
+}
+
+fn load_sidebar_view(config_dir: &Path, slug: &str, view: &TreeView) -> SidebarViewState {
+    filter_sidebar_view(
+        project::read_json(&sidebar_view_path(config_dir, slug)).unwrap_or_default(),
+        view,
     )
+}
+
+fn save_sidebar_view(config_dir: &Path, slug: &str, state: &SidebarViewState) -> Result<()> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("could not create {}", config_dir.display()))?;
+    project::write_json(&sidebar_view_path(config_dir, slug), state)
 }
 
 pub fn load_settings(ctx: &Ctx) -> Result<SidebarSettings> {
@@ -200,27 +301,46 @@ pub fn save_settings(ctx: &Ctx, settings: &SidebarSettings) -> Result<()> {
     project::write_json(&path, &settings)
 }
 
-pub fn toggle(ctx: &Ctx, slug: &str, workspace: &str, source_pane: &str) -> Result<ToggleResult> {
-    operate(ctx, slug, workspace, source_pane, Operation::Toggle)
+pub fn toggle(
+    ctx: &Ctx,
+    slug: &str,
+    workspace: &str,
+    tab: &str,
+    source_pane: &str,
+) -> Result<ToggleResult> {
+    operate(ctx, slug, workspace, tab, source_pane, Operation::Toggle)
 }
 
 pub fn ensure_auto_open(
     ctx: &Ctx,
     slug: Option<&str>,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
 ) -> Result<ToggleResult> {
     if slug.is_none() || workspace.is_empty() || ctx.env.var("HERDR_PLUGIN_CONFIG_DIR").is_none() {
         return Ok(ToggleResult::AlreadyOpen);
     }
     let settings = load_settings(ctx)?;
-    if !settings.auto_open {
+    let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+    let instance = socket_instance(socket);
+    let sticky_open = config_dir(ctx)
+        .ok()
+        .and_then(|dir| load_sidebar_state(&dir, workspace))
+        .is_some_and(|state| {
+            state.slug == slug.unwrap_or_default()
+                && state.socket == socket
+                && state.socket_instance == instance
+                && state.open
+        });
+    if !settings.auto_open && !sticky_open {
         return Ok(ToggleResult::AlreadyOpen);
     }
     operate_with_settings(
         ctx,
         slug.expect("checked above"),
         workspace,
+        tab,
         source_pane,
         Operation::Ensure,
         settings,
@@ -231,24 +351,26 @@ fn operate(
     ctx: &Ctx,
     slug: &str,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
     operation: Operation,
 ) -> Result<ToggleResult> {
     let settings = load_settings(ctx)?;
-    operate_with_settings(ctx, slug, workspace, source_pane, operation, settings)
+    operate_with_settings(ctx, slug, workspace, tab, source_pane, operation, settings)
 }
 
 fn operate_with_settings(
     ctx: &Ctx,
     slug: &str,
     workspace: &str,
+    tab: &str,
     source_pane: &str,
     operation: Operation,
     settings: SidebarSettings,
 ) -> Result<ToggleResult> {
     project::validate_slug(slug)?;
-    if workspace.is_empty() {
-        bail!("Herdr did not provide a workspace for the organization sidebar");
+    if workspace.is_empty() || tab.is_empty() {
+        bail!("Herdr did not provide a workspace and tab for the organization sidebar");
     }
     let config_dir = config_dir(ctx)?;
     let _lock = OperationLock::acquire(&config_dir, workspace)?;
@@ -256,61 +378,95 @@ fn operate_with_settings(
         .env
         .var("HERDR_SOCKET_PATH")
         .context("HERDR_SOCKET_PATH is not set for this Herdr action")?;
+    let instance = socket_instance(socket);
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
-    let state = load_sidebar_state(&config_dir, workspace);
-    let matching_state = state.as_ref().filter(|state| {
-        state.slug == slug && state.workspace == workspace && state.socket == socket
+    let loaded = load_sidebar_state(&config_dir, workspace);
+    let matching = loaded.as_ref().is_some_and(|state| {
+        state.slug == slug
+            && state.workspace == workspace
+            && state.socket == socket
+            && state.socket_instance == instance
+            && state.pane_id.is_empty()
     });
-    let mut discovered_panes = None;
-    let mut own_panes = Vec::new();
-    if let Some(state) = matching_state.filter(|state| !state.pane_id.is_empty()) {
-        match herdr.pane_get(&state.pane_id) {
-            Ok(pane) if pane.workspace_id == workspace => own_panes.push(pane),
-            Ok(_) => {
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-            }
-            Err(error) if error.code == "pane_not_found" => {
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-            }
-            Err(error) => return Err(anyhow::anyhow!("{error}")),
+    let mut state = if matching {
+        loaded.unwrap()
+    } else {
+        SidebarState {
+            slug: slug.to_string(),
+            workspace: workspace.to_string(),
+            socket: socket.to_string(),
+            socket_instance: instance.clone(),
+            ..SidebarState::default()
         }
-    } else if matching_state.is_none() {
+    };
+    let mut discovered_panes = None;
+    if !matching {
         let panes = herdr
             .pane_list_workspace(workspace)
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        own_panes = panes
+        for pane in panes
             .iter()
             .filter(|pane| sidebar_pane(pane, slug, workspace))
-            .cloned()
-            .collect();
-        discovered_panes = Some(panes);
-        if let Some(pane) = own_panes.first() {
-            save_sidebar_state(&config_dir, slug, workspace, socket, &pane.pane_id)?;
-        } else {
-            save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
+        {
+            state
+                .panes
+                .insert(pane.tab_id.clone(), pane.pane_id.clone());
         }
+        state.open = !state.panes.is_empty();
+        discovered_panes = Some(panes);
+        save_sidebar_state(&config_dir, &state)?;
     }
-    own_panes.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
 
-    if !own_panes.is_empty() {
-        match operation {
-            Operation::Ensure => return Ok(ToggleResult::AlreadyOpen),
-            Operation::Toggle
-                if settings.strict_toggle || own_panes.iter().any(|pane| pane.focused) =>
-            {
-                for pane in own_panes {
-                    close_sidebar_pane(&herdr, &pane.pane_id)?;
-                }
-                save_sidebar_state(&config_dir, slug, workspace, socket, "")?;
-                return Ok(ToggleResult::Closed);
+    if matches!(operation, Operation::Toggle)
+        && state.open
+        && !settings.strict_toggle
+        && settings.focus_on_open
+        && let Some(pane_id) = state.panes.get(tab)
+    {
+        herdr
+            .plugin_pane_focus(pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(ToggleResult::Focused);
+    }
+
+    if matches!(operation, Operation::Toggle) && state.open {
+        for pane_id in state.panes.values() {
+            close_sidebar_pane(&herdr, pane_id)?;
+        }
+        state.open = false;
+        state.panes.clear();
+        save_sidebar_state(&config_dir, &state)?;
+        return Ok(ToggleResult::Closed);
+    }
+
+    if matches!(operation, Operation::Toggle) || settings.auto_open {
+        state.open = true;
+    }
+    if !state.open {
+        return Ok(ToggleResult::AlreadyOpen);
+    }
+
+    if let Some(pane_id) = state.panes.get(tab).cloned() {
+        if discovered_panes.as_ref().is_some_and(|panes| {
+            panes.iter().any(|pane| {
+                pane.pane_id == pane_id && pane.workspace_id == workspace && pane.tab_id == tab
+            })
+        }) {
+            return Ok(ToggleResult::AlreadyOpen);
+        }
+        match herdr.pane_get(&pane_id) {
+            Ok(pane) if pane.workspace_id == workspace && pane.tab_id == tab => {
+                return Ok(ToggleResult::AlreadyOpen);
             }
-            Operation::Toggle if settings.focus_on_open => {
-                herdr
-                    .plugin_pane_focus(&own_panes[0].pane_id)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
-                return Ok(ToggleResult::Focused);
+            Ok(_) => {
+                state.panes.remove(tab);
+                save_sidebar_state(&config_dir, &state)?;
             }
-            Operation::Toggle => return Ok(ToggleResult::AlreadyOpen),
+            Err(error) if error.code == "pane_not_found" => {
+                state.panes.remove(tab);
+                save_sidebar_state(&config_dir, &state)?;
+            }
+            Err(error) => return Err(anyhow::anyhow!("{error}")),
         }
     }
 
@@ -340,19 +496,33 @@ fn operate_with_settings(
     let created = herdr
         .pane_split(source_id, "right", ratio, source_cwd)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    save_sidebar_state(&config_dir, slug, workspace, socket, &created.pane_id)?;
+    state.panes.insert(tab.to_string(), created.pane_id.clone());
+    save_sidebar_state(&config_dir, &state)?;
 
     if settings.dock_side == DockSide::Left
         && let Err(error) = herdr.pane_swap(&created.pane_id, source_id)
     {
         let _ = herdr.pane_close(&created.pane_id);
-        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
+        state.panes.remove(tab);
+        let _ = save_sidebar_state(&config_dir, &state);
         return Err(anyhow::anyhow!("{error}"));
     }
-    let command = launch_argv(ctx, &created.pane_id, slug, workspace, &config_dir, socket)?;
+    let command = launch_argv(
+        ctx,
+        &created.pane_id,
+        slug,
+        workspace,
+        TabLaunchContext {
+            tab,
+            selected_pane: source_pane,
+        },
+        &config_dir,
+        socket,
+    )?;
     if let Err(error) = herdr.pane_run(&created.pane_id, &command) {
         let _ = herdr.pane_close(&created.pane_id);
-        let _ = save_sidebar_state(&config_dir, slug, workspace, socket, "");
+        state.panes.remove(tab);
+        let _ = save_sidebar_state(&config_dir, &state);
         return Err(anyhow::anyhow!("{error}"));
     }
 
@@ -421,20 +591,29 @@ fn report_identity(herdr: &Herdr<'_>, pane: &str, slug: &str, workspace: &str) -
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+#[derive(Clone, Copy)]
+struct TabLaunchContext<'a> {
+    tab: &'a str,
+    selected_pane: &'a str,
+}
+
 fn launch_argv(
     ctx: &Ctx,
     pane: &str,
     slug: &str,
     workspace: &str,
+    tab_context: TabLaunchContext<'_>,
     config_dir: &Path,
     socket: &str,
 ) -> Result<Vec<String>> {
-    let binary = std::env::current_exe().context("could not locate herdr-organizations binary")?;
+    let binary = std::env::current_exe().context("could not locate the herdr-projects binary")?;
     let mut assignments = vec![
         ("HERDR_PANE_ID", pane.to_string()),
         ("HERDR_WORKSPACE_ID", workspace.to_string()),
         (PROJECT_ENV, slug.to_string()),
         (WORKSPACE_ENV, workspace.to_string()),
+        (TAB_ENV, tab_context.tab.to_string()),
+        (SELECTED_PANE_ENV, tab_context.selected_pane.to_string()),
         (
             "HERDR_PLUGIN_CONFIG_DIR",
             config_dir.to_string_lossy().into_owned(),
@@ -510,7 +689,12 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("could not enable sidebar input")?;
         let guard = Self;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, Hide) {
+        if let Err(error) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            event::EnableMouseCapture,
+            Hide
+        ) {
             let _ = terminal::disable_raw_mode();
             return Err(error).context("could not open organization sidebar screen");
         }
@@ -523,6 +707,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             Show,
+            event::DisableMouseCapture,
             LeaveAlternateScreen,
             ResetColor,
             SetAttribute(Attribute::Reset)
@@ -536,9 +721,60 @@ struct TreeView {
     project: Project,
     entries: Vec<TreeEntry>,
     groups: HashMap<String, Group>,
+    details: HashMap<String, Detail>,
     omitted_nodes: usize,
 }
 
+/// What a row shows beyond its title, from the record the ticker keeps and
+/// the report's header: no Herdr call.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Detail {
+    /// The ticker's state line without its PR fact (`working · ~55%`).
+    state: String,
+    /// `PR #146 merged`, empty without a pull request.
+    pr: String,
+    /// The report's three header lines, one per entry.
+    header: Vec<String>,
+}
+
+fn detail(project: &Project, thread: &thread_model::Thread) -> Detail {
+    let number = thread
+        .pr
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let pr = number
+        .map(|n| {
+            let state = thread.pr_state.to_ascii_lowercase();
+            format!("PR #{n} {}", if state.is_empty() { "open" } else { &state })
+        })
+        .unwrap_or_default();
+    let state = match number {
+        Some(n) => thread.state_line.replace(&format!(" · PR #{n}"), ""),
+        None => thread.state_line.clone(),
+    };
+    let header = if thread.status == thread_model::Status::Resolved {
+        Vec::new()
+    } else {
+        std::fs::read_to_string(thread_model::home_report_path(project, &thread.id))
+            .ok()
+            .and_then(|report| organizations::report_header(&report))
+            .map(|h| h.split(" | ").map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    Detail { state, pr, header }
+}
+
+fn details(project: &Project, entries: &[TreeEntry]) -> HashMap<String, Detail> {
+    entries
+        .iter()
+        .map(|entry| (entry.thread.id.clone(), detail(project, &entry.thread)))
+        .collect()
+}
+
+// One `Screen` lives for the whole sidebar process; boxing its tree buys
+// nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum Screen {
     Tree {
@@ -572,6 +808,12 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         .env
         .var("HERDR_PANE_ID")
         .context("Herdr did not provide the organization sidebar pane id")?;
+    let tab = ctx
+        .env
+        .var(TAB_ENV)
+        .or_else(|| ctx.env.var("HERDR_TAB_ID"))
+        .unwrap_or("");
+    let selected_pane = ctx.env.var(SELECTED_PANE_ENV).unwrap_or("");
     let mut settings = load_settings(ctx)?;
     let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
     let mut view = if interactive {
@@ -579,16 +821,22 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     } else {
         load_view(ctx, slug, settings.show_resolved)?
     };
+    let sidebar_config_dir = config_dir(ctx)?;
+    let mut sidebar_view = load_sidebar_view(&sidebar_config_dir, slug, &view);
     let mut screen = Screen::Tree {
         view: view.clone(),
-        collapsed: BTreeSet::new(),
-        root_collapsed: false,
-        selected: 0,
+        collapsed: sidebar_view.collapsed.clone(),
+        root_collapsed: sidebar_view.root_collapsed,
+        selected: selected_index_for_saved_view(&view, &sidebar_view, selected_pane),
     };
 
     if !interactive {
         print_snapshot(&view, &settings);
         return Ok(());
+    }
+
+    if tab.is_empty() {
+        bail!("Herdr did not provide the organization sidebar tab id");
     }
 
     let socket = ctx
@@ -598,6 +846,8 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
     let guard = TerminalGuard::enter()?;
     let mut message = String::new();
+    // The node a first `x` asked to stop; a second `x` on it confirms.
+    let mut stop_asked: Option<String> = None;
     // Paint persisted state first, then immediately hydrate from live Herdr
     // state. The first frame no longer waits for agent and pane inventory.
     let mut last_refresh = Instant::now()
@@ -683,6 +933,36 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
         let key = match event::read()? {
             Event::Key(key) => key,
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
+                if let Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                } = &mut screen
+                {
+                    let rows = visible_rows(view, collapsed, *root_collapsed);
+                    let height = terminal::size()
+                        .map(|(_, height)| height as usize)
+                        .unwrap_or_default();
+                    if let Some(index) =
+                        mouse_selection(mouse.row as usize, height, rows.len(), *selected)
+                        && *selected != index
+                    {
+                        *selected = index;
+                        dirty = true;
+                        message.clear();
+                        sidebar_view = sidebar_view_state_for_selection(
+                            view,
+                            collapsed,
+                            *root_collapsed,
+                            *selected,
+                        );
+                        let _ = save_sidebar_view(&sidebar_config_dir, slug, &sidebar_view);
+                    }
+                }
+                continue;
+            }
             Event::Resize(_, _) => {
                 dirty = true;
                 continue;
@@ -692,16 +972,23 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        let previous_tree_selection = match &screen {
+            Screen::Tree { selected, .. } => Some(*selected),
+            Screen::Settings { .. } => None,
+        };
         dirty = true;
         message.clear();
+        let stop_confirmed = stop_asked.take();
+        let mut reload = false;
         match (&mut screen, key.code) {
             (_, KeyCode::Char('q')) => break,
             (Screen::Settings { .. }, KeyCode::Esc) => {
+                sidebar_view = filter_sidebar_view(sidebar_view, &view);
                 screen = Screen::Tree {
                     view: view.clone(),
-                    collapsed: BTreeSet::new(),
-                    root_collapsed: false,
-                    selected: 0,
+                    collapsed: sidebar_view.collapsed.clone(),
+                    root_collapsed: sidebar_view.root_collapsed,
+                    selected: selected_index_for_saved_view(&view, &sidebar_view, ""),
                 };
             }
             (Screen::Tree { .. }, KeyCode::Esc) => break,
@@ -774,36 +1061,174 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     Some(VisibleRow::Entry(entry)) => Some(&entry.thread),
                     None => continue,
                 };
-                match organizations_ui::focus_node(ctx, &view.project, node) {
+                match focus_node(ctx, &view.project, node) {
                     Ok(pane) => message = format!("Focused {pane}"),
                     Err(error) => message = format!("Could not open selection: {error:#}"),
                 }
             }
-            (Screen::Tree { .. }, KeyCode::Char('r')) => {
-                match load_view(ctx, slug, settings.show_resolved) {
-                    Ok(refreshed) => {
-                        view = refreshed.clone();
-                        screen = Screen::Tree {
-                            view: refreshed,
-                            collapsed: BTreeSet::new(),
-                            root_collapsed: false,
-                            selected: 0,
-                        };
+            (
+                Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                },
+                KeyCode::Char('x'),
+            ) => {
+                let rows = visible_rows(view, collapsed, *root_collapsed);
+                let Some(VisibleRow::Entry(entry)) = rows.get(*selected).copied() else {
+                    message = "Select a node to stop".into();
+                    continue;
+                };
+                let id = entry.thread.id.clone();
+                if stop_confirmed.as_deref() == Some(id.as_str()) {
+                    match threads::close_tree(ctx, slug, &id) {
+                        Ok(stopped) => message = format!("Stopped {}", stopped.join(", ")),
+                        Err(error) => message = format!("Could not stop {id}: {error:#}"),
                     }
-                    Err(error) => message = format!("Refresh failed: {error:#}"),
+                    reload = true;
+                } else {
+                    message = format!("Press x again to end the agents of {id} and its children");
+                    stop_asked = Some(id);
                 }
             }
+            (
+                Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                },
+                KeyCode::Char('n'),
+            ) => {
+                let rows = visible_rows(view, collapsed, *root_collapsed);
+                match next_needing_you(&rows, view, *selected) {
+                    Some(index) => *selected = index,
+                    None => message = "Nothing needs you".into(),
+                }
+            }
+            (Screen::Tree { .. }, KeyCode::Char('r')) => reload = true,
             _ => {}
         }
-        if let Screen::Tree { view: tree, .. } = &screen {
+        if reload {
+            match load_view(ctx, slug, settings.show_resolved) {
+                Ok(refreshed) => {
+                    view = refreshed.clone();
+                    sidebar_view = filter_sidebar_view(sidebar_view, &refreshed);
+                    screen = Screen::Tree {
+                        view: refreshed.clone(),
+                        collapsed: sidebar_view.collapsed.clone(),
+                        root_collapsed: sidebar_view.root_collapsed,
+                        selected: selected_index_for_saved_view(&refreshed, &sidebar_view, ""),
+                    };
+                }
+                Err(error) => message = format!("Refresh failed: {error:#}"),
+            }
+        }
+        let current_tree_selection = match &screen {
+            Screen::Tree { selected, .. } => Some(*selected),
+            Screen::Settings { .. } => None,
+        };
+        let selection_changed =
+            previous_tree_selection.is_some() && previous_tree_selection != current_tree_selection;
+        let collapse_toggled = previous_tree_selection.is_some() && key.code == KeyCode::Char(' ');
+        if let Screen::Tree {
+            view: tree,
+            collapsed,
+            root_collapsed,
+            selected,
+        } = &screen
+        {
             view = tree.clone();
+            if selection_changed || collapse_toggled {
+                sidebar_view =
+                    sidebar_view_state_for_selection(tree, collapsed, *root_collapsed, *selected);
+                let _ = save_sidebar_view(&sidebar_config_dir, slug, &sidebar_view);
+            }
         }
         last_refresh = Instant::now();
     }
 
     drop(guard);
-    let _ = save_sidebar_state(&config_dir(ctx)?, slug, workspace, socket, "");
+    if let Ok(config_dir) = config_dir(ctx)
+        && let Ok(_lock) = OperationLock::acquire(&config_dir, workspace)
+        && let Some(mut state) = load_sidebar_state(&config_dir, workspace)
+        && state.slug == slug
+        && state.socket == socket
+    {
+        state.open = false;
+        let other_panes = state
+            .panes
+            .iter()
+            .filter(|(state_tab, _)| state_tab.as_str() != tab)
+            .map(|(_, pane)| pane.clone())
+            .collect::<Vec<_>>();
+        state.panes.clear();
+        let _ = save_sidebar_state(&config_dir, &state);
+        for other_pane in other_panes {
+            let _ = close_sidebar_pane(&herdr, &other_pane);
+        }
+    }
     close_sidebar_pane(&herdr, pane_id)
+}
+
+fn selected_index_for_pane(view: &TreeView, pane_id: &str) -> usize {
+    if view
+        .project
+        .coordinator()
+        .is_some_and(|record| record.pane_id == pane_id)
+    {
+        return 0;
+    }
+    view.entries
+        .iter()
+        .position(|entry| entry.thread.pane_id == pane_id)
+        .map_or(0, |index| index + 1)
+}
+
+fn selected_index_for_saved_view(
+    view: &TreeView,
+    state: &SidebarViewState,
+    selected_pane: &str,
+) -> usize {
+    let selected_by_pane = selected_index_for_pane(view, selected_pane);
+    let pane_is_coordinator = view
+        .project
+        .coordinator()
+        .is_some_and(|record| record.pane_id == selected_pane);
+    if !selected_pane.is_empty() && (selected_by_pane > 0 || pane_is_coordinator) {
+        return selected_by_pane;
+    }
+    visible_rows(view, &state.collapsed, state.root_collapsed)
+        .iter()
+        .position(|row| match row {
+            VisibleRow::Root => state.selected_id == organizations::ROOT_ID,
+            VisibleRow::Entry(entry) => state.selected_id == entry.thread.id,
+        })
+        .unwrap_or(0)
+}
+
+fn sidebar_view_state_for_selection(
+    view: &TreeView,
+    collapsed: &BTreeSet<String>,
+    root_collapsed: bool,
+    selected: usize,
+) -> SidebarViewState {
+    let selected_id = visible_rows(view, collapsed, root_collapsed)
+        .get(selected)
+        .map(|row| match row {
+            VisibleRow::Root => organizations::ROOT_ID.to_string(),
+            VisibleRow::Entry(entry) => entry.thread.id.clone(),
+        })
+        .unwrap_or_default();
+    filter_sidebar_view(
+        SidebarViewState {
+            collapsed: collapsed.clone(),
+            root_collapsed,
+            selected_id,
+        },
+        view,
+    )
 }
 
 fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
@@ -811,30 +1236,33 @@ fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
         || current.project.slug != refreshed.project.slug
         || current.entries != refreshed.entries
         || current.groups != refreshed.groups
+        || current.details != refreshed.details
         || current.omitted_nodes != refreshed.omitted_nodes
         || project_label(&current.project) != project_label(&refreshed.project)
 }
 
 fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
     let project = Project::load(&ctx.root, slug)?;
-    let mut entries = organizations_ui::tree_entries(&project, show_resolved)?;
+    let mut entries = organizations::visible_tree(&project, show_resolved)?;
     let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
     entries.truncate(MAX_RENDERED_NODES);
     let groups = threads::rows(ctx, &project)
         .into_iter()
         .map(|row| (row.thread.id, row.group))
         .collect();
+    let details = details(&project, &entries);
     Ok(TreeView {
         project,
         entries,
         groups,
+        details,
         omitted_nodes,
     })
 }
 
 fn load_recorded_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
     let project = Project::load(&ctx.root, slug)?;
-    let mut entries = organizations_ui::tree_entries(&project, show_resolved)?;
+    let mut entries = organizations::visible_tree(&project, show_resolved)?;
     let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
     entries.truncate(MAX_RENDERED_NODES);
     let groups = entries
@@ -846,10 +1274,12 @@ fn load_recorded_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<Tree
             )
         })
         .collect();
+    let details = details(&project, &entries);
     Ok(TreeView {
         project,
         entries,
         groups,
+        details,
         omitted_nodes,
     })
 }
@@ -859,23 +1289,14 @@ fn print_snapshot(view: &TreeView, settings: &SidebarSettings) {
         .map(|(width, _)| width as usize)
         .unwrap_or(40);
     let collapsed = BTreeSet::new();
-    println!(
-        "{}",
-        organizations_ui::fit_terminal_row(&project_label(&view.project), width)
-    );
+    println!("{}", fit_terminal_row(&project_label(&view.project), width));
     for row in visible_rows(view, &collapsed, false).iter() {
         println!(
             "{}",
-            organizations_ui::fit_terminal_row(
-                &row_text(view, row, settings, &collapsed, false),
-                width
-            )
+            fit_terminal_row(&row_text(view, row, settings, &collapsed, false), width)
         );
     }
-    println!(
-        "{}",
-        organizations_ui::fit_terminal_row("⚙ Settings [s]  ·  q close", width)
-    );
+    println!("{}", fit_terminal_row("⚙ Settings [s]  ·  q close", width));
 }
 
 fn project_label(project: &Project) -> String {
@@ -883,6 +1304,82 @@ fn project_label(project: &Project) -> String {
         .read_project_md()
         .map(|(settings, _)| project::display_name(&settings.name, &project.slug))
         .unwrap_or_else(|_| project::humanize(&project.slug))
+}
+
+/// `12 nodes · 2 need you · 5 working · 3 PRs open`.
+fn summary_line(view: &TreeView) -> String {
+    let groups: Vec<Group> = view
+        .entries
+        .iter()
+        .filter_map(|entry| view.groups.get(&entry.thread.id).copied())
+        .collect();
+    let nodes = view.entries.len();
+    let mut line = format!("{nodes} {}", if nodes == 1 { "node" } else { "nodes" });
+    let states = crate::sidebar::project_line(&groups, false);
+    if states != "idle" {
+        line.push_str(&format!(" · {states}"));
+    }
+    let open_prs = view
+        .details
+        .values()
+        .filter(|d| d.pr.ends_with(" open"))
+        .count();
+    if open_prs > 0 {
+        line.push_str(&format!(
+            " · {open_prs} {} open",
+            if open_prs == 1 { "PR" } else { "PRs" }
+        ));
+    }
+    line
+}
+
+/// The three rows under the tree: the selected node's report header, or for
+/// the root, which nodes need the user.
+fn selection_lines(view: &TreeView, row: Option<VisibleRow<'_>>) -> Vec<String> {
+    match row {
+        Some(VisibleRow::Entry(entry)) => {
+            let header = view
+                .details
+                .get(&entry.thread.id)
+                .map(|d| d.header.clone())
+                .unwrap_or_default();
+            if header.is_empty() {
+                vec![format!("{}: no report yet", entry.thread.id)]
+            } else {
+                header
+            }
+        }
+        _ => {
+            let waiting: Vec<&str> = view
+                .entries
+                .iter()
+                .filter(|e| {
+                    view.groups
+                        .get(&e.thread.id)
+                        .is_some_and(|g| crate::sidebar::needs_you(*g))
+                })
+                .map(|e| e.thread.id.as_str())
+                .collect();
+            if waiting.is_empty() {
+                vec!["Nothing needs you".to_string()]
+            } else {
+                vec![format!("Needs you: {}", waiting.join(", "))]
+            }
+        }
+    }
+}
+
+/// The next visible row after `selected` whose node needs the user, wrapping.
+fn next_needing_you(rows: &[VisibleRow<'_>], view: &TreeView, selected: usize) -> Option<usize> {
+    (1..=rows.len())
+        .map(|step| (selected + step) % rows.len())
+        .find(|index| match rows[*index] {
+            VisibleRow::Entry(entry) => view
+                .groups
+                .get(&entry.thread.id)
+                .is_some_and(|g| crate::sidebar::needs_you(*g)),
+            VisibleRow::Root => false,
+        })
 }
 
 fn visible_rows<'a>(
@@ -1005,17 +1502,9 @@ fn build_frame(
         } => {
             set_accent_row(&mut frame, 0, &project_label(&view.project), width);
             let rows = visible_rows(view, collapsed, *root_collapsed);
-            let node_count = rows.len();
-            set_muted_row(
-                &mut frame,
-                1,
-                &format!(
-                    "Organization  ·  {node_count} {}",
-                    if node_count == 1 { "node" } else { "nodes" }
-                ),
-                width,
-            );
-            let body_capacity = height.saturating_sub(5).max(1);
+            set_muted_row(&mut frame, 1, &summary_line(view), width);
+            // Title, summary, three detail rows and two help rows around the tree.
+            let body_capacity = height.saturating_sub(7).max(1);
             let range = visible_range(rows.len(), *selected, body_capacity);
             let row_context = TreeRowContext {
                 view,
@@ -1045,17 +1534,21 @@ fn build_frame(
                     width,
                 );
             }
+            let lines = selection_lines(view, rows.get(*selected).copied());
+            for (offset, line) in lines.iter().enumerate() {
+                set_plain_row(&mut frame, height.saturating_sub(5) + offset, line, width);
+            }
             if message.is_empty() {
-                set_plain_row(
+                set_muted_row(
                     &mut frame,
-                    height.saturating_sub(3),
-                    "↑↓ Navigate   Enter Focus   Space Fold",
+                    height.saturating_sub(2),
+                    "↑↓ Move  Enter Focus  Space Fold  n Next needing you",
                     width,
                 );
                 set_muted_row(
                     &mut frame,
                     height.saturating_sub(1),
-                    "s Settings   q Close",
+                    "s Settings   x Stop   q Close",
                     width,
                 );
             } else {
@@ -1103,7 +1596,7 @@ fn build_frame(
 
 fn set_plain_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
     if let Some(target) = frame.get_mut(row) {
-        *target = organizations_ui::fit_terminal_row(value, width).into_bytes();
+        *target = fit_terminal_row(value, width).into_bytes();
     }
 }
 
@@ -1145,12 +1638,8 @@ fn simple_styled_row(value: &str, width: usize, color: Color, attribute: Attribu
         SetAttribute(attribute)
     )
     .expect("writing to a byte buffer cannot fail");
-    write!(
-        &mut output,
-        "{}",
-        organizations_ui::fit_terminal_row(value, width)
-    )
-    .expect("writing to a byte buffer cannot fail");
+    write!(&mut output, "{}", fit_terminal_row(value, width))
+        .expect("writing to a byte buffer cannot fail");
     execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))
         .expect("writing to a byte buffer cannot fail");
     output
@@ -1195,16 +1684,11 @@ fn write_tree_row(
             SetForegroundColor(Color::Blue),
             SetAttribute(Attribute::Bold)
         )?;
-        write!(
-            writer,
-            "{}",
-            organizations_ui::fit_terminal_row("› ", marker_width)
-        )?;
+        write!(writer, "{}", fit_terminal_row("› ", marker_width))?;
     } else {
         write!(writer, "{}", " ".repeat(marker_width))?;
     }
-    let text =
-        organizations_ui::fit_terminal_row(&text, context.width.saturating_sub(marker_width));
+    let text = fit_terminal_row(&text, context.width.saturating_sub(marker_width));
     if context.settings.show_status
         && let Some(status_start) = text.rfind("  ● ")
     {
@@ -1313,10 +1797,19 @@ fn row_text_with_color(
                 });
             let mut text = format!("{}{disclosure}{}", entry.prefix, entry.thread.title);
             if settings.show_status {
-                text.push_str(&format!("  ● {}", group.label()));
+                let detail = view.details.get(&entry.thread.id);
+                let state = detail
+                    .map(|d| d.state.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(group.label());
+                text.push_str(&format!("  ● {state}"));
+                if let Some(pr) = detail.map(|d| d.pr.as_str()).filter(|p| !p.is_empty()) {
+                    text.push_str(&format!("  {pr}"));
+                }
             }
-            if settings.show_role {
-                text.push_str(&format!("  {}", entry.thread.role.as_str()));
+            // Workers are the default; only a coordinator is marked.
+            if settings.show_role && entry.thread.role == NodeRole::Coordinator {
+                text.push_str("  coordinator");
             }
             let color = match group {
                 Group::ReadyForReview => Color::Blue,
@@ -1366,11 +1859,11 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     let mut output = Vec::new();
     let marker_width = width.min(2);
     let content_width = width.saturating_sub(marker_width);
-    let value = organizations_ui::fit_terminal_row(&item.value, content_width);
+    let value = fit_terminal_row(&item.value, content_width);
     let value_width = UnicodeWidthStr::width(value.as_str());
     let value_column = setting_value_column(width, value_width);
     let label_width = value_column.saturating_sub(marker_width + 2);
-    let label = organizations_ui::fit_terminal_row(item.label, label_width);
+    let label = fit_terminal_row(item.label, label_width);
     let padding = value_column
         .saturating_sub(marker_width + UnicodeWidthStr::width(label.as_str()))
         .min(content_width);
@@ -1384,7 +1877,7 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
         write!(
             &mut output,
             "{}{label}",
-            organizations_ui::fit_terminal_row("› ", marker_width)
+            fit_terminal_row("› ", marker_width)
         )?;
     } else {
         write!(&mut output, "{}{label}", " ".repeat(marker_width))?;
@@ -1453,9 +1946,255 @@ fn visible_range(count: usize, selected: usize, capacity: usize) -> Range<usize>
     start..start + capacity
 }
 
+fn mouse_selection(row: usize, height: usize, count: usize, selected: usize) -> Option<usize> {
+    let content_row = row.checked_sub(2)?;
+    let capacity = height.saturating_sub(5).max(1);
+    if content_row >= capacity {
+        return None;
+    }
+    let range = visible_range(count, selected, capacity);
+    let index = range.start + content_row;
+    (index < range.end).then_some(index)
+}
+
+/// Focuses a node's live pane: the coordinator's for the root, else the
+/// node's, reopening an open node whose pane is gone. Nothing here prints:
+/// the caller is a full-screen view.
+fn focus_node(ctx: &Ctx, project: &Project, node: Option<&thread_model::Thread>) -> Result<String> {
+    let view = threads::session_view(ctx, project)
+        .context("the project's Herdr session is not reachable")?;
+    let Some(selected) = node else {
+        let record = project
+            .coordinator()
+            .context("the project has no coordinator; run `open` first")?;
+        let live = crate::coordinator::live(project);
+        let pane = live
+            .iter()
+            .find(|c| c.pane_id == record.pane_id)
+            .or_else(|| live.first())
+            .context("the coordinator is not running; run `open` to start it")?;
+        view.herdr
+            .agent_focus(&pane.pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(pane.pane_id.clone());
+    };
+    let record = thread_model::load(project, &selected.id)?;
+    if record.status == thread_model::Status::Resolved {
+        bail!(
+            "{} is resolved and cannot be reopened automatically",
+            record.id
+        );
+    }
+    let herdr = view.herdr.on_machine(&record.machine);
+    let (agents, panes) = if record.is_remote() {
+        (
+            herdr
+                .agent_list()
+                .context("could not list agents on the node's machine")?,
+            herdr
+                .pane_list()
+                .context("could not list panes on the node's machine")?,
+        )
+    } else {
+        (view.agents.clone(), view.panes.clone())
+    };
+    if agents
+        .iter()
+        .any(|agent| thread_model::agent_matches(&record, agent))
+    {
+        herdr
+            .agent_focus(&record.pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(record.pane_id);
+    }
+    if panes
+        .iter()
+        .any(|pane| thread_model::pane_matches(&record, pane))
+    {
+        herdr
+            .tab_focus(&record.tab_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(record.pane_id);
+    }
+    let record = threads::restart(ctx, &project.slug, &record.id, None)
+        .with_context(|| format!("could not reopen {}", record.id))?;
+    view.herdr
+        .on_machine(&record.machine)
+        .tab_focus(&record.tab_id)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(record.pane_id)
+}
+
+fn is_bidi_or_line_control(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x061c
+            | 0x200b..=0x200f
+            | 0x2028..=0x202e
+            | 0x2060..=0x206f
+            | 0xfeff
+    )
+}
+fn skip_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(character) = chars.next() {
+        if matches!(character, '\u{0007}' | '\u{009c}') {
+            break;
+        }
+        if character == '\u{001b}' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
+}
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for character in chars.by_ref() {
+        if ('\u{0040}'..='\u{007e}').contains(&character) {
+            break;
+        }
+    }
+}
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut chars = value.chars().peekable();
+    let mut output = String::with_capacity(value.len());
+    while let Some(character) = chars.next() {
+        if character == '\u{001b}' {
+            match chars.peek() {
+                Some(']') => {
+                    chars.next();
+                    skip_osc(&mut chars);
+                }
+                Some('[') => {
+                    chars.next();
+                    skip_csi(&mut chars);
+                }
+                Some('P' | '^' | '_') => {
+                    chars.next();
+                    skip_osc(&mut chars);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if character == '\u{009d}' {
+            skip_osc(&mut chars);
+            continue;
+        }
+        if character == '\u{009b}' {
+            skip_csi(&mut chars);
+            continue;
+        }
+        if matches!(character as u32, 0x0090 | 0x009e | 0x009f) {
+            skip_osc(&mut chars);
+            continue;
+        }
+        if character.is_control() || is_bidi_or_line_control(character) {
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+fn fit_terminal_row(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let clean = sanitize_terminal_text(value);
+    let max_chars = max_width.saturating_mul(4).max(16);
+    let mut output = String::new();
+    let mut width = 0usize;
+    let mut truncated = false;
+    for (char_count, character) in clean.chars().enumerate() {
+        if char_count >= max_chars {
+            truncated = true;
+            break;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > max_width {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+        width += character_width;
+    }
+    if truncated {
+        while width.saturating_add(1) > max_width {
+            let Some(character) = output.pop() else {
+                break;
+            };
+            width = width.saturating_sub(UnicodeWidthChar::width(character).unwrap_or(0));
+        }
+        output.push('…');
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_show_live_state_and_pr_and_the_selection_shows_its_header() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let lead = thread_model::Thread {
+            id: "t-0001".into(),
+            title: "Frontend lead".into(),
+            role: NodeRole::Coordinator,
+            can_spawn: true,
+            status: thread_model::Status::Open,
+            state_line: "working · ~40%".into(),
+            ..thread_model::Thread::default()
+        };
+        let worker = thread_model::Thread {
+            id: "t-0002".into(),
+            title: "Form".into(),
+            parent_id: "t-0001".into(),
+            status: thread_model::Status::Open,
+            state_line: "review · PR #12".into(),
+            pr: "https://github.com/o/r/pull/12".into(),
+            pr_state: "OPEN".into(),
+            ..thread_model::Thread::default()
+        };
+        std::fs::write(
+            thread_model::home_report_path(&project, "t-0002"),
+            "PR: https://github.com/o/r/pull/12\nStatus: done, tested\nNeeds: a merge\n",
+        )
+        .unwrap();
+        let entries = organizations::tree_from(&[lead, worker]).unwrap();
+        let view = TreeView {
+            details: details(&project, &entries),
+            project,
+            entries,
+            groups: HashMap::from([
+                ("t-0001".into(), Group::Working),
+                ("t-0002".into(), Group::ReadyForReview),
+            ]),
+            omitted_nodes: 0,
+        };
+        assert_eq!(
+            summary_line(&view),
+            "2 nodes · 1 need you · 1 working · 1 PR open"
+        );
+        let collapsed = BTreeSet::new();
+        let rows = visible_rows(&view, &collapsed, false);
+        let settings = SidebarSettings::default();
+        let worker_row = row_text(&view, &rows[2], &settings, &collapsed, false);
+        assert!(
+            worker_row.contains("Form  ● review  PR #12 open"),
+            "{worker_row}"
+        );
+        assert_eq!(
+            selection_lines(&view, Some(rows[2])),
+            [
+                "PR: https://github.com/o/r/pull/12",
+                "Status: done, tested",
+                "Needs: a merge"
+            ]
+        );
+        assert_eq!(selection_lines(&view, Some(rows[0])), ["Needs you: t-0002"]);
+        assert_eq!(next_needing_you(&rows, &view, 0), Some(2));
+        assert_eq!(next_needing_you(&rows, &view, 2), Some(2));
+    }
 
     use crate::runner::fake::ok;
     use crate::scenarios::World;
@@ -1470,6 +2209,24 @@ mod tests {
         crate::paths::Env::for_test(world.home.path(), &vars)
     }
 
+    #[test]
+    fn tree_settings_are_set_by_key_from_the_popup_and_checked() {
+        let world = World::new();
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        crate::settings::set(&ctx, "any", "tree.dock", "left").unwrap();
+        crate::settings::set(&ctx, "any", "tree.width", "40").unwrap();
+        crate::settings::set(&ctx, "any", "tree.show_resolved", "on").unwrap();
+        let settings = load_settings(&ctx).unwrap();
+        assert_eq!(settings.dock_side, DockSide::Left);
+        assert_eq!(settings.width_percent, 40);
+        assert!(settings.show_resolved);
+        assert!(setting_values(&settings).contains(&("tree.dock", "left".into())));
+        assert!(set_setting(&ctx, "tree.width", "90").is_err());
+        assert!(set_setting(&ctx, "tree.dock", "up").is_err());
+        assert!(set_setting(&ctx, "tree.nope", "true").is_err());
+    }
+
     fn plugin_ctx<'a>(world: &'a World, env: &'a crate::paths::Env) -> Ctx<'a> {
         Ctx {
             env,
@@ -1478,6 +2235,10 @@ mod tests {
             runner: &world.runner,
             detached_ticker: false,
         }
+    }
+
+    fn current_socket_instance(ctx: &Ctx<'_>) -> String {
+        socket_instance(ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""))
     }
 
     fn identity_tokens(slug: &str, workspace: &str) -> serde_json::Value {
@@ -1534,6 +2295,7 @@ mod tests {
         let project = world.project("demo", "a.sock");
         let current = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[thread_model::Thread {
                 id: "t-0001".into(),
                 title: "Stable worker".into(),
@@ -1569,11 +2331,141 @@ mod tests {
     }
 
     #[test]
-    fn moving_selection_repaints_only_the_two_changed_rows() {
+    fn first_frame_selects_the_worker_owned_by_the_current_tab() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let entries = organizations::tree_from(&[thread_model::Thread {
+            id: "t-0001".into(),
+            title: "Current worker".into(),
+            pane_id: "w1:p-worker".into(),
+            ..thread_model::Thread::default()
+        }])
+        .unwrap();
+        let view = TreeView {
+            project,
+            details: HashMap::new(),
+            entries,
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+
+        assert_eq!(selected_index_for_pane(&view, "w1:p-worker"), 1);
+        assert_eq!(selected_index_for_pane(&view, "w1:p1"), 0);
+    }
+
+    #[test]
+    fn view_state_round_trip_drops_unknown_ids() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let view = TreeView {
             project,
+            details: HashMap::new(),
+            entries: organizations::tree_from(&[thread_model::Thread {
+                id: "t-0001".into(),
+                title: "Current worker".into(),
+                ..thread_model::Thread::default()
+            }])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let config_dir = world.home.path().join("plugins").join("herdr-projects");
+        let state = SidebarViewState {
+            collapsed: BTreeSet::from(["t-0001".into(), "t-9999".into()]),
+            root_collapsed: true,
+            selected_id: "t-9999".into(),
+        };
+        save_sidebar_view(&config_dir, "demo", &state).unwrap();
+
+        let loaded = load_sidebar_view(&config_dir, "demo", &view);
+
+        assert_eq!(loaded.collapsed, BTreeSet::from(["t-0001".into()]));
+        assert!(loaded.root_collapsed);
+        assert!(loaded.selected_id.is_empty());
+    }
+
+    #[test]
+    fn selected_pane_env_wins_over_saved_selection() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            details: HashMap::new(),
+            entries: organizations::tree_from(&[
+                thread_model::Thread {
+                    id: "t-0001".into(),
+                    title: "First worker".into(),
+                    pane_id: "w1:p-first".into(),
+                    ..thread_model::Thread::default()
+                },
+                thread_model::Thread {
+                    id: "t-0002".into(),
+                    title: "Second worker".into(),
+                    pane_id: "w1:p-second".into(),
+                    ..thread_model::Thread::default()
+                },
+            ])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let state = SidebarViewState {
+            selected_id: "t-0001".into(),
+            ..SidebarViewState::default()
+        };
+        let env =
+            crate::paths::Env::for_test(world.home.path(), &[(SELECTED_PANE_ENV, "w1:p-second")]);
+
+        assert_eq!(
+            selected_index_for_saved_view(&view, &state, env.var(SELECTED_PANE_ENV).unwrap_or(""),),
+            2
+        );
+    }
+
+    #[test]
+    fn mouse_selection_persists_the_clicked_visible_row() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            details: HashMap::new(),
+            entries: organizations::tree_from(&[
+                thread_model::Thread {
+                    id: "t-0001".into(),
+                    title: "First worker".into(),
+                    ..thread_model::Thread::default()
+                },
+                thread_model::Thread {
+                    id: "t-0002".into(),
+                    title: "Second worker".into(),
+                    ..thread_model::Thread::default()
+                },
+            ])
+            .unwrap(),
+            groups: HashMap::new(),
+            omitted_nodes: 0,
+        };
+        let collapsed = BTreeSet::new();
+        let selected =
+            mouse_selection(3, 24, visible_rows(&view, &collapsed, false).len(), 0).unwrap();
+        let config_dir = world.home.path().join("plugins").join("herdr-projects");
+        let state = sidebar_view_state_for_selection(&view, &collapsed, false, selected);
+        save_sidebar_view(&config_dir, "demo", &state).unwrap();
+
+        assert_eq!(selected, 1);
+        assert_eq!(
+            load_sidebar_view(&config_dir, "demo", &view).selected_id,
+            "t-0001"
+        );
+    }
+
+    #[test]
+    fn moving_selection_repaints_only_the_changed_rows() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let view = TreeView {
+            project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[thread_model::Thread {
                 id: "t-0001".into(),
                 title: "Worker".into(),
@@ -1610,7 +2502,8 @@ mod tests {
             .windows(clear_sequence.len())
             .filter(|window| *window == clear_sequence)
             .count();
-        assert_eq!(changed_rows, 2);
+        // The two tree rows and the selection's detail row below the tree.
+        assert_eq!(changed_rows, 3);
         assert!(output.len() < full_render_bytes);
 
         output.clear();
@@ -1645,6 +2538,7 @@ mod tests {
         let entries = organizations::tree_from(&records).unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::new(),
             omitted_nodes: 0,
@@ -1665,11 +2559,14 @@ mod tests {
         let entries = organizations::tree_from(&[thread_model::Thread {
             id: "t-0001".into(),
             title: "Review the release".into(),
+            role: NodeRole::Coordinator,
+            can_spawn: true,
             ..thread_model::Thread::default()
         }])
         .unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::from([("t-0001".into(), Group::ReadyForReview)]),
             omitted_nodes: 0,
@@ -1682,7 +2579,7 @@ mod tests {
         let title_position = visible_text.find("Review the release").unwrap();
         let status_position = visible_text.find("Ready for review").unwrap();
         assert!(title_position < status_position);
-        assert!(visible_text.contains("worker"));
+        assert!(visible_text.ends_with("coordinator"));
         assert_eq!(visible_color, Some(Color::Blue));
 
         let hidden_settings = SidebarSettings {
@@ -1694,7 +2591,7 @@ mod tests {
             row_text_with_color(&view, &row, &hidden_settings, &BTreeSet::new(), false);
         assert!(hidden_text.contains("Review the release"));
         assert!(!hidden_text.contains("Ready for review"));
-        assert!(!hidden_text.contains("worker"));
+        assert!(!hidden_text.contains("coordinator"));
         assert_eq!(hidden_color, None);
     }
 
@@ -1710,6 +2607,7 @@ mod tests {
         .unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::from([("t-0001".into(), Group::ReadyForReview)]),
             omitted_nodes: 0,
@@ -1845,7 +2743,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
 
-        let result = toggle(&ctx, "demo", "w1", "w1:p1").unwrap();
+        let result = toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap();
 
         assert_eq!(result, ToggleResult::Closed);
         let calls = world.runner.calls.borrow();
@@ -1887,7 +2785,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Focused
         );
         assert_eq!(world.runner.count("plugin pane focus"), 1);
@@ -1911,7 +2809,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
 
-        let result = toggle(&ctx, "demo", "w1", "w1:p1").unwrap();
+        let result = toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap();
 
         assert_eq!(result, ToggleResult::Opened);
         let calls = world.runner.calls.borrow();
@@ -1950,6 +2848,16 @@ mod tests {
         assert!(
             run.args
                 .iter()
+                .any(|arg| arg == "HERDR_ORGANIZATIONS_TAB=w1:t1")
+        );
+        assert!(
+            run.args
+                .iter()
+                .any(|arg| arg == "HERDR_ORGANIZATIONS_SELECTED_PANE=w1:p1")
+        );
+        assert!(
+            run.args
+                .iter()
                 .any(|arg| arg == "HERDR_ORGANIZATIONS_PROJECT=demo")
         );
         assert_eq!(
@@ -1964,7 +2872,10 @@ mod tests {
                 slug: "demo".into(),
                 workspace: "w1".into(),
                 socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
-                pane_id: "w1:p2".into(),
+                socket_instance: current_socket_instance(&ctx),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p2".into())]),
+                pane_id: String::new(),
             })
         );
     }
@@ -1980,17 +2891,21 @@ mod tests {
         world.runner.on("pane run", ok(r#"{"result":{}}"#));
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
+        assert!(!current_socket_instance(&ctx).is_empty());
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
-            "",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
+                ..SidebarState::default()
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
 
@@ -2001,38 +2916,77 @@ mod tests {
     }
 
     #[test]
-    fn cached_open_state_targets_the_exact_pane_without_inventory() {
+    fn sticky_sidebar_prewarms_a_new_tab_without_closing_the_existing_one() {
         let world = World::new();
         world.project("demo", "a.sock");
         world.runner.on(
-            "pane get",
-            ok(r#"{"result":{"pane":{"pane_id":"w1:p-sidebar","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-worker-sidebar","tab_id":"w1:t2","workspace_id":"w1","cwd":"/project"}}}"#),
         );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-root-sidebar".into())]),
+                pane_id: String::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t2", "w1:p-worker").unwrap(),
+            ToggleResult::Opened
+        );
+
+        let state = load_sidebar_state(&config_dir(&ctx).unwrap(), "w1").unwrap();
+        assert!(state.open);
+        assert_eq!(state.panes.get("w1:t1").unwrap(), "w1:p-root-sidebar");
+        assert_eq!(state.panes.get("w1:t2").unwrap(), "w1:p-worker-sidebar");
+        assert_eq!(world.runner.count("pane close"), 0);
+        assert_eq!(world.runner.count("pane list"), 0);
+    }
+
+    #[test]
+    fn sticky_toggle_closes_cached_panes_without_inventory() {
+        let world = World::new();
+        world.project("demo", "a.sock");
         world.runner.on("pane close", ok(r#"{"result":{}}"#));
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            ctx.env.var("HERDR_SOCKET_PATH").unwrap(),
-            "w1:p-sidebar",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-sidebar".into())]),
+                pane_id: String::new(),
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Closed
         );
 
         assert_eq!(world.runner.count("pane list"), 0);
-        assert_eq!(world.runner.count("pane get"), 1);
+        assert_eq!(world.runner.count("pane get"), 0);
         assert_eq!(world.runner.count("pane close"), 1);
         assert_eq!(
             load_sidebar_state(&config_dir(&ctx).unwrap(), "w1")
                 .unwrap()
-                .pane_id,
-            ""
+                .panes,
+            BTreeMap::new()
         );
     }
 
@@ -2049,21 +3003,93 @@ mod tests {
         let ctx = plugin_ctx(&world, &env);
         save_sidebar_state(
             &config_dir(&ctx).unwrap(),
-            "demo",
-            "w1",
-            "/tmp/another-session.sock",
-            "w1:p-old",
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: "/tmp/another-session.sock".into(),
+                socket_instance: String::new(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-old".into())]),
+                pane_id: String::new(),
+            },
         )
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
 
         assert_eq!(world.runner.count("pane get"), 0);
         assert_eq!(world.runner.count("pane close"), 0);
         assert_eq!(world.runner.count("pane split"), 1);
+    }
+
+    #[test]
+    fn stale_state_from_previous_server_instance_is_not_reused() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on(
+            "pane split",
+            ok(r#"{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"w1:t1","workspace_id":"w1","cwd":"/project"}}}"#),
+        );
+        world.runner.on("pane run", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: "old".into(),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-old".into())]),
+                ..SidebarState::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
+            ToggleResult::Opened
+        );
+
+        assert_eq!(world.runner.count("pane list --workspace w1"), 1);
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane close"), 0);
+        assert_eq!(world.runner.count("pane split"), 1);
+    }
+
+    #[test]
+    fn same_server_instance_keeps_fast_path() {
+        let world = World::new();
+        world.project("demo", "a.sock");
+        world.runner.on("pane close", ok(r#"{"result":{}}"#));
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        save_sidebar_state(
+            &config_dir(&ctx).unwrap(),
+            &SidebarState {
+                slug: "demo".into(),
+                workspace: "w1".into(),
+                socket: ctx.env.var("HERDR_SOCKET_PATH").unwrap().into(),
+                socket_instance: current_socket_instance(&ctx),
+                open: true,
+                panes: BTreeMap::from([("w1:t1".into(), "w1:p-sidebar".into())]),
+                ..SidebarState::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
+            ToggleResult::Closed
+        );
+
+        assert_eq!(world.runner.count("pane list"), 0);
+        assert_eq!(world.runner.count("pane get"), 0);
+        assert_eq!(world.runner.count("pane close"), 1);
     }
 
     #[test]
@@ -2094,7 +3120,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            toggle(&ctx, "demo", "w1", "w1:p1").unwrap(),
+            toggle(&ctx, "demo", "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
         let calls = world.runner.calls.borrow();
@@ -2126,7 +3152,7 @@ mod tests {
         let env = plugin_env(&world);
         let ctx = plugin_ctx(&world, &env);
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::AlreadyOpen
         );
         assert_eq!(world.runner.calls.borrow().len(), 0);
@@ -2143,7 +3169,7 @@ mod tests {
         *world.panes.borrow_mut() = serde_json::json!([own]).to_string();
 
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::AlreadyOpen
         );
         assert_eq!(world.runner.count("pane close"), 0);
@@ -2174,7 +3200,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:p1").unwrap(),
+            ensure_auto_open(&ctx, Some("demo"), "w1", "w1:t1", "w1:p1").unwrap(),
             ToggleResult::Opened
         );
         assert_eq!(world.runner.count("pane split"), 1);

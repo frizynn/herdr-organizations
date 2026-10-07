@@ -32,10 +32,10 @@ Use fake Runner scenarios for Herdr, GitHub CLI and SSH behavior. Use a disposab
 - Keep project paths and legacy `Thread` records compatible. Do not add migrations for fields with safe serde defaults.
 - Validate an entire hierarchy before changing node state. Hold the existing project lock for record creation and rollback.
 - Compose node context from root through parent to target. Never include sibling or descendant scopes.
-- Pass harness configuration as argv components. Do not build shell command strings from profile fields.
+- Launch setups are named profiles. Agents pass a name; never build shell command strings from profile fields.
 - Keep Herdr calls behind the existing Runner and `Herdr` interfaces. Do not add MCP tools, a daemon, a database or harness-specific registered tools.
 - Do not treat `can_spawn` or agent permission profiles as a security boundary. Explain actual limits in code and docs.
-- Keep the Herdr Organizations plugin command and popup statically declared. The recursive tree belongs in the popup process.
+- Keep plugin actions, panes and events statically declared in `herdr-plugin.toml`. The project tree runs in its own split-pane process.
 
 ## Documentation and licensing
 
