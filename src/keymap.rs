@@ -449,6 +449,29 @@ impl Key {
         label + &base
     }
 
+    /// The key as keymap.toml writes it: `enter`, `down`, `ctrl+c`, `S`.
+    pub fn config_label(&self) -> String {
+        let base = match self.code {
+            KeyCode::Enter => "enter".to_string(),
+            KeyCode::Char(' ') => "space".into(),
+            KeyCode::Backspace => "backspace".into(),
+            KeyCode::Up => "up".into(),
+            KeyCode::Down => "down".into(),
+            KeyCode::Left => "left".into(),
+            KeyCode::Right => "right".into(),
+            KeyCode::Delete => "delete".into(),
+            _ => return self.label(),
+        };
+        let mut label = String::new();
+        if self.mods.contains(KeyModifiers::CONTROL) {
+            label.push_str("ctrl+");
+        }
+        if self.mods.contains(KeyModifiers::ALT) {
+            label.push_str("alt+");
+        }
+        label + &base
+    }
+
     /// The character typed, for input contexts.
     pub fn char(&self) -> Option<char> {
         match self.code {
@@ -643,6 +666,31 @@ impl Keymap {
             .unwrap_or_default()
     }
 
+    /// Every context's keys as `keys  name  what it does`, after any
+    /// problem found in keymap.toml: what `keys` prints.
+    pub fn describe(&self) -> String {
+        let mut out = String::new();
+        for error in &self.errors {
+            out.push_str(&format!("error: {error}\n"));
+        }
+        for context in Context::ALL {
+            out.push_str(&format!("[{}]\n", context.name()));
+            for binding in self.contexts.get(&context).into_iter().flatten() {
+                let keys: Vec<String> = binding.keys.iter().map(Key::config_label).collect();
+                let keys = if keys.is_empty() {
+                    "(unbound)".to_string()
+                } else {
+                    keys.join(" ")
+                };
+                out.push_str(&format!(
+                    "  {keys:<20} {:<16} {}\n",
+                    binding.name, binding.desc
+                ));
+            }
+        }
+        out
+    }
+
     /// The help bar: `key desc` pairs that fit `width`, then `? help`. Keys
     /// with more than one binding show the first one.
     pub fn hint(&self, context: Context, width: usize) -> String {
@@ -711,7 +759,9 @@ mod tests {
             ("pgdn", "pgdn"),
             ("f5", "f5"),
         ] {
-            assert_eq!(Key::parse(text).unwrap().label(), label, "{text}");
+            let key = Key::parse(text).unwrap();
+            assert_eq!(key.label(), label, "{text}");
+            assert_eq!(Key::parse(&key.config_label()), Some(key), "{text}");
         }
         assert!(Key::parse("nope").is_none());
         // A shifted letter arrives as the letter with SHIFT; it is the letter.

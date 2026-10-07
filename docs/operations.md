@@ -83,16 +83,44 @@ Threads idle for `auto_resolve_days` are resolved (and cleaned) after a final co
 
 ## The popup
 
-`prefix+a` (or the **Projects** action) opens it, scoped to the current workspace's project: the coordinator's workspace or a thread's, found by where its panes work. From any section, `P` opens a project picker with All projects first and the current scope highlighted: `↑`/`↓` (or `k`/`j`) move, `↵` switches, `esc` closes (archived projects are skipped; `↵` on a settings project row still jumps there). In the picker `/` filters by name or slug as you type; `esc` clears the filter, then closes. `/` in any section opens the picker straight into the filter. Outside a project it opens on all projects. Every key runs a CLI command; the popup can do nothing the CLI cannot.
+`prefix+a` (or the **Organizations** action) opens it, scoped to the current workspace's project: the coordinator's workspace or a thread's, found by where its panes work. The first line names the project and how many threads need you; the second holds the sections (they shorten to three letters, then digits, on a narrow screen). `?` lists every key of the section. `/` filters the section's rows as you type (`↵` keeps the filter, `esc` clears it). `P` opens a project picker with All projects first: `↑`/`↓` move, `↵` switches, `/` filters by name. Outside a project it opens on all projects. Every key runs a CLI command; the popup can do nothing the CLI cannot.
+
+A thread row reads `glyph state  title  PR  id · place in the tree · activity`. The glyph and the word carry the state, color only adds to them: `!` needs you, `◆` review, `●` working, `↑` landing, `○` idle, `✓` resolved. On a narrow screen the parts after the title drop from the right. Resolved threads are counted under their heading until `.` lists them. A report opens as text: headings in bold, bullets, table cells, long lines wrapped.
+
+The default keys follow; every one can be changed (see [Keys and colors](#keys-and-colors)).
 
 | Section | Keys |
 | --- | --- |
-| threads | `↵` jump to the pane · `1`-`9` send that Next line to the thread · `s` stop (Escape) · `r` restart with a kind picker · `a` ack · `x` resolve · `o` open the PR · `i` detail (report, Next list, files: `↵` opens, `y` copies the path) · `c` start or focus a coordinator of a chosen kind · `S` sweep |
+| threads | `↵` jump to the pane · `1`-`9` send that Next line to the thread · `s` stop (Escape) · `r` restart with a profile picker · `a` ack · `x` resolve · `o` open the PR · `i` report (with its Next list and files: `↵` opens, `y` copies the path) · `c` start or focus a coordinator · `S` sweep · `.` show or hide resolved threads |
 | tasks | `↵` jump to the delegated thread (or show the notes of a task without one) · `i` notes (a task with notes ends in `≡`) · `d` delegate · `m` done · `D` drop (each sends a sentence to the coordinator, which stays the only writer of TASKS.md) |
 | inbox | `↵` detail · `a` done |
 | routines | `↵` enable or disable · `i` the prompt |
 | settings | `↵` edit (also a safety row) · `Y` yolo mode on or off (asks before turning on) · `p` pause or resume · `A` archive · `X` delete (asks first). Unscoped, the rows are the all-projects safety defaults |
 | memory | `↵` read (change memory by asking the coordinator) |
+
+## Keys and colors
+
+Two files in `~/.config/herdr-projects/` change how the menu looks and which keys it answers; each holds only what you change.
+
+`keymap.toml` has a section per context (`global`, `threads`, `tasks`, `inbox`, `routines`, `settings`, `memory`, `detail`, `confirm`, `input`, `choice`, `picker`, `help`) and one line per action, with one key or a list; `[]` unbinds it:
+
+```toml
+[threads]
+resolve = "X"
+open_pr = ["o", "ctrl+o"]
+[global]
+quit = ["esc"]          # q no longer closes
+```
+
+Keys are written `q`, `S` (case counts), `enter`, `esc`, `tab`, `shift+tab`, `space`, `backspace`, `up`, `down`, `left`, `right`, `pgup`, `pgdn`, `home`, `end`, `f1`-`f12`, `ctrl+x`, `alt+x`. The list sections also answer the `global` keys they do not bind; the others answer only their own. Two actions on one key in one section are refused: that section keeps its defaults and the menu says why. `herdr-projects keys` prints every context with its keys, action names and any problem in the file; `?` in the menu shows the same for the section, and the bottom line always shows the keys in effect.
+
+`theme.toml` sets a style per meaning: `title`, `heading`, `text`, `muted`, `accent`, `selection`, `border`, `needs_you`, `review`, `working`, `landing`, `idle`, `done`, `error`. A style is a color (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `grey`, their `bright_` forms, `default`, or `#rrggbb`) and any of `bold`, `dim`, `italic`, `underline`, `reverse`. The defaults use your terminal's own 16 colors, so they follow its palette on a dark or light background. `ascii = true` swaps the state glyphs for `! + * ^ o v`. With `NO_COLOR` set, or `TERM=dumb`, colors go and bold, dim and the glyphs stay.
+
+```toml
+needs_you = "red bold"
+working   = "yellow"
+selection = "reverse bold"
+```
 
 ## Safety settings
 

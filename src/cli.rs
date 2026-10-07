@@ -219,6 +219,8 @@ enum Command {
         #[command(subcommand)]
         command: SafetyCommand,
     },
+    /// Print every key of the menu and the tree, by context, as keymap.toml sets them
+    Keys,
     /// Print the coordinator skill
     Skill,
     /// Check the setup: versions, tools, root, ticker and each project's files and session
@@ -1478,6 +1480,13 @@ pub fn run() -> Result<()> {
                 crate::safety::set_cli(&ctx, &target, &key, &value)
             }
         },
+        Command::Keys => {
+            print!(
+                "{}",
+                crate::keymap::Keymap::load(&ctx.config_dir).describe()
+            );
+            Ok(())
+        }
         Command::Skill => {
             print!("{}", include_str!("../skill/COORDINATOR.md"));
             // Every harness learns to report here; hooks only add reminders.

@@ -2565,12 +2565,7 @@ impl<'a> Popup<'a> {
                     queue!(out, cursor::MoveTo(0, (body_top + 1 + i - start) as u16))?;
                     let text = fit(&format!("  {option}"), width);
                     if i == *selected {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Reverse),
-                            Print(text),
-                            SetAttribute(Attribute::Reset)
-                        )?;
+                        queue!(out, Print(theme.selection.paint(&text)))?;
                     } else {
                         queue!(out, Print(text))?;
                     }
@@ -2602,12 +2597,7 @@ impl<'a> Popup<'a> {
                         width,
                     );
                     if i == *selected {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Reverse),
-                            Print(text),
-                            SetAttribute(Attribute::Reset)
-                        )?;
+                        queue!(out, Print(theme.selection.paint(&text)))?;
                     } else {
                         queue!(out, Print(text))?;
                     }
@@ -2647,12 +2637,7 @@ impl<'a> Popup<'a> {
                     };
                     let text = fit(&format!("  {:<12} {value}", field.label), width);
                     if i == *selected {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Reverse),
-                            Print(text),
-                            SetAttribute(Attribute::Reset)
-                        )?;
+                        queue!(out, Print(theme.selection.paint(&text)))?;
                     } else {
                         queue!(out, Print(text))?;
                     }
@@ -2712,12 +2697,7 @@ impl<'a> Popup<'a> {
                     };
                     let text = fit(&format!(" {current} {label} · {}", row.status), width);
                     if i == picker.selected {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Reverse),
-                            Print(text),
-                            SetAttribute(Attribute::Reset)
-                        )?;
+                        queue!(out, Print(theme.selection.paint(&text)))?;
                     } else {
                         queue!(out, Print(text))?;
                     }
