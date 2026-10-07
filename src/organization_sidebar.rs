@@ -18,11 +18,10 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::herdr::{Herdr, Pane};
 use crate::organizations::{self, TreeEntry};
-use crate::organizations_ui;
 use crate::paths::Ctx;
 use crate::project::{self, Project, Status};
 use crate::thread::{self as thread_model, Group, NodeRole};
@@ -556,7 +555,7 @@ fn launch_argv(
     config_dir: &Path,
     socket: &str,
 ) -> Result<Vec<String>> {
-    let binary = std::env::current_exe().context("could not locate herdr-organizations binary")?;
+    let binary = std::env::current_exe().context("could not locate the herdr-projects binary")?;
     let mut assignments = vec![
         ("HERDR_PANE_ID", pane.to_string()),
         ("HERDR_WORKSPACE_ID", workspace.to_string()),
@@ -960,7 +959,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     Some(VisibleRow::Entry(entry)) => Some(&entry.thread),
                     None => continue,
                 };
-                match organizations_ui::focus_node(ctx, &view.project, node) {
+                match focus_node(ctx, &view.project, node) {
                     Ok(pane) => message = format!("Focused {pane}"),
                     Err(error) => message = format!("Could not open selection: {error:#}"),
                 }
@@ -981,7 +980,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 };
                 let id = entry.thread.id.clone();
                 if stop_confirmed.as_deref() == Some(id.as_str()) {
-                    match threads::stop(ctx, slug, &id) {
+                    match threads::close_tree(ctx, slug, &id) {
                         Ok(stopped) => message = format!("Stopped {}", stopped.join(", ")),
                         Err(error) => message = format!("Could not stop {id}: {error:#}"),
                     }
@@ -1126,7 +1125,7 @@ fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
 
 fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
     let project = Project::load(&ctx.root, slug)?;
-    let mut entries = organizations_ui::tree_entries(&project, show_resolved)?;
+    let mut entries = organizations::visible_tree(&project, show_resolved)?;
     let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
     entries.truncate(MAX_RENDERED_NODES);
     let groups = threads::rows(ctx, &project)
@@ -1143,7 +1142,7 @@ fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
 
 fn load_recorded_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
     let project = Project::load(&ctx.root, slug)?;
-    let mut entries = organizations_ui::tree_entries(&project, show_resolved)?;
+    let mut entries = organizations::visible_tree(&project, show_resolved)?;
     let omitted_nodes = entries.len().saturating_sub(MAX_RENDERED_NODES);
     entries.truncate(MAX_RENDERED_NODES);
     let groups = entries
@@ -1168,23 +1167,14 @@ fn print_snapshot(view: &TreeView, settings: &SidebarSettings) {
         .map(|(width, _)| width as usize)
         .unwrap_or(40);
     let collapsed = BTreeSet::new();
-    println!(
-        "{}",
-        organizations_ui::fit_terminal_row(&project_label(&view.project), width)
-    );
+    println!("{}", fit_terminal_row(&project_label(&view.project), width));
     for row in visible_rows(view, &collapsed, false).iter() {
         println!(
             "{}",
-            organizations_ui::fit_terminal_row(
-                &row_text(view, row, settings, &collapsed, false),
-                width
-            )
+            fit_terminal_row(&row_text(view, row, settings, &collapsed, false), width)
         );
     }
-    println!(
-        "{}",
-        organizations_ui::fit_terminal_row("⚙ Settings [s]  ·  q close", width)
-    );
+    println!("{}", fit_terminal_row("⚙ Settings [s]  ·  q close", width));
 }
 
 fn project_label(project: &Project) -> String {
@@ -1412,7 +1402,7 @@ fn build_frame(
 
 fn set_plain_row(frame: &mut [Vec<u8>], row: usize, value: &str, width: usize) {
     if let Some(target) = frame.get_mut(row) {
-        *target = organizations_ui::fit_terminal_row(value, width).into_bytes();
+        *target = fit_terminal_row(value, width).into_bytes();
     }
 }
 
@@ -1454,12 +1444,8 @@ fn simple_styled_row(value: &str, width: usize, color: Color, attribute: Attribu
         SetAttribute(attribute)
     )
     .expect("writing to a byte buffer cannot fail");
-    write!(
-        &mut output,
-        "{}",
-        organizations_ui::fit_terminal_row(value, width)
-    )
-    .expect("writing to a byte buffer cannot fail");
+    write!(&mut output, "{}", fit_terminal_row(value, width))
+        .expect("writing to a byte buffer cannot fail");
     execute!(&mut output, ResetColor, SetAttribute(Attribute::Reset))
         .expect("writing to a byte buffer cannot fail");
     output
@@ -1504,16 +1490,11 @@ fn write_tree_row(
             SetForegroundColor(Color::Blue),
             SetAttribute(Attribute::Bold)
         )?;
-        write!(
-            writer,
-            "{}",
-            organizations_ui::fit_terminal_row("› ", marker_width)
-        )?;
+        write!(writer, "{}", fit_terminal_row("› ", marker_width))?;
     } else {
         write!(writer, "{}", " ".repeat(marker_width))?;
     }
-    let text =
-        organizations_ui::fit_terminal_row(&text, context.width.saturating_sub(marker_width));
+    let text = fit_terminal_row(&text, context.width.saturating_sub(marker_width));
     if context.settings.show_status
         && let Some(status_start) = text.rfind("  ● ")
     {
@@ -1675,11 +1656,11 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
     let mut output = Vec::new();
     let marker_width = width.min(2);
     let content_width = width.saturating_sub(marker_width);
-    let value = organizations_ui::fit_terminal_row(&item.value, content_width);
+    let value = fit_terminal_row(&item.value, content_width);
     let value_width = UnicodeWidthStr::width(value.as_str());
     let value_column = setting_value_column(width, value_width);
     let label_width = value_column.saturating_sub(marker_width + 2);
-    let label = organizations_ui::fit_terminal_row(item.label, label_width);
+    let label = fit_terminal_row(item.label, label_width);
     let padding = value_column
         .saturating_sub(marker_width + UnicodeWidthStr::width(label.as_str()))
         .min(content_width);
@@ -1693,7 +1674,7 @@ fn setting_row_bytes(item: &SettingItem, width: usize, selected: bool) -> Result
         write!(
             &mut output,
             "{}{label}",
-            organizations_ui::fit_terminal_row("› ", marker_width)
+            fit_terminal_row("› ", marker_width)
         )?;
     } else {
         write!(&mut output, "{}{label}", " ".repeat(marker_width))?;
@@ -1771,6 +1752,177 @@ fn mouse_selection(row: usize, height: usize, count: usize, selected: usize) -> 
     let range = visible_range(count, selected, capacity);
     let index = range.start + content_row;
     (index < range.end).then_some(index)
+}
+
+/// Focuses a node's live pane: the coordinator's for the root, else the
+/// node's, reopening an open node whose pane is gone. Nothing here prints:
+/// the caller is a full-screen view.
+fn focus_node(ctx: &Ctx, project: &Project, node: Option<&thread_model::Thread>) -> Result<String> {
+    let view = threads::session_view(ctx, project)
+        .context("the project's Herdr session is not reachable")?;
+    let Some(selected) = node else {
+        let record = project
+            .coordinator()
+            .context("the project has no coordinator; run `open` first")?;
+        let live = crate::coordinator::live(project);
+        let pane = live
+            .iter()
+            .find(|c| c.pane_id == record.pane_id)
+            .or_else(|| live.first())
+            .context("the coordinator is not running; run `open` to start it")?;
+        view.herdr
+            .agent_focus(&pane.pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(pane.pane_id.clone());
+    };
+    let record = thread_model::load(project, &selected.id)?;
+    if record.status == thread_model::Status::Resolved {
+        bail!(
+            "{} is resolved and cannot be reopened automatically",
+            record.id
+        );
+    }
+    let herdr = view.herdr.on_machine(&record.machine);
+    let (agents, panes) = if record.is_remote() {
+        (
+            herdr
+                .agent_list()
+                .context("could not list agents on the node's machine")?,
+            herdr
+                .pane_list()
+                .context("could not list panes on the node's machine")?,
+        )
+    } else {
+        (view.agents.clone(), view.panes.clone())
+    };
+    if agents
+        .iter()
+        .any(|agent| thread_model::agent_matches(&record, agent))
+    {
+        herdr
+            .agent_focus(&record.pane_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(record.pane_id);
+    }
+    if panes
+        .iter()
+        .any(|pane| thread_model::pane_matches(&record, pane))
+    {
+        herdr
+            .tab_focus(&record.tab_id)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        return Ok(record.pane_id);
+    }
+    let record = threads::restart(ctx, &project.slug, &record.id, None)
+        .with_context(|| format!("could not reopen {}", record.id))?;
+    view.herdr
+        .on_machine(&record.machine)
+        .tab_focus(&record.tab_id)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(record.pane_id)
+}
+
+fn is_bidi_or_line_control(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x061c
+            | 0x200b..=0x200f
+            | 0x2028..=0x202e
+            | 0x2060..=0x206f
+            | 0xfeff
+    )
+}
+fn skip_osc(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(character) = chars.next() {
+        if matches!(character, '\u{0007}' | '\u{009c}') {
+            break;
+        }
+        if character == '\u{001b}' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
+}
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for character in chars.by_ref() {
+        if ('\u{0040}'..='\u{007e}').contains(&character) {
+            break;
+        }
+    }
+}
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut chars = value.chars().peekable();
+    let mut output = String::with_capacity(value.len());
+    while let Some(character) = chars.next() {
+        if character == '\u{001b}' {
+            match chars.peek() {
+                Some(']') => {
+                    chars.next();
+                    skip_osc(&mut chars);
+                }
+                Some('[') => {
+                    chars.next();
+                    skip_csi(&mut chars);
+                }
+                Some('P' | '^' | '_') => {
+                    chars.next();
+                    skip_osc(&mut chars);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if character == '\u{009d}' {
+            skip_osc(&mut chars);
+            continue;
+        }
+        if character == '\u{009b}' {
+            skip_csi(&mut chars);
+            continue;
+        }
+        if matches!(character as u32, 0x0090 | 0x009e | 0x009f) {
+            skip_osc(&mut chars);
+            continue;
+        }
+        if character.is_control() || is_bidi_or_line_control(character) {
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+fn fit_terminal_row(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let clean = sanitize_terminal_text(value);
+    let max_chars = max_width.saturating_mul(4).max(16);
+    let mut output = String::new();
+    let mut width = 0usize;
+    let mut truncated = false;
+    for (char_count, character) in clean.chars().enumerate() {
+        if char_count >= max_chars {
+            truncated = true;
+            break;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > max_width {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+        width += character_width;
+    }
+    if truncated {
+        while width.saturating_add(1) > max_width {
+            let Some(character) = output.pop() else {
+                break;
+            };
+            width = width.saturating_sub(UnicodeWidthChar::width(character).unwrap_or(0));
+        }
+        output.push('…');
+    }
+    output
 }
 
 #[cfg(test)]

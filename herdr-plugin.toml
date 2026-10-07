@@ -1,117 +1,114 @@
 id = "herdr-projects"
-name = "Herdr Organizations"
-version = "0.1.0"
+name = "Organizations"
+version = "0.3.0"
 min_herdr_version = "0.9.1"
-description = "Recursive coordinator and worker organizations with scoped instructions, agent profiles and a navigable tree."
+description = "A project as a tree: one coordinator, leads by area and workers, with scoped instructions, quiet batched updates and a navigable view of what needs you."
 platforms = ["macos", "linux"]
 
 [[build]]
-command = ["cargo", "build", "--release", "--locked"]
+# Downloads the release binary; falls back to `cargo build --release --locked`.
+command = ["sh", "scripts/install.sh"]
 
 [[startup]]
-command = ["target/release/herdr-organizations", "ticker", "start"]
+command = ["target/release/herdr-projects", "startup"]
 
 [[actions]]
 id = "new"
-title = "Herdr Organizations: new project"
+title = "Organizations: new project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "new"]
+command = ["target/release/herdr-projects", "action", "new"]
 
 [[actions]]
 id = "open"
-title = "Herdr Organizations: open project"
+title = "Organizations: open project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "open"]
+command = ["target/release/herdr-projects", "action", "open"]
 
 [[actions]]
-id = "overview"
-title = "Herdr Organizations: overview"
-contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "overview"]
-
-[[actions]]
-id = "organizations"
-title = "Herdr Organizations: organization tree"
-contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "organizations"]
+id = "open-popup"
+title = "Organizations"
+contexts = ["global", "workspace"]
+command = ["target/release/herdr-projects", "action", "open-popup"]
 
 [[actions]]
 id = "organization-sidebar"
-title = "Herdr Organizations: toggle project hierarchy sidebar"
-description = "Toggle the recursive split sidebar for the current Herdr Organizations project."
+title = "Organizations: toggle the project tree"
+description = "Toggle the docked tree of the current project: coordinator, leads and workers with their state, what needs you and pull requests."
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "organization-sidebar"]
+command = ["target/release/herdr-projects", "action", "organization-sidebar"]
 
 [[actions]]
 id = "focus"
-title = "Herdr Organizations: focus sidebar on this project"
+title = "Organizations: focus sidebar on this project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "focus"]
+command = ["target/release/herdr-projects", "action", "focus"]
 
 [[actions]]
 id = "unfocus"
-title = "Herdr Organizations: clear sidebar focus"
+title = "Organizations: clear sidebar focus"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "unfocus"]
+command = ["target/release/herdr-projects", "action", "unfocus"]
 
 [[actions]]
 id = "adopt-workspace"
-title = "Herdr Organizations: continue this workspace as a project"
+title = "Organizations: continue this workspace as a project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "adopt-workspace"]
+command = ["target/release/herdr-projects", "action", "adopt-workspace"]
 
 [[actions]]
 id = "pause"
-title = "Herdr Organizations: pause project"
+title = "Organizations: pause project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "pause"]
+command = ["target/release/herdr-projects", "action", "pause"]
 
 [[actions]]
 id = "resume"
-title = "Herdr Organizations: resume project"
+title = "Organizations: resume project"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "resume"]
+command = ["target/release/herdr-projects", "action", "resume"]
+
+[[actions]]
+id = "configure"
+title = "Organizations: set up the sidebar, popup key, progress hooks and skill"
+contexts = ["workspace"]
+command = ["target/release/herdr-projects", "action", "configure"]
 
 [[actions]]
 id = "doctor"
-title = "Herdr Organizations: check setup"
+title = "Organizations: check setup"
 contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "doctor"]
+command = ["target/release/herdr-projects", "action", "doctor"]
 
 [[panes]]
-id = "overview"
-title = "Project overview"
+id = "projects"
+title = "Projects"
 placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "overview"]
+width = "80%"
+height = "80%"
+command = ["target/release/herdr-projects", "pane", "projects"]
 
 [[panes]]
 id = "new"
 title = "New project"
 placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "new"]
+command = ["target/release/herdr-projects", "pane", "new"]
 
 [[panes]]
 id = "pick"
 title = "Pick a project"
 placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "pick"]
+command = ["target/release/herdr-projects", "pane", "pick"]
 
 [[panes]]
 id = "adopt"
 title = "Continue as a project"
 placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "adopt"]
-
-[[panes]]
-id = "organizations"
-title = "Herdr Organizations"
-placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "organizations"]
+command = ["target/release/herdr-projects", "pane", "adopt"]
 
 [[events]]
 on = "tab.focused"
-command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]
+command = ["target/release/herdr-projects", "action", "organization-sidebar-auto-open"]
 
 [[events]]
 on = "workspace.created"
-command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]
+command = ["target/release/herdr-projects", "action", "organization-sidebar-auto-open"]

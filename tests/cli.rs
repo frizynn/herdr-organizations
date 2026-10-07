@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_herdr-organizations");
+const BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
 const LEGACY_BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
 
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
@@ -72,20 +72,6 @@ fn legacy_thread_adopt_cli_arguments_remain_available() {
     assert!(help.contains("thread adopt"), "{help}");
     assert!(help.contains("--pane"), "{help}");
     assert!(help.contains("--title <TITLE>"), "{help}");
-}
-
-#[test]
-fn node_resolve_exposes_the_non_destructive_close_view_option() {
-    let home = tempfile::tempdir().unwrap();
-    let output = hp(home.path(), &["node", "resolve", "--help"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("--close-view"), "{help}");
-    assert!(help.contains("surface, keeping Git artifacts"), "{help}");
 }
 
 #[test]
@@ -511,13 +497,10 @@ fn template_save_and_list_json_have_the_exact_contract_keys() {
             "can_spawn",
             "description",
             "dir",
-            "harness",
             "memory_chars",
-            "model",
             "name",
-            "permission_profile",
+            "profile",
             "project",
-            "reasoning_effort",
             "role",
             "rules_chars",
             "scope",

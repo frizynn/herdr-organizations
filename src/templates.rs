@@ -22,11 +22,8 @@ pub struct TemplateSpec {
     pub description: String,
     pub role: NodeRole,
     pub can_spawn: bool,
-    pub harness: String,
-    pub model: String,
-    pub reasoning_effort: String,
-    pub permission_profile: String,
-    pub raw_agent_args: Vec<String>,
+    /// The launch profile by name; empty means the project's default for the role.
+    pub profile: String,
     pub created: String,
     pub updated: String,
 }
@@ -193,11 +190,7 @@ pub fn spec_from_node(
             description: description.to_string(),
             role: node.role,
             can_spawn: node.can_spawn,
-            harness: node.agent,
-            model: node.model,
-            reasoning_effort: node.reasoning_effort,
-            permission_profile: node.permission_profile,
-            raw_agent_args: node.raw_agent_args,
+            profile: node.profile,
             created: String::new(),
             updated: String::new(),
         },
@@ -300,7 +293,6 @@ fn scope_for(project: Option<&str>) -> Scope {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent_profile::ProfileOverrides;
     use crate::organizations::{self, CreateNode, NodeRequest, ROOT_ID};
     use crate::thread::{Kind, NodeRole};
 
@@ -501,13 +493,6 @@ mod tests {
                     parent_id: ROOT_ID.into(),
                     role: NodeRole::Coordinator,
                     can_spawn: Some(false),
-                    profile: ProfileOverrides {
-                        harness: Some("codex".into()),
-                        model: Some("gpt-5.6".into()),
-                        reasoning_effort: Some("high".into()),
-                        permission_profile: Some("workspace-write".into()),
-                        raw_agent_args: vec!["--color=never".into()],
-                    },
                 },
                 title: "Frontend".into(),
                 kind: Kind::Tab,
@@ -518,6 +503,7 @@ mod tests {
                 rules: "Keep changes accessible.".into(),
                 template: String::new(),
             },
+            |t| t.profile = "fast".into(),
         )
         .unwrap();
 
@@ -527,11 +513,7 @@ mod tests {
         assert_eq!(copied.description, "Frontend work");
         assert_eq!(copied.role, NodeRole::Coordinator);
         assert!(!copied.can_spawn);
-        assert_eq!(copied.harness, "codex");
-        assert_eq!(copied.model, "gpt-5.6");
-        assert_eq!(copied.reasoning_effort, "high");
-        assert_eq!(copied.permission_profile, "workspace-write");
-        assert_eq!(copied.raw_agent_args, ["--color=never"]);
+        assert_eq!(copied.profile, "fast");
         assert_eq!(rules, "Keep changes accessible.\n");
     }
 

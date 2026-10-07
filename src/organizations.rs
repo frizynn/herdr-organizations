@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::agent_profile::{AgentProfile, ProfileOverrides};
 use crate::project::{self, Project};
 use crate::thread::{self, Kind, NodeRole, Status, Thread};
 
@@ -26,7 +25,6 @@ pub struct NodeRequest {
     pub parent_id: String,
     pub role: NodeRole,
     pub can_spawn: Option<bool>,
-    pub profile: ProfileOverrides,
 }
 
 impl Default for NodeRequest {
@@ -35,7 +33,6 @@ impl Default for NodeRequest {
             parent_id: ROOT_ID.into(),
             role: NodeRole::Worker,
             can_spawn: None,
-            profile: ProfileOverrides::default(),
         }
     }
 }
@@ -215,6 +212,44 @@ fn compare_ids(left: &str, right: &str) -> Ordering {
     }
 }
 
+/// The operational tree: resolved leaves are hidden, a resolved ancestor
+/// stays while it still gives structure to an open descendant.
+pub fn visible_tree(project: &Project, show_resolved: bool) -> Result<Vec<TreeEntry>> {
+    let all = tree(project)?;
+    if show_resolved {
+        return Ok(all);
+    }
+    let parents: BTreeMap<_, _> = all
+        .iter()
+        .map(|entry| {
+            (
+                entry.thread.id.clone(),
+                parent_id(&entry.thread).to_string(),
+            )
+        })
+        .collect();
+    let mut visible: HashSet<String> = all
+        .iter()
+        .filter(|entry| entry.thread.status != thread::Status::Resolved)
+        .map(|entry| entry.thread.id.clone())
+        .collect();
+    let mut pending: Vec<_> = visible.iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        let Some(parent) = parents.get(&id) else {
+            continue;
+        };
+        if parent != ROOT_ID && visible.insert(parent.clone()) {
+            pending.push(parent.clone());
+        }
+    }
+    let records: Vec<_> = all
+        .into_iter()
+        .filter(|entry| visible.contains(&entry.thread.id))
+        .map(|entry| entry.thread)
+        .collect();
+    tree_from(&records)
+}
+
 pub fn parent_id(record: &Thread) -> &str {
     if record.parent_id.is_empty() {
         ROOT_ID
@@ -223,10 +258,11 @@ pub fn parent_id(record: &Thread) -> &str {
     }
 }
 
-pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<(bool, AgentProfile)> {
+/// Checks the parent and returns whether the new node may create children.
+pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<bool> {
     let records = thread::list(project);
     validate_tree(&records)?;
-    prepare_node_from(project, &records, request)
+    prepare_node_from(&records, request)
 }
 
 /// When the caller is a known project pane, keep its child creation beneath
@@ -306,11 +342,7 @@ pub fn validate_machine_spawn(role: NodeRole, can_spawn: bool, machine: &str) ->
     Ok(())
 }
 
-fn prepare_node_from(
-    project: &Project,
-    records: &[Thread],
-    request: &NodeRequest,
-) -> Result<(bool, AgentProfile)> {
+fn prepare_node_from(records: &[Thread], request: &NodeRequest) -> Result<bool> {
     let parent_id = if request.parent_id.is_empty() {
         ROOT_ID
     } else {
@@ -323,23 +355,7 @@ fn prepare_node_from(
     if request.role == NodeRole::Worker && can_spawn {
         bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
     }
-
-    let mut profile = if parent_id == ROOT_ID {
-        root_profile(project, request.role)?
-    } else {
-        profile_for_record(project, records, parent_id)?
-    };
-    if request
-        .profile
-        .harness
-        .as_ref()
-        .is_some_and(|harness| harness != &profile.harness)
-    {
-        profile.raw_agent_args.clear();
-    }
-    profile.apply(&request.profile);
-    profile.argv(&[])?;
-    Ok((can_spawn, profile))
+    Ok(can_spawn)
 }
 
 fn validate_parent(records: &[Thread], parent_id: &str) -> Result<()> {
@@ -360,40 +376,13 @@ fn validate_parent(records: &[Thread], parent_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn root_profile(project: &Project, role: NodeRole) -> Result<AgentProfile> {
-    let (settings, _) = project.read_project_md()?;
-    Ok(AgentProfile {
-        harness: match role {
-            NodeRole::Worker => settings.thread_agent,
-            NodeRole::Coordinator => settings.coordinator_agent,
-        },
-        ..AgentProfile::default()
-    })
-}
-
-fn profile_for_record(
+/// Allocates the record, its scope folder and task file under one lock.
+/// `fill` sets what the caller resolved outside it (the launch profile).
+pub fn create_node(
     project: &Project,
-    records: &[Thread],
-    target_id: &str,
-) -> Result<AgentProfile> {
-    let record = records
-        .iter()
-        .find(|record| record.id == target_id)
-        .with_context(|| format!("node `{target_id}` does not exist"))?;
-    let mut profile = root_profile(project, record.role)?;
-    profile.apply(&ProfileOverrides {
-        harness: (!record.agent.is_empty()).then(|| record.agent.clone()),
-        model: (!record.model.is_empty()).then(|| record.model.clone()),
-        reasoning_effort: (!record.reasoning_effort.is_empty())
-            .then(|| record.reasoning_effort.clone()),
-        permission_profile: (!record.permission_profile.is_empty())
-            .then(|| record.permission_profile.clone()),
-        raw_agent_args: record.raw_agent_args.clone(),
-    });
-    Ok(profile)
-}
-
-pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
+    args: &CreateNode,
+    fill: impl FnOnce(&mut Thread),
+) -> Result<Thread> {
     if args.rules.len() > MAX_NODE_RULES_BYTES {
         bail!("--rules-file is over {MAX_NODE_RULES_BYTES} bytes");
     }
@@ -406,7 +395,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     let _lock = project.lock()?;
     let records = thread::list(project);
     validate_tree(&records)?;
-    let (can_spawn, profile) = prepare_node_from(project, &records, &args.request)?;
+    let can_spawn = prepare_node_from(&records, &args.request)?;
     validate_machine_spawn(args.request.role, can_spawn, &args.machine)?;
     let record = thread::allocate_locked(project, |record| {
         record.title = args.title.trim().to_string();
@@ -422,12 +411,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         };
         record.role = args.request.role;
         record.can_spawn = can_spawn;
-        record.agent = profile.harness.clone();
-        record.model = profile.model.clone();
-        record.reasoning_effort = profile.reasoning_effort.clone();
-        record.permission_profile = profile.permission_profile.clone();
-        record.raw_agent_args = profile.raw_agent_args.clone();
         record.template = args.template.clone();
+        fill(record);
     })?;
 
     let scope = node_scope_dir(project, &record.id);
@@ -915,7 +900,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
     } else if record.role == NodeRole::Coordinator && record.can_spawn {
         text.push_str(&format!(
-            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --model <model> --reasoning-effort <effort> --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. The profile flags are `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Set `--model` on every child, and `--reasoning-effort` on Codex children (the Claude adapter rejects it), following `Choosing a child's model` in the coordinator skill. Use the cheapest tier that can do the work. Omitted profile fields inherit the parent profile at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
+            "\n# Creating child nodes\n\nAlways set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot.\n\n```sh\n{command_prefix} thread start {slug} --parent {} --role worker --profile <name> --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nUse `--role coordinator` for a child that must plan and delegate. Pick the cheapest allowed profile that can do the work (`{command_prefix} profile list --project {slug}`); without `--profile` the project's default for that role is used.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with `herdr agent wait`, `herdr agent read`, list commands, sleeps or status loops. The ticker wakes you once with a short summary when a direct child needs attention or has a result.\n",
             record.id, record.id
         ));
     } else if record.role == NodeRole::Coordinator {
@@ -972,6 +957,7 @@ mod tests {
                 rules: rules.into(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap()
     }
@@ -1068,6 +1054,7 @@ mod tests {
                 rules: "x".repeat(MAX_NODE_RULES_BYTES + 1),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap_err()
         .to_string();
@@ -1118,6 +1105,7 @@ mod tests {
                     rules: String::new(),
                     template: String::new(),
                 },
+                |_| {},
             )
             .unwrap();
             parent = created.id;
@@ -1213,6 +1201,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let before = thread::list(&project);
@@ -1229,6 +1218,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap_err()
         .to_string();
@@ -1253,7 +1243,7 @@ mod tests {
             rules: String::new(),
             template: String::new(),
         };
-        let error = create_node(&project, &remote_coordinator)
+        let error = create_node(&project, &remote_coordinator, |_| {})
             .unwrap_err()
             .to_string();
         assert!(error.contains("remote recursive coordinators require a future bridge"));
@@ -1272,7 +1262,7 @@ mod tests {
             rules: String::new(),
             template: String::new(),
         };
-        let worker = create_node(&project, &remote_worker).unwrap();
+        let worker = create_node(&project, &remote_worker, |_| {}).unwrap();
         assert_eq!(worker.role, NodeRole::Worker);
         assert_eq!(worker.machine, "build-server");
     }
@@ -1295,6 +1285,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         thread::update(&project, &worker.id, |record| {
@@ -1321,6 +1312,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         thread::update(&project, &coordinator.id, |record| {
@@ -1355,6 +1347,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let before = thread::list(&project);
@@ -1371,6 +1364,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap_err()
         .to_string();
@@ -1412,6 +1406,7 @@ mod tests {
                     rules: String::new(),
                     template: String::new(),
                 },
+                |_| {},
             )
             .unwrap_err()
             .to_string();
@@ -1460,6 +1455,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let sibling = create_node(
@@ -1475,6 +1471,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let target = create_node(
@@ -1490,6 +1487,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let descendant = create_node(
@@ -1505,6 +1503,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         write_scope_sentinel(
@@ -1577,7 +1576,6 @@ mod tests {
                     parent_id: ROOT_ID.into(),
                     role: NodeRole::Coordinator,
                     can_spawn: Some(true),
-                    profile: ProfileOverrides::default(),
                 },
                 title: "Coordinator".into(),
                 kind: Kind::Tab,
@@ -1588,6 +1586,7 @@ mod tests {
                 rules: String::new(),
                 template: "coordinator".into(),
             },
+            |_| {},
         )
         .unwrap();
         let child = create_node(
@@ -1603,6 +1602,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let sibling = make_node(&project, ROOT_ID, NodeRole::Worker, None, "Sibling", "");
@@ -1635,7 +1635,6 @@ mod tests {
                     parent_id: ROOT_ID.into(),
                     role: NodeRole::Coordinator,
                     can_spawn: Some(true),
-                    profile: ProfileOverrides::default(),
                 },
                 title: "Coordinator".into(),
                 kind: Kind::Tab,
@@ -1646,6 +1645,7 @@ mod tests {
                 rules: String::new(),
                 template: "temporary".into(),
             },
+            |_| {},
         )
         .unwrap();
 
@@ -1672,6 +1672,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         std::fs::remove_file(project.dir().join("MEMORY.md")).unwrap();
@@ -1760,6 +1761,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let target = create_node(
@@ -1775,6 +1777,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         std::fs::remove_file(project.dir().join("MEMORY.md")).unwrap();
@@ -1835,6 +1838,7 @@ mod tests {
                 rules: String::new(),
                 template: String::new(),
             },
+            |_| {},
         )
         .unwrap();
         let linked = project.dir().join("memory/linked.md");
@@ -1858,85 +1862,6 @@ mod tests {
     }
 
     #[test]
-    fn node_profiles_inherit_parent_values_and_allow_child_overrides() {
-        let world = World::new();
-        let project = world.project("demo", "a.sock");
-        let coordinator = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: ROOT_ID.into(),
-                    role: NodeRole::Coordinator,
-                    profile: ProfileOverrides {
-                        harness: Some("codex".into()),
-                        model: Some("gpt-5.6".into()),
-                        reasoning_effort: Some("high".into()),
-                        permission_profile: Some("workspace-write".into()),
-                        raw_agent_args: vec!["--codex-arg".into()],
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Coordinator".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "coordinate".into(),
-                rules: String::new(),
-                template: String::new(),
-            },
-        )
-        .unwrap();
-        let child = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: coordinator.id.clone(),
-                    role: NodeRole::Worker,
-                    profile: ProfileOverrides {
-                        model: Some("gpt-5.6-mini".into()),
-                        raw_agent_args: vec!["$(touch remains-data)".into()],
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Child".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "work".into(),
-                rules: String::new(),
-                template: String::new(),
-            },
-        )
-        .unwrap();
-        assert_eq!(child.agent, "codex");
-        assert_eq!(child.model, "gpt-5.6-mini");
-        assert_eq!(child.reasoning_effort, "high");
-        assert_eq!(child.permission_profile, "workspace-write");
-        assert_eq!(
-            child.raw_agent_args,
-            ["--codex-arg", "$(touch remains-data)"]
-        );
-        assert_eq!(
-            AgentProfile {
-                harness: child.agent.clone(),
-                model: child.model.clone(),
-                reasoning_effort: child.reasoning_effort.clone(),
-                permission_profile: child.permission_profile.clone(),
-                raw_agent_args: child.raw_agent_args.clone(),
-            }
-            .argv(&[])
-            .unwrap()
-            .last()
-            .unwrap(),
-            "$(touch remains-data)"
-        );
-        assert!(!child.can_spawn);
-    }
-
-    #[test]
     fn a_summary_line_keeps_only_the_fixed_fields() {
         let long = "x".repeat(300);
         let summary =
@@ -1949,89 +1874,15 @@ mod tests {
     }
 
     #[test]
-    fn node_protocol_guides_child_model_selection() {
+    fn node_protocol_guides_child_profile_selection() {
         let protocol = node_protocol(
             &node("coordinator", ROOT_ID, NodeRole::Coordinator, true),
             "hp --root /tmp/project",
             "demo",
         );
 
-        assert!(protocol.contains("--model <model> --reasoning-effort <effort>"));
-        assert!(
-            protocol.contains(
-                "Set `--model` on every child, and `--reasoning-effort` on Codex children"
-            )
-        );
-    }
-
-    #[test]
-    fn changing_harness_drops_raw_args_from_the_previous_cli() {
-        let world = World::new();
-        let project = world.project("demo", "a.sock");
-        let coordinator = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: ROOT_ID.into(),
-                    role: NodeRole::Coordinator,
-                    profile: ProfileOverrides {
-                        harness: Some("codex".into()),
-                        raw_agent_args: vec!["--codex-only".into()],
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Codex coordinator".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "coordinate".into(),
-                rules: String::new(),
-                template: String::new(),
-            },
-        )
-        .unwrap();
-        let child = create_node(
-            &project,
-            &CreateNode {
-                request: NodeRequest {
-                    parent_id: coordinator.id,
-                    role: NodeRole::Worker,
-                    profile: ProfileOverrides {
-                        harness: Some("claude".into()),
-                        reasoning_effort: Some(String::new()),
-                        permission_profile: Some("accept-edits".into()),
-                        ..ProfileOverrides::default()
-                    },
-                    ..NodeRequest::default()
-                },
-                title: "Claude worker".into(),
-                kind: Kind::Tab,
-                repo: String::new(),
-                machine: String::new(),
-                base: String::new(),
-                task: "work".into(),
-                rules: String::new(),
-                template: String::new(),
-            },
-        )
-        .unwrap();
-        assert_eq!(child.agent, "claude");
-        assert!(child.raw_agent_args.is_empty());
-        assert!(
-            AgentProfile {
-                harness: child.agent,
-                model: child.model,
-                reasoning_effort: child.reasoning_effort,
-                permission_profile: child.permission_profile,
-                raw_agent_args: child.raw_agent_args,
-            }
-            .argv(&[])
-            .unwrap()
-            .iter()
-            .all(|arg| arg != "--codex-only")
-        );
+        assert!(protocol.contains("--profile <name>"));
+        assert!(protocol.contains("profile list --project demo"));
     }
 
     #[test]

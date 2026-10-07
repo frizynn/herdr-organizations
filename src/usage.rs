@@ -119,7 +119,7 @@ pub fn refresh(env: &Env, project: &Project, agents: &[Agent], state: &mut State
     if let Some(record) = project.coordinator() {
         let agent = agents
             .iter()
-            .find(|a| coordinator::agent_matches(&record, a));
+            .find(|a| coordinator::is_coordinator(&record, a));
         note_agent(state, ROOT_ID, agent);
         folders.entry(record.cwd).or_default().push(ROOT_ID);
     }
@@ -148,7 +148,7 @@ pub fn refresh(env: &Env, project: &Project, agents: &[Agent], state: &mut State
 
 fn note_agent(state: &mut State, node: &str, agent: Option<&Agent>) {
     if let Some(agent) = agent {
-        note_session(state, node, &agent.agent, &agent.agent_session.value, None);
+        note_session(state, node, &agent.agent, agent.session_id(), None);
     }
 }
 
@@ -648,9 +648,9 @@ mod tests {
     fn agent(kind: &str, session: &str) -> Agent {
         Agent {
             agent: kind.into(),
-            agent_session: crate::herdr::AgentSession {
+            agent_session: Some(crate::herdr::AgentSession {
                 value: session.into(),
-            },
+            }),
             ..Agent::default()
         }
     }
