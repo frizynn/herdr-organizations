@@ -91,8 +91,24 @@ impl World {
     }
 
     /// A project that has been opened: coordinator in `w1:p1` of `socket`.
+    /// A project whose inbox keeps every event and wakes without a batch
+    /// window, as before `quiet_events`; scenarios about those set them.
     pub fn project(&self, slug: &str, socket: &str) -> Project {
         let project = project::create(&self.root, slug, "", vec![]).unwrap();
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        let text: String = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("quiet_events =") {
+                    "quiet_events = []\n".to_string()
+                } else if line.starts_with("wake_batch_secs =") {
+                    "wake_batch_secs = 0\n".to_string()
+                } else {
+                    format!("{line}\n")
+                }
+            })
+            .collect();
+        std::fs::write(project.project_md(), text).unwrap();
         let socket = self.home.path().join(socket);
         std::fs::write(&socket, b"").unwrap();
         let cwd = project.canonical_dir().to_string_lossy().into_owned();
@@ -1462,9 +1478,11 @@ fn unreachable_session_prints_records_without_treating_panes_as_gone() {
 use crate::steps::Memory;
 use crate::{inbox, routine};
 
+/// Items of a kind, queued or already delivered.
 fn items_of(project: &Project, kind: &str) -> Vec<inbox::Item> {
     inbox::unhandled(project)
         .into_iter()
+        .chain(inbox::archived(project))
         .filter(|i| i.kind == kind)
         .collect()
 }
@@ -1501,26 +1519,49 @@ fn finished_world(state: &str) -> (World, Project, Thread) {
     (world, project, t)
 }
 
-/// Backdates every discovered coordinator's `pair_since`, so the idle guard
-/// lets the next tick nudge it.
+/// Backdates every discovered coordinator's `pair_since` and the queued
+/// items, so the idle guard and the batch window let the next tick wake it.
 fn idle_for_a_minute(project: &Project) {
     let mut panes = crate::coordinator::live(project);
     for pane in &mut panes {
         pane.pair_since = "2026-01-01T00:00:00Z".into();
     }
     crate::coordinator::save_live(project, &panes).unwrap();
+    batch_window_passed(project);
 }
 
-/// Backdates when the ticker first saw the coordinator's input box empty, so
-/// the quiet guard lets the next tick nudge.
+/// Backdates when the ticker first saw each input box empty, and the queued
+/// items, so the quiet guard and the batch window let the next tick wake.
 fn box_empty_for_a_while(project: &Project) {
     let mut state = crate::steps::load_state(project);
-    assert!(
-        !state.box_empty_since.is_empty(),
-        "the box was not seen empty yet"
-    );
-    state.box_empty_since = "2026-01-01T00:00:00Z".into();
+    assert!(!state.boxes.is_empty(), "the box was not seen empty yet");
+    for since in state.boxes.values_mut() {
+        *since = "2026-01-01T00:00:00Z".into();
+    }
     crate::steps::save_state(project, &state).unwrap();
+    batch_window_passed(project);
+}
+
+/// Backdates every queued inbox item past the wake-up batch window.
+fn batch_window_passed(project: &Project) {
+    let dir = project.dir().join("inbox");
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "md") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let old: String = text
+                .lines()
+                .map(|l| {
+                    if l.starts_with("created = ") {
+                        "created = \"2026-01-01T00:00:00Z\"\n".to_string()
+                    } else {
+                        format!("{l}\n")
+                    }
+                })
+                .collect();
+            std::fs::write(&path, old).unwrap();
+        }
+    }
 }
 
 fn nudges(world: &World) -> Vec<String> {
@@ -1532,6 +1573,13 @@ fn nudges(world: &World) -> Vec<String> {
         .filter(|c| c.display().contains("agent prompt"))
         .filter_map(|c| c.args.last().cloned())
         .filter(|a| a.starts_with("[hp inbox]"))
+        // What happened; the fixed closing sentence is checked once, in steps.
+        .map(|a| {
+            a.split(". Quoted text")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
         .collect()
 }
 
@@ -1602,7 +1650,7 @@ fn a_finishing_thread_gives_one_item_and_one_nudge_until_a_new_item_arrives() {
     assert!(items[0].summary.contains("threads/t-0001.md"));
     assert!(items[0].body.is_empty());
     // One nudge, to the coordinator's pane, saying what happened.
-    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report"]);
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report «done»"]);
     let calls = world.runner.calls.borrow();
     let nudge = calls
         .iter()
@@ -1671,11 +1719,7 @@ fn a_nudge_waits_while_the_coordinators_box_holds_a_draft_and_goes_out_once_afte
         ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
     }
     assert!(nudges(&world).is_empty());
-    assert!(
-        crate::steps::load_state(&project)
-            .box_empty_since
-            .is_empty()
-    );
+    assert!(crate::steps::load_state(&project).boxes.is_empty());
 
     // A screen without a readable box (a menu, a scrolled view) holds it too.
     *world.screen.borrow_mut() = "Do you want to proceed?\n❯ 1. Yes\n  2. No\n".into();
@@ -1779,7 +1823,11 @@ fn a_blocked_nudge_is_retried_and_a_busy_coordinator_is_not_prompted() {
     let ctx = world.ctx();
     ticker::tick_project(&ctx, &project).unwrap();
     assert_eq!(world.runner.count("agent prompt"), 0);
-    assert!(crate::steps::load_state(&project).nudged.is_empty());
+    assert!(
+        inbox::unhandled(&project)
+            .iter()
+            .any(|i| i.kind == "routine")
+    );
 }
 
 #[test]
@@ -5056,4 +5104,156 @@ fn a_pending_rename_closes_a_busy_agent_after_the_wait_and_reports_a_failure() {
             .iter()
             .any(|i| i.event == "rename failed")
     );
+}
+
+#[test]
+fn a_childs_report_wakes_its_own_coordinator_and_never_the_root() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let lead = world.thread(&project, world.home.path(), |t| {
+        t.role = crate::thread::NodeRole::Coordinator;
+        t.can_spawn = true;
+        t.last_state_change = "2026-01-01T00:00:00Z".into();
+    });
+    let child = thread::allocate(&project, |t| {
+        t.title = "Child".into();
+        t.parent_id = lead.id.clone();
+        t.status = Status::Open;
+    })
+    .unwrap();
+    std::fs::write(
+        thread::home_report_path(&project, &child.id),
+        "PR: none\nStatus: done, tested\nNeeds: nothing\n\n## Report\nLong.\n",
+    )
+    .unwrap();
+    inbox::write(&project, "thread-state", &child.id, "new report", "s", "").unwrap();
+    inbox::write(&project, "routine", "nightly", "due", "s", "Prompt").unwrap();
+    world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    let agents: Vec<crate::herdr::Agent> = serde_json::from_str(&format!(
+        "[{}]",
+        agent_json(
+            "w2",
+            "w2:t1",
+            "w2:p1",
+            &world.home.path().to_string_lossy(),
+            "hp-demo-t-0001",
+            "idle"
+        )
+    ))
+    .unwrap();
+    let ctx = world.ctx();
+    let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), "a.sock", ctx.runner);
+    let (settings, _) = project.read_project_md().unwrap();
+    let mut state = crate::steps::State::default();
+    let now = jiff::Timestamp::now();
+    // The root coordinator is busy (`None`); the lead is idle. The first pass
+    // sees the lead's box empty, the next one, a while later, wakes it.
+    crate::steps::nudge(&project, &mut state, &settings, &herdr, None, &agents, now).unwrap();
+    assert_eq!(world.runner.count("agent prompt"), 0);
+    for since in state.boxes.values_mut() {
+        *since = "2026-01-01T00:00:00Z".into();
+    }
+    crate::steps::nudge(&project, &mut state, &settings, &herdr, None, &agents, now).unwrap();
+    assert_eq!(
+        nudges(&world),
+        [
+            "[hp inbox] for t-0001: t-0002 new report «PR: none | Status: done, tested | Needs: nothing»"
+        ]
+    );
+    assert_eq!(world.runner.count("agent prompt w2:p1"), 1);
+    // Delivered means archived; the root's routine item still waits for it.
+    let queued: Vec<String> = inbox::unhandled(&project)
+        .into_iter()
+        .map(|i| i.kind)
+        .collect();
+    assert_eq!(queued, ["routine"]);
+}
+
+#[test]
+fn by_default_idle_resolved_and_opened_events_never_wake_and_others_wait_for_the_batch() {
+    let world = World::new();
+    let project = project::create(&world.root, "quiet", "", vec![]).unwrap();
+    let (settings, _) = project.read_project_md().unwrap();
+    assert_eq!(settings.wake_batch_secs, 90);
+    inbox::write(&project, "thread-state", "t-0001", "idle", "s", "").unwrap();
+    inbox::write(&project, "thread-state", "t-0001", "resolved", "s", "").unwrap();
+    inbox::write(&project, "pr", "t-0001", "PR opened", "s", "").unwrap();
+    assert!(inbox::unhandled(&project).is_empty());
+    inbox::write(&project, "pr", "t-0001", "PR merged", "s", "").unwrap();
+    world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    let ctx = world.ctx();
+    let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), "a.sock", ctx.runner);
+    let root = crate::coordinator::LivePane {
+        pane_id: "w1:p1".into(),
+        agent: "claude".into(),
+        ..Default::default()
+    };
+    let mut state = crate::steps::State::default();
+    // Within the window nothing goes out, even to a ready coordinator.
+    let now = jiff::Timestamp::now();
+    crate::steps::nudge(
+        &project,
+        &mut state,
+        &settings,
+        &herdr,
+        Some(&root),
+        &[],
+        now,
+    )
+    .unwrap();
+    assert_eq!(world.runner.count("agent prompt"), 0);
+    // Past it, the box is checked again (seen empty, then quiet) and it goes.
+    let later = now + jiff::SignedDuration::from_secs(91);
+    crate::steps::nudge(
+        &project,
+        &mut state,
+        &settings,
+        &herdr,
+        Some(&root),
+        &[],
+        later,
+    )
+    .unwrap();
+    assert_eq!(world.runner.count("agent prompt"), 0);
+    let quiet = later + jiff::SignedDuration::from_secs(crate::steps::NUDGE_QUIET_SECS);
+    crate::steps::nudge(
+        &project,
+        &mut state,
+        &settings,
+        &herdr,
+        Some(&root),
+        &[],
+        quiet,
+    )
+    .unwrap();
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 PR merged"]);
+}
+
+#[test]
+fn the_root_digest_counts_a_subtrees_items_instead_of_listing_them() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let lead = world.thread(&project, world.home.path(), |t| {
+        t.role = crate::thread::NodeRole::Coordinator;
+        t.can_spawn = true;
+    });
+    let child = thread::allocate(&project, |t| {
+        t.parent_id = lead.id.clone();
+        t.status = Status::Open;
+    })
+    .unwrap();
+    inbox::write(
+        &project,
+        "thread-state",
+        &child.id,
+        "new report",
+        "SUBTREE",
+        "",
+    )
+    .unwrap();
+    inbox::write(&project, "thread-state", &lead.id, "new report", "LEAD", "").unwrap();
+    let (digest, shown) = coordinator::digest(&world.ctx(), &project, "hp").unwrap();
+    assert!(digest.contains("- waiting for their own coordinators: t-0001 (1)"));
+    assert!(digest.contains("LEAD") && !digest.contains("SUBTREE"));
+    assert_eq!(shown.len(), 1);
 }

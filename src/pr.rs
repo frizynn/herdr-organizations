@@ -13,8 +13,9 @@ pub const GH_TIMEOUT: Duration = Duration::from_secs(10);
 const NAME_LIMIT: usize = 80;
 
 /// The `PR:` value of a report's first line, only when it is exactly
-/// `https://github.com/<owner>/<repo>/pull/<number>`. `Err` carries a note for
-/// the inbox item when a `PR:` line is present but not acceptable.
+/// `https://github.com/<owner>/<repo>/pull/<number>`; `PR: none` says there is
+/// none. `Err` carries a note for the inbox item when a `PR:` line is present
+/// but not acceptable.
 pub fn pr_line(report: &str) -> Result<Option<String>, String> {
     let Some(first) = report.lines().next() else {
         return Ok(None);
@@ -23,6 +24,9 @@ pub fn pr_line(report: &str) -> Result<Option<String>, String> {
         return Ok(None);
     };
     let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
     if valid_pr_url(value) {
         Ok(Some(value.to_string()))
     } else {
@@ -542,6 +546,7 @@ mod tests {
             None
         );
         assert_eq!(pr_line("").unwrap(), None);
+        assert_eq!(pr_line("PR: none\nStatus: done").unwrap(), None);
         for bad in [
             "PR: http://github.com/o/r/pull/1",
             "PR: https://github.com/o/r/pull/1/files",

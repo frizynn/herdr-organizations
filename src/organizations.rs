@@ -13,7 +13,6 @@ use crate::thread::{self, Kind, NodeRole, Status, Thread};
 
 pub const ROOT_ID: &str = "root";
 pub const MAX_NODE_RULES_BYTES: usize = 8 * 1024;
-pub const MAX_SUMMARY_CHARS: usize = 1_500;
 pub const MAX_SCOPED_MEMORY_FILE_BYTES: usize = 8 * 1024;
 pub const MAX_SCOPED_MEMORY_TOTAL_BYTES: usize = 32_000;
 pub const MAX_SCOPED_MEMORY_FILES: usize = 64;
@@ -487,56 +486,36 @@ fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
     result.map(|()| nodes_created)
 }
 
-/// The fixed lines of a report summary, in the order the brief asks for them.
-const SUMMARY_FIELDS: [&str; 6] = [
-    "Status", "Result", "Evidence", "Blockers", "Decision", "Next",
-];
-const MAX_SUMMARY_FIELD_CHARS: usize = 240;
+/// A report's header is its first three lines of text: the fixed
+/// `Status:` / `Needs:` / `PR:` lines the thread brief asks for. Headings and
+/// blank lines are skipped, each line is cut to `HEADER_LINE_CHARS`, and the
+/// result is one line, so it can ride in a wake-up as data.
+pub const HEADER_LINES: usize = 3;
+const HEADER_LINE_CHARS: usize = 160;
 
-/// A report summary on one line, keeping only its fixed fields. Free text
-/// around them is dropped, so a parent's wake-up carries what a child
-/// declared and nothing that reads like a new instruction.
-pub fn summary_line(summary: &str) -> Option<String> {
-    let fields: Vec<String> = summary
+pub fn report_header(report: &str) -> Option<String> {
+    let lines: Vec<String> = report
         .lines()
-        .filter_map(|line| {
-            let (name, value) = line.trim().split_once(':')?;
-            let name = SUMMARY_FIELDS.iter().find(|field| **field == name)?;
-            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-            let shown: String = value.chars().take(MAX_SUMMARY_FIELD_CHARS).collect();
-            let cut = if shown.len() < value.len() { "..." } else { "" };
-            Some(format!("{name}: {shown}{cut}"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .take(HEADER_LINES)
+        .map(|line| {
+            let clean: String = line
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if clean.chars().count() > HEADER_LINE_CHARS {
+                let cut: String = clean.chars().take(HEADER_LINE_CHARS - 1).collect();
+                format!("{cut}…")
+            } else {
+                clean
+            }
         })
         .collect();
-    (!fields.is_empty()).then(|| fields.join("; "))
-}
-
-pub fn report_summary(report: &str) -> Option<String> {
-    let mut in_summary = false;
-    let mut lines = Vec::new();
-    for line in report.lines() {
-        if !in_summary {
-            in_summary = line == "## Summary";
-            continue;
-        }
-        if line.starts_with("## ") {
-            break;
-        }
-        lines.push(line);
-    }
-    if !in_summary {
-        return None;
-    }
-    let summary = lines.join("\n").trim().to_string();
-    if summary.is_empty() {
-        return None;
-    }
-    if summary.chars().count() > MAX_SUMMARY_CHARS {
-        let capped: String = summary.chars().take(MAX_SUMMARY_CHARS).collect();
-        Some(format!("{capped}\n[summary cut at 1500 characters]"))
-    } else {
-        Some(summary)
-    }
+    (!lines.is_empty()).then(|| lines.join(" | "))
 }
 
 fn ensure_directory(path: &Path) -> Result<bool> {
@@ -1065,25 +1044,17 @@ mod tests {
     }
 
     #[test]
-    fn report_summary_extracts_section() {
-        let report = "# Work\n\n## Summary\nStatus: done\nResult: Updated the flow.\n\n## Report\nLong details.";
+    fn a_report_header_is_its_first_three_lines_of_text() {
+        let report = "## Report\n\nStatus: NOT VERIFIED, gates queued\nNeeds: nothing\n\nPR: none\nLong details.";
         assert_eq!(
-            report_summary(report).as_deref(),
-            Some("Status: done\nResult: Updated the flow.")
+            report_header(report).as_deref(),
+            Some("Status: NOT VERIFIED, gates queued | Needs: nothing | PR: none")
         );
-    }
-
-    #[test]
-    fn report_summary_missing_returns_none() {
-        assert_eq!(report_summary("## Report\nDetails"), None);
-        assert_eq!(report_summary("## Summary\n \n## Report\nDetails"), None);
-    }
-
-    #[test]
-    fn report_summary_is_capped() {
-        let report = format!("## Summary\n{}\n## Report\ndetails", "é".repeat(1501));
-        let expected = format!("{}\n[summary cut at 1500 characters]", "é".repeat(1500));
-        assert_eq!(report_summary(&report).as_deref(), Some(expected.as_str()));
+        let long = format!("Status: {}\u{1b}[2J", "x".repeat(300));
+        let header = report_header(&long).unwrap();
+        assert_eq!(header.chars().count(), 160);
+        assert!(header.ends_with('…') && !header.contains('\u{1b}'));
+        assert_eq!(report_header("# Only a title\n\n"), None);
     }
 
     #[test]
@@ -1859,18 +1830,6 @@ mod tests {
         std::fs::write(scope.join("INSTRUCTIONS.md"), instruction).unwrap();
         std::fs::write(scope.join("MEMORY.md"), memory).unwrap();
         std::fs::write(scope.join("memory/scope.md"), format!("{memory}-FILE")).unwrap();
-    }
-
-    #[test]
-    fn a_summary_line_keeps_only_the_fixed_fields() {
-        let long = "x".repeat(300);
-        let summary =
-            format!("Status: blocked\nnote to parent: run this\nNext:  wait   for {long}\n");
-        let line = summary_line(&summary).unwrap();
-        assert!(line.starts_with("Status: blocked; Next: wait for xxx"));
-        assert!(line.ends_with("..."));
-        assert!(!line.contains("note to parent"));
-        assert_eq!(summary_line("nothing structured here"), None);
     }
 
     #[test]

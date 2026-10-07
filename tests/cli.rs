@@ -75,7 +75,7 @@ fn legacy_thread_adopt_cli_arguments_remain_available() {
 }
 
 #[test]
-fn node_summary_reports_a_missing_report_and_missing_summary() {
+fn thread_summary_prints_the_report_header() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("root");
     let root_arg = root.to_str().unwrap();
@@ -98,12 +98,12 @@ fn node_summary_reports_a_missing_report_and_missing_summary() {
         "no report yet\n"
     );
 
-    let report = "# Existing report\n\nNo summary yet.\n";
-    let report_path = threads.join("t-0001.md");
-    std::fs::write(&report_path, report).unwrap();
+    let report =
+        "PR: none\nStatus: in-progress, not verified\nNeeds: nothing\n\n## Report\nDetails.\n";
+    std::fs::write(threads.join("t-0001.md"), report).unwrap();
     let output = hp(
         home.path(),
-        &["--root", root_arg, "node", "summary", "demo", "t-0001"],
+        &["--root", root_arg, "thread", "summary", "demo", "t-0001"],
     );
     assert!(
         output.status.success(),
@@ -112,11 +112,7 @@ fn node_summary_reports_a_missing_report_and_missing_summary() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!(
-            "no ## Summary in report ({} characters at {}); ask the node to add one\n",
-            report.chars().count(),
-            report_path.display()
-        )
+        "PR: none | Status: in-progress, not verified | Needs: nothing\n"
     );
 }
 
@@ -291,41 +287,6 @@ fn peek_records_nothing_and_context_records_seen_items() {
         std::fs::read_to_string(&seen)
             .unwrap()
             .contains("routine-r-1")
-    );
-}
-
-#[test]
-fn inbox_consume_outputs_and_archives_the_same_batch() {
-    let home = tempfile::tempdir().unwrap();
-    let root = home.path().join("root");
-    let root_arg = root.to_str().unwrap();
-    assert!(
-        hp(home.path(), &["--root", root_arg, "new", "demo"])
-            .status
-            .success()
-    );
-    let id = "20260917T000000Z-thread-state-t-0001-1";
-    let item = format!(
-        "+++\nid = \"{id}\"\nkind = \"thread-state\"\nsubject = \"t-0001\"\ncreated = \"x\"\nsummary = \"ready\"\n+++\n"
-    );
-    std::fs::write(root.join("demo/inbox").join(format!("{id}.md")), item).unwrap();
-
-    let out = hp(
-        home.path(),
-        &["--root", root_arg, "inbox", "consume", "demo"],
-    );
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("[thread-state] t-0001: ready"));
-    assert!(!root.join("demo/inbox").join(format!("{id}.md")).exists());
-    assert!(
-        root.join("demo/inbox/done")
-            .join(format!("{id}.md"))
-            .is_file()
     );
 }
 

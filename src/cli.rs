@@ -1,5 +1,4 @@
 use std::io::IsTerminal as _;
-use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -319,8 +318,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum InboxCommand {
-    /// Print and archive one bounded batch of new events
-    Consume { slug: String },
     /// Move handled items to inbox/done/
     Done {
         slug: String,
@@ -944,14 +941,6 @@ pub fn run() -> Result<()> {
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),
         Command::Unfocus { session } => overview::unfocus(&ctx, &session.into()),
         Command::Inbox { command } => match command {
-            InboxCommand::Consume { slug } => {
-                let project = Project::load(&ctx.root, &slug)?;
-                let stdout = std::io::stdout();
-                let mut out = stdout.lock();
-                inbox::consume(&project, &mut out)?;
-                out.flush()?;
-                Ok(())
-            }
             InboxCommand::Done { slug, ids, all } => {
                 let project = Project::load(&ctx.root, &slug)?;
                 let moved = inbox::done(&project, &ids, all)?;
@@ -1157,14 +1146,9 @@ pub fn run() -> Result<()> {
                         return Ok(());
                     }
                 };
-                if let Some(summary) = organizations::report_summary(&report) {
-                    println!("{summary}");
-                } else {
-                    println!(
-                        "no ## Summary in report ({} characters at {}); ask the node to add one",
-                        report.chars().count(),
-                        report_path.display()
-                    );
+                match organizations::report_header(&report) {
+                    Some(header) => println!("{header}"),
+                    None => println!("the report at {} is empty", report_path.display()),
                 }
                 Ok(())
             }

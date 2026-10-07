@@ -153,10 +153,21 @@ pub struct Settings {
     pub max_parallel_threads: u32,
     pub auto_resolve_days: u32,
     pub nudge: bool,
+    /// Inbox events that never wake a coordinator; they go straight to
+    /// `inbox/done/` as history. See `inbox::class` for the names.
+    pub quiet_events: Vec<String>,
+    /// A wake-up waits this long after its oldest event, so events that
+    /// arrive close together reach the coordinator as one message.
+    pub wake_batch_secs: u64,
     /// Silences every notification for the project except errors.
     pub mute: bool,
     pub repos: Vec<Repo>,
 }
+
+/// Thread chatter that needs no coordinator turn: the tree and the popup
+/// still show it.
+pub const DEFAULT_QUIET_EVENTS: [&str; 5] =
+    ["idle", "landing", "resolved", "pr-opened", "pr-updated"];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -171,6 +182,8 @@ impl Default for Settings {
             // has been idle for a minute and whose input box is empty, because on herdr 0.9.1 a prompt
             // merges with half-typed text (docs/herdr-notes.md, stage 2).
             nudge: true,
+            quiet_events: DEFAULT_QUIET_EVENTS.map(String::from).to_vec(),
+            wake_batch_secs: 90,
             mute: false,
             repos: Vec::new(),
         }

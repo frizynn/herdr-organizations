@@ -1160,13 +1160,15 @@ fn tick_cheap(ctx: &Ctx, project: &Project, sessions: &mut Sessions) -> Result<O
     let recorded_panes = pass.recorded_panes + coordinator_recorded;
     let missing_panes = pass.missing_panes + coordinator_missing;
 
-    // Nudge (or notify) about inbox items `context` has not shown yet.
+    // Wake coordinators about inbox items `context` has not shown yet.
     if let Ok((settings, _)) = project.read_project_md() {
         let mut state = steps::load_state(project);
         let before = state.clone();
         let now = jiff::Timestamp::now();
         let target = coordinator::nudge_target(&coordinators, now);
-        if let Err(error) = steps::nudge(project, &mut state, &settings, &herdr, target, now) {
+        if let Err(error) =
+            steps::nudge(project, &mut state, &settings, &herdr, target, &agents, now)
+        {
             first_error = first_error.or(Some(error.context("nudge")));
         }
         if state != before {
@@ -1350,12 +1352,6 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
             &notifier,
         )
         .err(),
-    );
-    steps::queue_parent_updates(project, &mut state, &transitions);
-    errors.extend(
-        steps::nudge_parent_coordinators(ctx, project, &mut state, &herdr, &seen.agents)
-            .err()
-            .map(|error| error.context("parent nudge")),
     );
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     errors.extend(steps::resolve_merged(ctx, project, &mut state, now));

@@ -15,19 +15,17 @@ When you finish, and whenever you stop to wait for the user, write your report t
 
 The report format:
 
-- An optional first line `PR: <url>` when you opened a pull request, with the full `https://github.com/<owner>/<repo>/pull/<number>` URL.
-- A `## Summary` section of at most 1500 characters, with exactly these lines:
+- Three header lines, first in the file and in this order:
   ```text
-  Status: done | blocked | needs-decision | in-progress
-  Result: one or two sentences
-  Evidence: commits, PR URLs, test commands or file paths
-  Blockers: none, or what blocks
-  Decision: none, or the question for the parent
-  Next: the next step
+  PR: the full https://github.com/<owner>/<repo>/pull/<number> URL, or none
+  Status: done | blocked | needs-decision | in-progress, and how you know (verified, tested, or not yet)
+  Needs: nothing, or the one decision or action you need and from whom
   ```
-  The parent reads only this section. Put the full detail in `## Report`.
+  Your coordinator receives these three lines as they are whenever your report changes, so keep each under 160 characters and put the detail below.
 - A `## Report` section: what you did, what you found, what is left, and anything the user must decide.
 - A `## Next` section, required: one recommended action per line, imperative, at most 100 characters (`Merge the PR`, `Fix the failing lint check`, `Confirm that X is wanted`, `Remove the worktree and branch`). The user presses a key to send a line back to you, and you then do it yourself with your own tools. Include the cleanup you propose once the work has landed. An empty list means there is nothing to do.
 - An optional `## Remember` section: short, durable lessons for future threads.
 
 Rewrite the whole report each time so it always describes the current state.
+
+Your coordinator is woken for you when your report changes, when you need someone, and when your pull request merges or its checks fail. Do not prompt it, type into its pane or run `herdr agent prompt` to reach it: write the report and stop.
