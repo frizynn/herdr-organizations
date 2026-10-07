@@ -9,13 +9,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::style::{Attribute, Print, SetAttribute};
 use crossterm::{cursor, execute, queue, terminal};
 
+use crate::keymap::{Action, Context, Key, Keymap};
 use crate::paths::Ctx;
 use crate::profiles::Role;
 use crate::project::{self, Project, Status};
+use crate::theme::Theme;
 use crate::thread::{self, Group, Thread};
 
 const REFRESH: Duration = Duration::from_secs(2);
@@ -40,29 +42,15 @@ const SECTIONS: [Section; 6] = [
 ];
 
 impl Section {
-    fn name(self) -> &'static str {
+    /// The tab label.
+    fn title(self) -> &'static str {
         match self {
-            Section::Threads => "threads",
-            Section::Tasks => "tasks",
-            Section::Inbox => "inbox",
-            Section::Routines => "routines",
-            Section::Settings => "settings",
-            Section::Memory => "memory",
-        }
-    }
-
-    fn keys(self) -> &'static str {
-        match self {
-            Section::Threads => {
-                "↵ jump  1-9 next  s stop  r restart  a ack  x resolve  o PR  i detail  c coordinator  S sweep"
-            }
-            Section::Tasks => "↵ jump  i notes  d delegate  m done  D drop",
-            Section::Inbox => "↵ detail  a done",
-            Section::Routines => "↵ toggle  i prompt",
-            Section::Settings => {
-                "↵ edit  n new profile  d delete profile  Y yolo  p pause/resume  A archive  X delete"
-            }
-            Section::Memory => "↵ read",
+            Section::Threads => "Threads",
+            Section::Tasks => "Tasks",
+            Section::Inbox => "Inbox",
+            Section::Routines => "Routines",
+            Section::Settings => "Settings",
+            Section::Memory => "Memory",
         }
     }
 }
@@ -94,8 +82,18 @@ pub struct Row {
     /// A group or project heading: not selectable.
     pub header: bool,
     pub text: String,
-    pub color: Option<Color>,
+    pub tone: Tone,
     pub kind: RowKind,
+}
+
+/// What a row's text means, painted from the theme. Thread rows are drawn
+/// from their record instead (glyph, state word, title, PR).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tone {
+    Plain,
+    Muted,
+    Warn,
+    Error,
 }
 
 #[derive(Debug, Clone)]
@@ -285,19 +283,34 @@ impl Picker {
         }
     }
 
-    pub fn key(&mut self, key: KeyEvent) -> PickerOutcome {
+    /// `action` is what the key means in the picker context; while a filter
+    /// is being typed, letters are text.
+    pub fn key(&mut self, key: KeyEvent, action: Option<Action>) -> PickerOutcome {
         let filtering = self.filter.is_some();
-        match key.code {
-            KeyCode::Up => self.step(false),
-            KeyCode::Down => self.step(true),
-            KeyCode::Char('k') if !filtering => self.step(false),
-            KeyCode::Char('j') if !filtering => self.step(true),
-            KeyCode::Enter => {
+        let typed = Key::from_event(&key).char();
+        if filtering && key.code == KeyCode::Backspace {
+            if let Some(filter) = &mut self.filter {
+                filter.pop();
+            }
+            self.selected = 0;
+            return PickerOutcome::Stay;
+        }
+        if filtering && let Some(c) = typed {
+            if let Some(filter) = &mut self.filter {
+                filter.push(c);
+            }
+            self.selected = 0;
+            return PickerOutcome::Stay;
+        }
+        match action {
+            Some(Action::Up) => self.step(false),
+            Some(Action::Down) => self.step(true),
+            Some(Action::Submit) => {
                 if let Some(row) = self.visible().get(self.selected) {
                     return PickerOutcome::Pick(row.slug.clone());
                 }
             }
-            KeyCode::Esc => {
+            Some(Action::Cancel) => {
                 // A typed filter is cleared first, keeping the highlighted row.
                 if self.filter.as_ref().is_some_and(|f| !f.is_empty()) {
                     let highlighted = self.visible().get(self.selected).map(|r| r.slug.clone());
@@ -309,24 +322,7 @@ impl Picker {
                     return PickerOutcome::Close;
                 }
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return PickerOutcome::Close;
-            }
-            KeyCode::Char('/') if !filtering => {
-                self.filter = Some(String::new());
-            }
-            KeyCode::Backspace if filtering => {
-                if let Some(filter) = &mut self.filter {
-                    filter.pop();
-                }
-                self.selected = 0;
-            }
-            KeyCode::Char(c) if filtering && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(filter) = &mut self.filter {
-                    filter.push(c);
-                }
-                self.selected = 0;
-            }
+            Some(Action::Filter) => self.filter = Some(String::new()),
             _ => {}
         }
         PickerOutcome::Stay
@@ -355,16 +351,6 @@ pub fn thread_rows(root: &Path, scope: Option<&str>) -> Vec<ThreadRow> {
         }
     }
     rows
-}
-
-fn group_color(group: Group) -> Option<Color> {
-    match group {
-        Group::WaitingOnYou => Some(Color::Red),
-        Group::ReadyForReview => Some(Color::Yellow),
-        Group::Landing => Some(Color::Green),
-        Group::Resolved => Some(Color::DarkGrey),
-        _ => None,
-    }
 }
 
 /// A task's notes as a detail screen.
@@ -399,7 +385,7 @@ fn header(text: impl Into<String>) -> Row {
     Row {
         header: true,
         text: text.into(),
-        color: None,
+        tone: Tone::Plain,
         kind: RowKind::None,
     }
 }
@@ -473,7 +459,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                         rows.push(Row {
                             header: false,
                             text: format!("  {}", thread_line(r, false)),
-                            color: group_color(r.group),
+                            tone: Tone::Plain,
                             kind: RowKind::Thread(Box::new(r.clone())),
                         });
                     }
@@ -490,7 +476,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                         rows.push(Row {
                             header: false,
                             text: format!("  {}", thread_line(r, false)),
-                            color: group_color(r.group),
+                            tone: Tone::Plain,
                             kind: RowKind::Thread(Box::new(r.clone())),
                         });
                     }
@@ -531,7 +517,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                     rows.push(Row {
                         header: false,
                         text: format!("  {}{owner}{notes}", task.title),
-                        color: None,
+                        tone: Tone::Plain,
                         kind: RowKind::Task(task),
                     });
                 }
@@ -555,7 +541,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                             "{prefix}{} · {} · {}",
                             item.kind, item.subject, item.summary
                         ),
-                        color: None,
+                        tone: Tone::Plain,
                         kind: RowKind::Inbox {
                             slug: project.slug.clone(),
                             id: item.id,
@@ -596,11 +582,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                             r.name,
                             if r.enabled { "enabled" } else { "disabled" }
                         ),
-                        color: if r.enabled {
-                            None
-                        } else {
-                            Some(Color::DarkGrey)
-                        },
+                        tone: if r.enabled { Tone::Plain } else { Tone::Muted },
                         kind: RowKind::Routine {
                             slug: project.slug.clone(),
                             name: r.name.clone(),
@@ -612,7 +594,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                     rows.push(Row {
                         header: false,
                         text: format!("{} · config error: {}", b.file, b.error),
-                        color: Some(Color::Red),
+                        tone: Tone::Error,
                         kind: RowKind::None,
                     });
                 }
@@ -635,7 +617,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                             project::display_name(&settings.name, &project.slug),
                             project.status()
                         ),
-                        color: None,
+                        tone: Tone::Plain,
                         kind: RowKind::Project {
                             slug: project.slug.clone(),
                         },
@@ -688,7 +670,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                         rows.push(Row {
                             header: false,
                             text: format!("  {label:<22} {value}"),
-                            color: None,
+                            tone: Tone::Plain,
                             kind: RowKind::Setting {
                                 slug: slug.to_string(),
                                 key: key.to_string(),
@@ -703,7 +685,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                             rows.push(Row {
                                 header: false,
                                 text: format!("  {key:<22} {value}"),
-                                color: None,
+                                tone: Tone::Plain,
                                 kind: RowKind::Setting {
                                     slug: slug.to_string(),
                                     key: key.to_string(),
@@ -724,7 +706,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                 rows.push(Row {
                     header: false,
                     text: "  MEMORY.md".into(),
-                    color: None,
+                    tone: Tone::Plain,
                     kind: RowKind::Memory {
                         path: project.dir().join("MEMORY.md"),
                     },
@@ -746,7 +728,7 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                     rows.push(Row {
                         header: false,
                         text: format!("  memory/{name}"),
-                        color: None,
+                        tone: Tone::Plain,
                         kind: RowKind::Memory { path },
                     });
                 }
@@ -785,7 +767,7 @@ pub fn safety_rows(ctx: &Ctx, scope: Option<&str>) -> Vec<Row> {
                 rows.push(Row {
                     header: false,
                     text: format!("  {label:<22} {}  · {}", r.text(), r.source),
-                    color: yolo_on.then_some(Color::Yellow),
+                    tone: if yolo_on { Tone::Warn } else { Tone::Plain },
                     kind: RowKind::Safety {
                         slug: scope.map(str::to_string),
                         key: r.key.to_string(),
@@ -797,7 +779,7 @@ pub fn safety_rows(ctx: &Ctx, scope: Option<&str>) -> Vec<Row> {
         Err(error) => rows.push(Row {
             header: false,
             text: format!("  config error: {error:#}"),
-            color: Some(Color::Red),
+            tone: Tone::Error,
             kind: RowKind::None,
         }),
     }
@@ -813,7 +795,7 @@ fn profile_rows(ctx: &Ctx, rows: &mut Vec<Row>) {
             rows.push(Row {
                 header: false,
                 text: format!("config error: {error:#}"),
-                color: Some(Color::Red),
+                tone: Tone::Error,
                 kind: RowKind::None,
             });
             return;
@@ -832,7 +814,7 @@ fn profile_rows(ctx: &Ctx, rows: &mut Vec<Row>) {
         rows.push(Row {
             header: false,
             text,
-            color: None,
+            tone: Tone::Plain,
             kind: RowKind::Profile {
                 name: p.name.clone(),
                 builtin: p.builtin,
@@ -865,7 +847,7 @@ fn profile_rows(ctx: &Ctx, rows: &mut Vec<Row>) {
         rows.push(Row {
             header: false,
             text: format!("  {label:<36} {value}"),
-            color: None,
+            tone: Tone::Plain,
             kind: RowKind::Setting {
                 slug: String::new(),
                 key: key.into(),
@@ -937,6 +919,23 @@ pub fn summary(root: &Path) -> String {
     )
 }
 
+/// The rows whose text holds `filter` (any case), each under its heading;
+/// a heading with no match left goes too.
+fn filter_rows(rows: Vec<Row>, filter: &str) -> Vec<Row> {
+    let filter = filter.to_lowercase();
+    let mut out: Vec<Row> = Vec::new();
+    let mut heading: Option<Row> = None;
+    for row in rows {
+        if row.header {
+            heading = Some(row);
+        } else if row.text.to_lowercase().contains(&filter) {
+            out.extend(heading.take());
+            out.push(row);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------- the loop
 
 enum Mode {
@@ -980,8 +979,12 @@ enum Mode {
         selected: usize,
         editing: bool,
     },
-    /// The project picker (`P`, or `/` straight into its filter).
+    /// The project picker (`P`).
     Projects(Picker),
+    /// Every key of the current context and of `global`, from the keymap.
+    Help {
+        scroll: usize,
+    },
 }
 
 pub struct Popup<'a> {
@@ -996,6 +999,12 @@ pub struct Popup<'a> {
     quit: bool,
     /// A pane to focus once the popup has closed: (socket, machine, pane).
     jump: Option<(String, String, String)>,
+    keymap: Keymap,
+    theme: Theme,
+    /// Rows of the section are those whose text holds this (any case).
+    filter: String,
+    /// The filter is being typed.
+    filtering: bool,
 }
 
 impl<'a> Popup<'a> {
@@ -1011,9 +1020,47 @@ impl<'a> Popup<'a> {
             workspace,
             quit: false,
             jump: None,
+            keymap: Keymap::load(&ctx.config_dir),
+            theme: Theme::load(&ctx.config_dir, ctx.env),
+            filter: String::new(),
+            filtering: false,
         };
+        let errors: Vec<String> = popup
+            .keymap
+            .errors
+            .iter()
+            .chain(&popup.theme.errors)
+            .cloned()
+            .collect();
+        popup.message = errors.join("; ");
         popup.reload();
         popup
+    }
+
+    /// The keymap context of the current section's list.
+    fn help_context(&self) -> Context {
+        match SECTIONS[self.section] {
+            Section::Threads => Context::Threads,
+            Section::Tasks => Context::Tasks,
+            Section::Inbox => Context::Inbox,
+            Section::Routines => Context::Routines,
+            Section::Settings => Context::Settings,
+            Section::Memory => Context::Memory,
+        }
+    }
+
+    /// Which keymap context the current mode answers in.
+    fn context(&self) -> Context {
+        match &self.mode {
+            Mode::List if self.filtering => Context::Input,
+            Mode::List => self.help_context(),
+            Mode::Detail { .. } => Context::Detail,
+            Mode::Confirm { .. } => Context::Confirm,
+            Mode::Edit { .. } | Mode::Form { .. } => Context::Input,
+            Mode::Pick { .. } | Mode::Toggle { .. } => Context::Choice,
+            Mode::Projects(_) => Context::Picker,
+            Mode::Help { .. } => Context::Help,
+        }
     }
 
     fn reload(&mut self) {
@@ -1021,6 +1068,9 @@ impl<'a> Popup<'a> {
         if SECTIONS[self.section] == Section::Settings {
             self.rows
                 .extend(safety_rows(self.ctx, self.scope.as_deref()));
+        }
+        if !self.filter.is_empty() {
+            self.rows = filter_rows(std::mem::take(&mut self.rows), &self.filter);
         }
         if self.rows.get(self.selected).is_none_or(|r| r.header) {
             self.selected = self
@@ -1093,21 +1143,31 @@ impl<'a> Popup<'a> {
     }
 
     fn key(&mut self, key: KeyEvent) {
+        let action_key = self.keymap.action(self.context(), &key);
+        let typed = Key::from_event(&key).char();
         let mode = std::mem::replace(&mut self.mode, Mode::List);
         self.mode = match mode {
             Mode::List => {
-                self.list_key(key);
+                self.list_key(key, action_key, typed);
                 return;
             }
+            Mode::Help { scroll } => match action_key {
+                Some(Action::Back) => Mode::List,
+                Some(Action::Down) => Mode::Help { scroll: scroll + 1 },
+                Some(Action::Up) => Mode::Help {
+                    scroll: scroll.saturating_sub(1),
+                },
+                _ => Mode::Help { scroll },
+            },
             Mode::Detail {
                 title,
                 lines,
                 files,
                 mut selected,
                 mut scroll,
-            } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => Mode::List,
-                KeyCode::Down | KeyCode::Char('j') => {
+            } => match action_key {
+                Some(Action::Back) => Mode::List,
+                Some(Action::Down) => {
                     if !files.is_empty() {
                         selected = (selected + 1).min(files.len() - 1);
                     } else {
@@ -1121,7 +1181,7 @@ impl<'a> Popup<'a> {
                         scroll,
                     }
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                Some(Action::Up) => {
                     if !files.is_empty() {
                         selected = selected.saturating_sub(1);
                     } else {
@@ -1135,21 +1195,21 @@ impl<'a> Popup<'a> {
                         scroll,
                     }
                 }
-                KeyCode::PageDown => Mode::Detail {
+                Some(Action::PageDown) => Mode::Detail {
                     title,
                     lines,
                     files,
                     selected,
                     scroll: scroll + 20,
                 },
-                KeyCode::PageUp => Mode::Detail {
+                Some(Action::PageUp) => Mode::Detail {
                     title,
                     lines,
                     files,
                     selected,
                     scroll: scroll.saturating_sub(20),
                 },
-                KeyCode::Enter if !files.is_empty() => {
+                Some(Action::Open) if !files.is_empty() => {
                     let mut args = vec![
                         "open-file".to_string(),
                         files[selected].to_string_lossy().into_owned(),
@@ -1168,7 +1228,7 @@ impl<'a> Popup<'a> {
                         scroll,
                     }
                 }
-                KeyCode::Char('y') if !files.is_empty() => {
+                Some(Action::CopyPath) if !files.is_empty() => {
                     self.message = copy(&files[selected].to_string_lossy());
                     Mode::Detail {
                         title,
@@ -1190,12 +1250,12 @@ impl<'a> Popup<'a> {
                 question,
                 action,
                 lines,
-            } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+            } => match action_key {
+                Some(Action::Yes) => {
                     self.run(&action, None);
                     Mode::List
                 }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter => {
+                Some(Action::No) => {
                     self.message = "cancelled".into();
                     Mode::List
                 }
@@ -1209,18 +1269,18 @@ impl<'a> Popup<'a> {
                 label,
                 mut buffer,
                 action,
-            } => match key.code {
-                KeyCode::Esc => {
+            } => match action_key {
+                Some(Action::Cancel) => {
                     self.message = "cancelled".into();
                     Mode::List
                 }
-                KeyCode::Enter => {
+                Some(Action::Submit) => {
                     let mut args = action.clone();
                     args.push(buffer.clone());
                     self.run(&args, None);
                     Mode::List
                 }
-                KeyCode::Backspace => {
+                Some(Action::Erase) => {
                     buffer.pop();
                     Mode::Edit {
                         label,
@@ -1228,8 +1288,8 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    buffer.push(c);
+                None if typed.is_some() => {
+                    buffer.extend(typed);
                     Mode::Edit {
                         label,
                         buffer,
@@ -1247,12 +1307,12 @@ impl<'a> Popup<'a> {
                 options,
                 mut selected,
                 action,
-            } => match key.code {
-                KeyCode::Esc => {
+            } => match action_key {
+                Some(Action::Cancel) => {
                     self.message = "cancelled".into();
                     Mode::List
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                Some(Action::Up) => {
                     selected = selected.saturating_sub(1);
                     Mode::Pick {
                         label,
@@ -1261,7 +1321,7 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                Some(Action::Down) => {
                     selected = (selected + 1).min(options.len().saturating_sub(1));
                     Mode::Pick {
                         label,
@@ -1270,7 +1330,7 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Enter => {
+                Some(Action::Submit) => {
                     let args: Vec<String> = action
                         .iter()
                         .map(|a| {
@@ -1296,12 +1356,12 @@ impl<'a> Popup<'a> {
                 mut options,
                 mut selected,
                 action,
-            } => match key.code {
-                KeyCode::Esc => {
+            } => match action_key {
+                Some(Action::Cancel) => {
                     self.message = "cancelled".into();
                     Mode::List
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                Some(Action::Up) => {
                     selected = selected.saturating_sub(1);
                     Mode::Toggle {
                         label,
@@ -1310,7 +1370,7 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                Some(Action::Down) => {
                     selected = (selected + 1).min(options.len().saturating_sub(1));
                     Mode::Toggle {
                         label,
@@ -1319,7 +1379,7 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Char(' ') => {
+                Some(Action::Check) => {
                     options[selected].1 = !options[selected].1;
                     if selected == 0 && options[0].1 {
                         options.iter_mut().skip(1).for_each(|o| o.1 = false);
@@ -1333,7 +1393,7 @@ impl<'a> Popup<'a> {
                         action,
                     }
                 }
-                KeyCode::Enter => {
+                Some(Action::Submit) => {
                     let mut args = action.clone();
                     if options[0].1 {
                         args.push("--all".into());
@@ -1365,12 +1425,12 @@ impl<'a> Popup<'a> {
                 mut fields,
                 mut selected,
                 editing,
-            } => match key.code {
-                KeyCode::Esc => {
+            } => match action_key {
+                Some(Action::Cancel) => {
                     self.message = "cancelled".into();
                     Mode::List
                 }
-                KeyCode::Up | KeyCode::BackTab => {
+                Some(Action::PrevField) => {
                     selected = selected.saturating_sub(1);
                     Mode::Form {
                         title,
@@ -1379,7 +1439,7 @@ impl<'a> Popup<'a> {
                         editing,
                     }
                 }
-                KeyCode::Down | KeyCode::Tab => {
+                Some(Action::NextField) => {
                     selected = (selected + 1).min(fields.len() - 1);
                     Mode::Form {
                         title,
@@ -1388,7 +1448,9 @@ impl<'a> Popup<'a> {
                         editing,
                     }
                 }
-                KeyCode::Left | KeyCode::Right if !fields[selected].options.is_empty() => {
+                Some(choice @ (Action::PrevChoice | Action::NextChoice))
+                    if !fields[selected].options.is_empty() =>
+                {
                     let field = &mut fields[selected];
                     let n = field.options.len();
                     let at = field
@@ -1396,7 +1458,7 @@ impl<'a> Popup<'a> {
                         .iter()
                         .position(|o| *o == field.value)
                         .unwrap_or(0);
-                    let next = if key.code == KeyCode::Right {
+                    let next = if choice == Action::NextChoice {
                         (at + 1) % n
                     } else {
                         (at + n - 1) % n
@@ -1416,7 +1478,7 @@ impl<'a> Popup<'a> {
                         editing,
                     }
                 }
-                KeyCode::Backspace
+                Some(Action::Erase)
                     if fields[selected].options.is_empty() && !(editing && selected == 0) =>
                 {
                     fields[selected].value.pop();
@@ -1427,12 +1489,11 @@ impl<'a> Popup<'a> {
                         editing,
                     }
                 }
-                KeyCode::Char(c)
-                    if fields[selected].options.is_empty()
-                        && !(editing && selected == 0)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                None if typed.is_some()
+                    && fields[selected].options.is_empty()
+                    && !(editing && selected == 0) =>
                 {
-                    fields[selected].value.push(c);
+                    fields[selected].value.extend(typed);
                     Mode::Form {
                         title,
                         fields,
@@ -1440,7 +1501,7 @@ impl<'a> Popup<'a> {
                         editing,
                     }
                 }
-                KeyCode::Enter => {
+                Some(Action::Submit) => {
                     let value = |i: usize| fields[i].value.trim().to_string();
                     let mut args = vec![
                         "profile".to_string(),
@@ -1484,7 +1545,7 @@ impl<'a> Popup<'a> {
                     editing,
                 },
             },
-            Mode::Projects(mut picker) => match picker.key(key) {
+            Mode::Projects(mut picker) => match picker.key(key, action_key) {
                 PickerOutcome::Stay => Mode::Projects(picker),
                 PickerOutcome::Close => Mode::List,
                 PickerOutcome::Pick(scope) => {
@@ -1668,39 +1729,74 @@ impl<'a> Popup<'a> {
         }
     }
 
-    fn list_key(&mut self, key: KeyEvent) {
+    fn list_key(&mut self, key: KeyEvent, act: Option<Action>, typed: Option<char>) {
         self.message.clear();
+        if self.filtering {
+            // Typing a filter: the input keys edit it, the rest is text.
+            match self.keymap.action(Context::Input, &key) {
+                Some(Action::Cancel) => {
+                    self.filter.clear();
+                    self.filtering = false;
+                }
+                Some(Action::Submit) => self.filtering = false,
+                Some(Action::Erase) => {
+                    self.filter.pop();
+                }
+                _ => self.filter.extend(typed),
+            }
+            self.selected = 0;
+            self.reload();
+            return;
+        }
+        let Some(act) = act else {
+            return;
+        };
         let section = SECTIONS[self.section];
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Tab | KeyCode::Right => {
+        match act {
+            Action::Quit if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.reload();
+            }
+            Action::Quit => self.quit = true,
+            Action::Help => self.mode = Mode::Help { scroll: 0 },
+            Action::Filter => self.filtering = true,
+            Action::Top => {
+                self.selected = 0;
+                self.move_by(0);
+            }
+            Action::Bottom => {
+                self.selected = self.rows.len().saturating_sub(1);
+                self.move_by(0);
+            }
+            Action::PageDown => self.move_by(10),
+            Action::PageUp => self.move_by(-10),
+            Action::NextSection => {
                 self.section = (self.section + 1) % SECTIONS.len();
                 self.selected = 0;
                 self.reload();
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            Action::PrevSection => {
                 self.section = (self.section + SECTIONS.len() - 1) % SECTIONS.len();
                 self.selected = 0;
                 self.reload();
             }
-            KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
-            KeyCode::Char(c @ ('P' | '/')) => {
+            Action::Down => self.move_by(1),
+            Action::Up => self.move_by(-1),
+            Action::SwitchProject => {
                 self.mode = Mode::Projects(Picker::new(
                     picker_rows(&self.ctx.root),
                     self.scope.as_deref(),
-                    c == '/',
+                    false,
                 ))
             }
             _ => match section {
-                Section::Threads => self.thread_key(key),
-                Section::Tasks => self.task_key(key),
-                Section::Inbox => self.inbox_key(key),
-                Section::Routines => self.routine_key(key),
-                Section::Settings => self.settings_key(key),
+                Section::Threads => self.thread_key(act, typed),
+                Section::Tasks => self.task_key(act),
+                Section::Inbox => self.inbox_key(act),
+                Section::Routines => self.routine_key(act),
+                Section::Settings => self.settings_key(act),
                 Section::Memory => {
-                    if key.code == KeyCode::Enter
+                    if act == Action::Detail
                         && let Some(RowKind::Memory { path }) =
                             self.current().map(|r| r.kind.clone())
                     {
@@ -1718,7 +1814,7 @@ impl<'a> Popup<'a> {
         }
     }
 
-    fn thread_key(&mut self, key: KeyEvent) {
+    fn thread_key(&mut self, act: Action, typed: Option<char>) {
         let slug_for_coordinator =
             self.scope
                 .clone()
@@ -1726,7 +1822,7 @@ impl<'a> Popup<'a> {
                     Some(RowKind::Thread(r)) => Some(r.slug.clone()),
                     _ => None,
                 });
-        if key.code == KeyCode::Char('c') {
+        if act == Action::Coordinator {
             let Some(slug) = slug_for_coordinator else {
                 self.message = "select a thread of the project, or press P to pick one".into();
                 return;
@@ -1759,7 +1855,7 @@ impl<'a> Popup<'a> {
             );
             return;
         }
-        if key.code == KeyCode::Char('S') {
+        if act == Action::Sweep {
             let Some(slug) = slug_for_coordinator else {
                 self.message = "press P to pick a project first".into();
                 return;
@@ -1788,8 +1884,8 @@ impl<'a> Popup<'a> {
             return;
         };
         let t = &row.thread;
-        match key.code {
-            KeyCode::Enter => {
+        match act {
+            Action::Jump => {
                 if t.status == thread::Status::Resolved
                     || t.pane_id.is_empty()
                     || t.state_line.contains("pane closed")
@@ -1800,9 +1896,10 @@ impl<'a> Popup<'a> {
                     self.quit = true;
                 }
             }
-            KeyCode::Char('i') => self.mode = detail(&self.ctx.root, &row),
-            KeyCode::Char(c @ '1'..='9') => {
-                let n = c.to_digit(10).unwrap_or(0) as usize;
+            Action::Detail => self.mode = detail(&self.ctx.root, &row),
+            Action::ForwardNext => {
+                // The digit typed is the line; any other key sends line 1.
+                let n = typed.and_then(|c| c.to_digit(10)).unwrap_or(1) as usize;
                 if n > row.next.len() {
                     self.message = if row.next.is_empty() {
                         format!("{} has no Next list", t.id)
@@ -1815,13 +1912,13 @@ impl<'a> Popup<'a> {
                     self.run(&args, None);
                 }
             }
-            KeyCode::Char('s') => {
+            Action::Stop => {
                 self.run(&Self::thread_args(&row, "stop"), None);
             }
-            KeyCode::Char('a') => {
+            Action::Ack => {
                 self.run(&Self::thread_args(&row, "ack"), None);
             }
-            KeyCode::Char('r') => {
+            Action::Restart => {
                 let mut action = Self::thread_args(&row, "restart");
                 action.extend(["--profile".into(), "{}".into()]);
                 let current = if t.profile.is_empty() {
@@ -1832,12 +1929,12 @@ impl<'a> Popup<'a> {
                 self.mode = self.profile_picker(
                     &format!("Restart {} with", t.id),
                     &row.slug,
-                    Role::Thread,
+                    Role::for_node(t.role),
                     current,
                     action,
                 );
             }
-            KeyCode::Char('x') => {
+            Action::Resolve => {
                 self.mode = Mode::Confirm {
                     question: format!(
                         "Resolve {} \"{}\" and clean up its worktree, panes and merged branch? y/N",
@@ -1847,7 +1944,7 @@ impl<'a> Popup<'a> {
                     lines: Vec::new(),
                 };
             }
-            KeyCode::Char('o') => {
+            Action::OpenPr => {
                 if t.pr.is_empty() {
                     self.message = format!("{} has no pull request", t.id);
                 } else {
@@ -1871,7 +1968,7 @@ impl<'a> Popup<'a> {
         );
     }
 
-    fn task_key(&mut self, key: KeyEvent) {
+    fn task_key(&mut self, act: Action) {
         let Some(RowKind::Task(task)) = self.current().map(|r| r.kind.clone()) else {
             return;
         };
@@ -1881,8 +1978,8 @@ impl<'a> Popup<'a> {
                 task.title
             )
         };
-        match key.code {
-            KeyCode::Enter => match &task.thread {
+        match act {
+            Action::Jump => match &task.thread {
                 Some(id) => {
                     if let Some(row) = thread_rows(&self.ctx.root, Some(&task.slug))
                         .into_iter()
@@ -1903,24 +2000,27 @@ impl<'a> Popup<'a> {
                     }
                 }
                 None if !task.description.trim().is_empty() => self.mode = task_detail(&task),
-                None => self.message = "this task has no thread yet; d delegates it".into(),
+                None => {
+                    self.message = format!(
+                        "this task has no thread yet; {} delegates it",
+                        self.keymap.key_for(Context::Tasks, Action::Delegate)
+                    )
+                }
             },
-            KeyCode::Char('i') => self.mode = task_detail(&task),
-            KeyCode::Char('d') => self.coordinator_says(&task.slug, sentence("Please delegate")),
-            KeyCode::Char('m') => {
-                self.coordinator_says(&task.slug, sentence("Please mark as done"))
-            }
-            KeyCode::Char('D') => self.coordinator_says(&task.slug, sentence("Please drop")),
+            Action::Detail => self.mode = task_detail(&task),
+            Action::Delegate => self.coordinator_says(&task.slug, sentence("Please delegate")),
+            Action::TaskDone => self.coordinator_says(&task.slug, sentence("Please mark as done")),
+            Action::TaskDrop => self.coordinator_says(&task.slug, sentence("Please drop")),
             _ => {}
         }
     }
 
-    fn inbox_key(&mut self, key: KeyEvent) {
+    fn inbox_key(&mut self, act: Action) {
         let Some(RowKind::Inbox { slug, id, body }) = self.current().map(|r| r.kind.clone()) else {
             return;
         };
-        match key.code {
-            KeyCode::Enter => {
+        match act {
+            Action::Detail => {
                 self.mode = Mode::Detail {
                     title: id,
                     lines: body.lines().map(str::to_string).collect(),
@@ -1929,23 +2029,23 @@ impl<'a> Popup<'a> {
                     scroll: 0,
                 }
             }
-            KeyCode::Char('a') => {
+            Action::InboxDone => {
                 self.run(&["inbox".into(), "done".into(), slug, id], None);
             }
             _ => {}
         }
     }
 
-    fn routine_key(&mut self, key: KeyEvent) {
+    fn routine_key(&mut self, act: Action) {
         let Some(RowKind::Routine { slug, name, prompt }) = self.current().map(|r| r.kind.clone())
         else {
             return;
         };
-        match key.code {
-            KeyCode::Enter => {
+        match act {
+            Action::RoutineToggle => {
                 self.run(&["routine".into(), "toggle".into(), slug, name], None);
             }
-            KeyCode::Char('i') => {
+            Action::Detail => {
                 self.mode = Mode::Detail {
                     title: name,
                     lines: prompt.lines().map(str::to_string).collect(),
@@ -1986,24 +2086,24 @@ impl<'a> Popup<'a> {
         }
     }
 
-    fn settings_key(&mut self, key: KeyEvent) {
-        if self.scope.is_none() && key.code == KeyCode::Char('n') {
+    fn settings_key(&mut self, act: Action) {
+        if self.scope.is_none() && act == Action::NewProfile {
             self.mode = self.profile_form(None);
             return;
         }
-        if key.code == KeyCode::Char('Y') {
+        if act == Action::Yolo {
             self.yolo_key();
             return;
         }
         match self.current().map(|r| r.kind.clone()) {
-            Some(RowKind::Profile { name, builtin }) => match key.code {
-                KeyCode::Enter => self.mode = self.profile_form(Some(&name)),
-                KeyCode::Char('d') if builtin => {
+            Some(RowKind::Profile { name, builtin }) => match act {
+                Action::Edit => self.mode = self.profile_form(Some(&name)),
+                Action::DeleteProfile if builtin => {
                     self.message = format!(
                         "`{name}` is built in: it shows while its CLI is installed and signed in"
                     )
                 }
-                KeyCode::Char('d') => {
+                Action::DeleteProfile => {
                     self.mode = Mode::Confirm {
                         question: format!(
                             "Delete profile `{name}`? Threads that use it will not launch again. y/N"
@@ -2019,7 +2119,7 @@ impl<'a> Popup<'a> {
                 key: name,
                 value,
             }) if slug.is_empty() => {
-                if key.code == KeyCode::Enter {
+                if act == Action::Edit {
                     let role = if name.starts_with("thread") {
                         Role::Thread
                     } else {
@@ -2048,7 +2148,7 @@ impl<'a> Popup<'a> {
                 key: name,
                 value,
             }) => {
-                if key.code == KeyCode::Enter {
+                if act == Action::Edit {
                     let target = slug.clone().unwrap_or_else(|| "--global".into());
                     let action = vec!["safety".to_string(), "set".into(), target, name.clone()];
                     let pick = |options: &[&str]| {
@@ -2084,11 +2184,11 @@ impl<'a> Popup<'a> {
                         },
                     };
                 } else if let Some(slug) = slug {
-                    self.project_key(key, &slug);
+                    self.project_key(act, &slug);
                 }
             }
             Some(RowKind::Project { slug }) => {
-                if key.code == KeyCode::Enter {
+                if act == Action::Edit {
                     self.scope = Some(slug);
                     self.selected = 0;
                     self.reload();
@@ -2098,8 +2198,8 @@ impl<'a> Popup<'a> {
                 slug,
                 key: name,
                 value,
-            }) => match key.code {
-                KeyCode::Enter => {
+            }) => match act {
+                Action::Edit => {
                     let action = vec!["set".to_string(), slug.clone(), name.clone()];
                     self.mode = match name.as_str() {
                         "coordinator_profile" | "thread_profile" => {
@@ -2176,22 +2276,22 @@ impl<'a> Popup<'a> {
                         },
                     };
                 }
-                _ => self.project_key(key, &slug),
+                _ => self.project_key(act, &slug),
             },
             _ => {
                 if let Some(slug) = self.scope.clone() {
-                    self.project_key(key, &slug);
+                    self.project_key(act, &slug);
                 }
             }
         }
     }
 
-    fn project_key(&mut self, key: KeyEvent, slug: &str) {
+    fn project_key(&mut self, act: Action, slug: &str) {
         let status = Project::load(&self.ctx.root, slug)
             .map(|p| p.status())
             .unwrap_or_default();
-        match key.code {
-            KeyCode::Char('p') => {
+        match act {
+            Action::PauseResume => {
                 let verb = if status == Status::Paused {
                     "resume"
                 } else {
@@ -2199,7 +2299,7 @@ impl<'a> Popup<'a> {
                 };
                 self.run(&[verb.into(), slug.to_string()], None);
             }
-            KeyCode::Char('A') => {
+            Action::Archive => {
                 self.mode = Mode::Confirm {
                     question: format!(
                         "Archive {slug}? Its workspace closes and it is hidden; the folder stays. y/N"
@@ -2208,7 +2308,7 @@ impl<'a> Popup<'a> {
                     lines: Vec::new(),
                 };
             }
-            KeyCode::Char('X') => {
+            Action::DeleteProject => {
                 self.mode = Mode::Confirm {
                     question: format!("Delete {slug}? Its folder moves to the trash. y/N"),
                     action: vec!["delete".into(), slug.to_string(), "--force".into()],
@@ -2221,6 +2321,48 @@ impl<'a> Popup<'a> {
 
     // ------------------------------------------------------------ drawing
 
+    /// One body row, `width` columns, painted from the theme: a heading in
+    /// bold, a thread as glyph, state, title, then what fits of its PR and
+    /// its place in the tree; the selected row in the selection style.
+    fn row_text(&self, row: &Row, selected: bool, width: usize) -> String {
+        let theme = &self.theme;
+        if row.header {
+            return theme
+                .heading
+                .paint(&fit(&format!(" {}", row.text.trim()), width));
+        }
+        let marker = if selected { "▌" } else { " " };
+        let segments: Vec<(String, crate::theme::Style)> = match &row.kind {
+            RowKind::Thread(r) => thread_segments(theme, r, width.saturating_sub(1)),
+            _ => {
+                let style = match row.tone {
+                    Tone::Plain => theme.text,
+                    Tone::Muted => theme.muted,
+                    Tone::Warn => theme.needs_you,
+                    Tone::Error => theme.error,
+                };
+                vec![(row.text.clone(), style)]
+            }
+        };
+        if selected {
+            let plain: String = segments.iter().map(|(t, _)| t.as_str()).collect();
+            return theme.accent.paint(marker)
+                + &theme.selection.paint(&fit(&plain, width.saturating_sub(1)));
+        }
+        let mut out = String::from(marker);
+        let mut used = 1;
+        for (text, style) in segments {
+            let room = width.saturating_sub(used);
+            if room == 0 {
+                break;
+            }
+            let piece = clip(&text, room);
+            used += piece.chars().count();
+            out.push_str(&style.paint(&piece));
+        }
+        out + &" ".repeat(width.saturating_sub(used))
+    }
+
     fn draw(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
         let (width, height) = terminal::size().unwrap_or((100, 30));
         let (width, height) = (width as usize, height as usize);
@@ -2229,44 +2371,54 @@ impl<'a> Popup<'a> {
             terminal::Clear(terminal::ClearType::All),
             cursor::MoveTo(0, 0)
         )?;
-        // Header: section tabs and a right-aligned summary.
-        let mut tabs = String::new();
-        for (i, section) in SECTIONS.iter().enumerate() {
-            if i > 0 {
-                tabs.push_str(" · ");
-            }
-            if i == self.section {
-                tabs.push_str(&format!("[{}]", section.name()));
-            } else {
-                tabs.push_str(section.name());
-            }
-        }
-        let scope = match &self.scope {
-            Some(slug) => slug.clone(),
-            None => "all projects".into(),
-        };
-        let left = format!(" Projects · {scope}   {tabs}");
-        let right = summary(&self.ctx.root);
-        let pad = width.saturating_sub(left.chars().count() + right.chars().count() + 1);
-        let left_text: String = left.chars().take(width).collect();
-        queue!(
-            out,
-            SetAttribute(Attribute::Bold),
-            Print(left_text),
-            SetAttribute(Attribute::Reset)
-        )?;
-        if pad > 0 {
+        if width < 40 || height < 10 {
             queue!(
                 out,
-                Print(" ".repeat(pad)),
-                SetAttribute(Attribute::Dim),
-                Print(&right),
-                SetAttribute(Attribute::Reset)
+                Print(fit(
+                    &format!(" Terminal too small: {width}x{height}, at least 40x10"),
+                    width
+                ))
+            )?;
+            return out.flush();
+        }
+        let theme = &self.theme;
+        // Line 1: what this is and what needs you; line 2: the sections.
+        let name = match &self.scope {
+            Some(slug) => Project::load(&self.ctx.root, slug)
+                .and_then(|p| {
+                    p.read_project_md()
+                        .map(|(s, _)| project::display_name(&s.name, slug))
+                })
+                .unwrap_or_else(|_| slug.clone()),
+            None => "All projects".into(),
+        };
+        let counts = header_counts(theme, &self.ctx.root, self.scope.as_deref());
+        let left = format!(" Organizations · {name}");
+        let left_room = width.saturating_sub(counts.0.chars().count() + 2);
+        queue!(
+            out,
+            Print(theme.accent.paint(&clip(" Organizations", left_room))),
+            Print(theme.title.paint(&clip(
+                &left[" Organizations".len()..],
+                left_room.saturating_sub(14)
+            ))),
+        )?;
+        let used = left.chars().count().min(left_room);
+        if used + counts.0.chars().count() + 1 < width {
+            queue!(
+                out,
+                Print(" ".repeat(width - used - counts.0.chars().count() - 1)),
+                Print(counts.1),
             )?;
         }
-        queue!(out, cursor::MoveTo(0, 1), Print("─".repeat(width)))?;
+        queue!(
+            out,
+            cursor::MoveTo(0, 1),
+            Print(tabs_line(theme, self.section, width))
+        )?;
 
         let body_top = 2;
+        // Two header rows, a message row and the key row.
         let body_height = height.saturating_sub(4);
         match &self.mode {
             Mode::Detail {
@@ -2524,6 +2676,16 @@ impl<'a> Popup<'a> {
                     }
                 }
             }
+            Mode::Help { scroll } => {
+                let lines = help_lines(theme, &self.keymap, self.help_context(), width);
+                for (i, (text, style)) in lines.iter().skip(*scroll).take(body_height).enumerate() {
+                    queue!(
+                        out,
+                        cursor::MoveTo(0, (body_top + i) as u16),
+                        Print(style.paint(&fit(text, width)))
+                    )?;
+                }
+            }
             _ => {
                 let start = self
                     .selected
@@ -2531,83 +2693,80 @@ impl<'a> Popup<'a> {
                     .min(self.rows.len().saturating_sub(body_height));
                 for (i, row) in self.rows.iter().enumerate().skip(start).take(body_height) {
                     queue!(out, cursor::MoveTo(0, (body_top + i - start) as u16))?;
-                    let marker = if i == self.selected && !row.header {
-                        "▌"
-                    } else {
-                        " "
-                    };
-                    let text = fit(&format!("{marker}{}", row.text), width);
-                    if row.header {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Bold),
-                            Print(text),
-                            SetAttribute(Attribute::Reset)
-                        )?;
-                    } else {
-                        if i == self.selected {
-                            queue!(out, SetAttribute(Attribute::Reverse))?;
-                        }
-                        if let Some(color) = row.color {
-                            queue!(out, SetForegroundColor(color))?;
-                        }
-                        queue!(out, Print(text), ResetColor, SetAttribute(Attribute::Reset))?;
-                    }
+                    let selected = i == self.selected && !row.header;
+                    queue!(out, Print(self.row_text(row, selected, width)))?;
                 }
-                if self.rows.len() > start + body_height {
+                if self.rows.is_empty() && !self.filter.is_empty() {
                     queue!(
                         out,
-                        cursor::MoveTo(
-                            width.saturating_sub(10) as u16,
-                            (body_top + body_height - 1) as u16
-                        ),
-                        SetAttribute(Attribute::Dim),
-                        Print("↓ more"),
-                        SetAttribute(Attribute::Reset)
+                        cursor::MoveTo(0, body_top as u16),
+                        Print(theme.muted.paint(&fit(
+                            &format!("  nothing matches \"{}\"", self.filter),
+                            width
+                        )))
                     )?;
                 }
             }
         }
 
-        // Footer: the message or prompt, then the keys.
-        let footer = height.saturating_sub(2) as u16;
-        queue!(
-            out,
-            cursor::MoveTo(0, footer),
-            Print("─".repeat(width)),
-            cursor::MoveTo(0, footer + 1)
-        )?;
-        let hint = match &self.mode {
-            Mode::List => format!(
-                "{}  P project  / find  tab section  esc close",
-                SECTIONS[self.section].keys()
-            ),
-            Mode::Projects(Picker {
-                filter: Some(_), ..
-            }) => "type to filter  ↑↓ choose  ↵ switch  esc clear/close".into(),
-            Mode::Projects(_) => "↑↓ choose  ↵ switch  / filter  esc close".into(),
-            Mode::Detail { files, .. } if !files.is_empty() => {
-                "↑↓ file  ↵ open  y copy path  esc back".into()
+        // Footer: a status row (message, prompt or filter, and the position)
+        // and the keys of this context, from the keymap.
+        let status_row = height.saturating_sub(2) as u16;
+        let status = match &self.mode {
+            Mode::Confirm { question, .. } => theme.needs_you.paint(&format!(" {question}")),
+            Mode::Edit { label, buffer, .. } => theme.title.paint(&format!(" {label}: {buffer}▏")),
+            Mode::List if self.filtering || !self.filter.is_empty() => {
+                theme.accent.paint(&format!(
+                    " {} {}{}",
+                    self.keymap.key_for(Context::Global, Action::Filter),
+                    self.filter,
+                    if self.filtering { "▏" } else { "" }
+                ))
             }
-            Mode::Detail { .. } => "↑↓ scroll  esc back".into(),
-            Mode::Confirm { question, .. } => question.clone(),
-            Mode::Edit { label, buffer, .. } => format!("{label}: {buffer}▏  ↵ save  esc cancel"),
-            Mode::Pick { .. } => "↑↓ choose  ↵ ok  esc cancel".into(),
-            Mode::Toggle { .. } => "↑↓ choose  space check  ↵ save  esc cancel".into(),
-            Mode::Form { .. } => "↑↓/tab field  type to edit  ←→ choose  ↵ save  esc cancel".into(),
+            _ if !self.message.is_empty() => {
+                let style = if self.message.contains("keymap.toml")
+                    || self.message.contains("theme.toml")
+                    || self.message.starts_with("error")
+                {
+                    theme.error
+                } else {
+                    theme.text
+                };
+                style.paint(&clip(&format!(" {}", self.message), width))
+            }
+            _ => String::new(),
         };
-        let line = if self.message.is_empty()
-            || matches!(self.mode, Mode::Confirm { .. } | Mode::Edit { .. })
-        {
-            hint
-        } else {
-            format!("{}  │  {hint}", self.message)
+        let position = match &self.mode {
+            Mode::List if !self.rows.is_empty() => {
+                let items: Vec<usize> = (0..self.rows.len())
+                    .filter(|i| !self.rows[*i].header)
+                    .collect();
+                let at = items
+                    .iter()
+                    .position(|i| *i == self.selected)
+                    .map_or(0, |p| p + 1);
+                format!("{at}/{} ", items.len())
+            }
+            _ => String::new(),
         };
         queue!(
             out,
-            SetAttribute(Attribute::Dim),
-            Print(fit(&format!(" {line}"), width)),
-            SetAttribute(Attribute::Reset)
+            cursor::MoveTo(0, status_row),
+            terminal::Clear(terminal::ClearType::CurrentLine),
+            Print(status),
+            cursor::MoveTo(
+                width.saturating_sub(position.chars().count()) as u16,
+                status_row
+            ),
+            Print(theme.muted.paint(&position)),
+            cursor::MoveTo(0, status_row + 1),
+            Print(theme.muted.paint(&fit(
+                &format!(
+                    " {}",
+                    self.keymap.hint(self.context(), width.saturating_sub(2))
+                ),
+                width
+            ))),
         )?;
         out.flush()
     }
@@ -2666,6 +2825,198 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
         selected: 0,
         scroll: 0,
     }
+}
+
+/// `text` cut to `width` columns with an ellipsis, not padded.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        text.to_string()
+    } else if width == 0 {
+        String::new()
+    } else {
+        let cut: String = text.chars().take(width - 1).collect();
+        format!("{cut}…")
+    }
+}
+
+/// A thread row's parts by priority. The glyph, state and title always
+/// show; the pull request, the place in the tree and the agent's activity
+/// follow while there is room, so a narrow popup keeps the essentials.
+fn thread_segments(
+    theme: &Theme,
+    r: &ThreadRow,
+    width: usize,
+) -> Vec<(String, crate::theme::Style)> {
+    let t = &r.thread;
+    let (glyph, word, state) = theme.state(r.group);
+    // The ticker's state line without the group word and the PR fact, which
+    // have their own columns.
+    let pr_number =
+        t.pr.rsplit('/')
+            .next()
+            .filter(|n| n.chars().all(|c| c.is_ascii_digit()));
+    let detail: Vec<&str> = t
+        .state_line
+        .split(" · ")
+        .skip(1)
+        .filter(|part| pr_number.is_none_or(|n| *part != format!("PR #{n}")))
+        .collect();
+    let mut extras: Vec<(String, crate::theme::Style)> = Vec::new();
+    if !r.pr_facts.is_empty() {
+        extras.push((r.pr_facts.clone(), theme.text));
+    }
+    let mut meta = vec![t.id.clone()];
+    if t.role == crate::thread::NodeRole::Coordinator {
+        meta.push("lead".into());
+    }
+    let parent = crate::organizations::parent_id(t);
+    if parent != crate::organizations::ROOT_ID {
+        meta.push(format!("under {parent}"));
+    }
+    meta.extend(detail.iter().map(|d| d.to_string()));
+    if !t.activity.is_empty() && r.group != Group::Resolved {
+        meta.push(t.activity.clone());
+    }
+    if !r.next.is_empty() {
+        meta.push(format!("{} next", r.next.len()));
+    }
+    extras.push((meta.join(" · "), theme.muted));
+
+    let head = format!("{glyph} {word:<9} ");
+    let avail = width.saturating_sub(head.chars().count());
+    // A title column of the same width on every row, so the other parts
+    // line up; whole parts after it while they fit, the last one cut.
+    let title_col = if avail >= 90 {
+        48
+    } else if avail >= 50 {
+        avail * 55 / 100
+    } else {
+        avail
+    };
+    let mut room = avail - title_col;
+    let mut tail: Vec<(String, crate::theme::Style)> = Vec::new();
+    for (text, style) in extras {
+        let piece = format!("  {text}");
+        let need = piece.chars().count();
+        if need <= room {
+            room -= need;
+            tail.push((piece, style));
+        } else if room >= 14 {
+            tail.push((clip(&piece, room), style));
+            break;
+        } else {
+            break;
+        }
+    }
+    let room = title_col;
+    let title_style = if r.group == Group::WaitingOnYou {
+        theme.title
+    } else {
+        theme.text
+    };
+    let mut out = vec![
+        (head, state),
+        (format!("{:<room$}", clip(&t.title, room)), title_style),
+    ];
+    out.extend(tail);
+    out
+}
+
+/// `2 need you · 5 working` for the header, plain and painted.
+fn header_counts(theme: &Theme, root: &Path, scope: Option<&str>) -> (String, String) {
+    let groups: Vec<Group> = projects_in_scope(root, scope, false)
+        .iter()
+        .flat_map(crate::sidebar::recorded_groups)
+        .collect();
+    let need = groups
+        .iter()
+        .filter(|g| crate::sidebar::needs_you(**g))
+        .count();
+    let working = groups.iter().filter(|g| **g == Group::Working).count();
+    let plain = format!("{need} need you · {working} working ");
+    let need_style = if need > 0 {
+        theme.needs_you
+    } else {
+        theme.muted
+    };
+    let painted = need_style.paint(&format!("{need} need you"))
+        + &theme.muted.paint(&format!(" · {working} working "));
+    (plain, painted)
+}
+
+/// The section tabs, shortened until they fit: names, three letters, digits.
+fn tabs_line(theme: &Theme, current: usize, width: usize) -> String {
+    let names: Vec<String> = SECTIONS.iter().map(|s| s.title().to_string()).collect();
+    let forms: [Vec<String>; 3] = [
+        names.clone(),
+        names.iter().map(|n| n.chars().take(3).collect()).collect(),
+        (1..=names.len()).map(|n| n.to_string()).collect(),
+    ];
+    let form = forms
+        .iter()
+        .find(|f| f.iter().map(|n| n.chars().count() + 2).sum::<usize>() < width)
+        .unwrap_or(&forms[2]);
+    let mut line = String::from(" ");
+    let mut used = 1;
+    for (i, name) in form.iter().enumerate() {
+        let tab = format!(" {name} ");
+        used += tab.chars().count();
+        line.push_str(&if i == current {
+            theme.accent.with(theme.selection).paint(&tab)
+        } else {
+            theme.muted.paint(&tab)
+        });
+    }
+    line + &" ".repeat(width.saturating_sub(used))
+}
+
+/// The help screen: the current context's keys, then the global ones,
+/// each as `keys  what it does`.
+fn help_lines(
+    theme: &Theme,
+    keymap: &Keymap,
+    context: Context,
+    width: usize,
+) -> Vec<(String, crate::theme::Style)> {
+    let key_width = 18.min(width / 3);
+    let line = |binding: &crate::keymap::Binding| {
+        let keys = if binding.action == Action::ForwardNext {
+            "1-9".to_string()
+        } else {
+            binding
+                .keys
+                .iter()
+                .map(|k| k.label())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        (
+            format!("   {keys:<key_width$} {}", binding.desc),
+            theme.text,
+        )
+    };
+    let global: Vec<Action> = keymap
+        .bindings(Context::Global)
+        .iter()
+        .map(|b| b.action)
+        .collect();
+    let (own, shared): (Vec<_>, Vec<_>) = keymap
+        .bindings(context)
+        .into_iter()
+        .partition(|b| !global.contains(&b.action) || context == Context::Global);
+    let mut lines = vec![(format!(" {}", context.name()), theme.heading)];
+    lines.extend(own.into_iter().map(line));
+    if !shared.is_empty() {
+        lines.push((String::new(), theme.text));
+        lines.push((" everywhere".to_string(), theme.heading));
+        lines.extend(shared.into_iter().map(line));
+    }
+    lines.push((String::new(), theme.text));
+    lines.push((
+        " Change any key in ~/.config/herdr-projects/keymap.toml".to_string(),
+        theme.muted,
+    ));
+    lines
 }
 
 fn fit(text: &str, width: usize) -> String {
@@ -2968,7 +3319,9 @@ mod tests {
     }
 
     fn press(picker: &mut Picker, code: KeyCode) -> PickerOutcome {
-        picker.key(KeyEvent::new(code, KeyModifiers::NONE))
+        let event = KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        let action = Keymap::defaults().action(Context::Picker, &event);
+        picker.key(event, action)
     }
 
     fn typed(picker: &mut Picker, text: &str) {
@@ -3076,7 +3429,9 @@ mod tests {
         world.project("alpha", "a.sock");
         let ctx = world.ctx();
         let mut popup = Popup::new(&ctx, None, String::new());
-        let key = |popup: &mut Popup, code| popup.key(KeyEvent::new(code, KeyModifiers::NONE));
+        let key = |popup: &mut Popup, code| {
+            popup.key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
+        };
         popup.section = SECTIONS
             .iter()
             .position(|s| *s == Section::Settings)
@@ -3139,14 +3494,29 @@ mod tests {
     }
 
     #[test]
-    fn slash_and_shift_p_open_the_picker_and_settings_enter_still_scopes() {
+    fn slash_filters_rows_shift_p_picks_a_project_and_settings_enter_still_scopes() {
         let world = crate::scenarios::World::new();
         world.project("alpha", "a.sock");
         world.project("beta", "a.sock");
         let ctx = world.ctx();
         let mut popup = Popup::new(&ctx, Some("alpha".into()), String::new());
-        let key = |popup: &mut Popup, code| popup.key(KeyEvent::new(code, KeyModifiers::NONE));
-        // `/` from the list goes straight into the filter; j is text there.
+        let key = |popup: &mut Popup, code| {
+            popup.key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
+        };
+        // `/` filters the section's rows; j is text there; esc clears it.
+        key(&mut popup, KeyCode::Char('/'));
+        assert!(popup.filtering);
+        for c in "zzj".chars() {
+            key(&mut popup, KeyCode::Char(c));
+        }
+        assert_eq!(popup.filter, "zzj");
+        assert!(popup.rows.is_empty());
+        key(&mut popup, KeyCode::Enter);
+        assert!(!popup.filtering && popup.filter == "zzj");
+        key(&mut popup, KeyCode::Esc);
+        assert!(popup.filter.is_empty() && !popup.quit);
+        // In the picker, `/` filters projects; j is text there too.
+        key(&mut popup, KeyCode::Char('P'));
         key(&mut popup, KeyCode::Char('/'));
         assert!(matches!(&popup.mode, Mode::Projects(p) if p.filter.as_deref() == Some("")));
         for c in "bej".chars() {
@@ -3195,7 +3565,9 @@ mod tests {
         let ctx = world.ctx();
         let yolo = |p: &Project| p.safety(&ctx.config_dir).unwrap().yolo;
         let mut popup = Popup::new(&ctx, Some("alpha".into()), String::new());
-        let key = |popup: &mut Popup, code| popup.key(KeyEvent::new(code, KeyModifiers::NONE));
+        let key = |popup: &mut Popup, code| {
+            popup.key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
+        };
         popup.section = SECTIONS
             .iter()
             .position(|s| *s == Section::Settings)
