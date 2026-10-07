@@ -130,6 +130,11 @@ enum Command {
         #[command(flatten)]
         session: SessionArgs,
     },
+    /// Heavy commands (full test suites, builds, browser runs), one queue per machine
+    Gate {
+        #[command(subcommand)]
+        command: GateCommand,
+    },
     /// Inbox items
     Inbox {
         #[command(subcommand)]
@@ -313,6 +318,22 @@ enum Command {
     Ticker {
         #[command(subcommand)]
         command: TickerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum GateCommand {
+    /// Run a command once a slot of the queue is free and memory is not under pressure; exits with its code
+    Run {
+        /// The queue; threads that share a name share its slots
+        #[arg(long, default_value = "heavy")]
+        name: String,
+        /// How many such commands may run at once on this machine
+        #[arg(long, default_value_t = 1)]
+        slots: usize,
+        /// The command and its arguments, after `--`
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
     },
 }
 
@@ -940,6 +961,17 @@ pub fn run() -> Result<()> {
         Command::Usage { slug, json } => usage::print(&ctx, &slug, json),
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),
         Command::Unfocus { session } => overview::unfocus(&ctx, &session.into()),
+        Command::Gate {
+            command:
+                GateCommand::Run {
+                    name,
+                    slots,
+                    command,
+                },
+        } => {
+            let code = crate::gate::run(&ctx, &name, slots, &command)?;
+            std::process::exit(code);
+        }
         Command::Inbox { command } => match command {
             InboxCommand::Done { slug, ids, all } => {
                 let project = Project::load(&ctx.root, &slug)?;

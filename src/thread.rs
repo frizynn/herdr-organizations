@@ -486,6 +486,10 @@ pub fn compose_brief(input: &BriefInput) -> String {
     } else {
         brief.push_str(&crate::progress::guidance(input.report_prefix, None));
         brief.push('\n');
+        brief.push_str(&format!(
+            "\n# Heavy commands\n\nOther threads share this computer. Run full test suites, production builds and browser runs through `{} gate run -- <command> <args>`: it waits for a free slot and for memory to recover, then runs the command and exits with its code. Quick checks run directly.\n",
+            input.report_prefix
+        ));
     }
     brief.push_str("\n# Task\n\n");
     brief.push_str(input.task.trim());
@@ -1609,6 +1613,7 @@ mod tests {
         assert!(pos("# Memory") < pos("alpha fact"));
         assert!(pos("alpha fact") < pos("# Progress"));
         assert!(pos("/bin/hp --root /r report --percent 25") < pos("Do the thing."));
+        assert!(pos("/bin/hp --root /r gate run -- <command>") < pos("Do the thing."));
         assert!(pos("Do the thing.") < pos("# Paths"));
         assert!(brief.contains("gamma fact"));
         assert!(

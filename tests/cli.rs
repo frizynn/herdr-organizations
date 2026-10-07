@@ -4,7 +4,6 @@ use std::path::Path;
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
-const LEGACY_BIN: &str = env!("CARGO_BIN_EXE_herdr-projects");
 
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
@@ -336,9 +335,9 @@ fn ticker_start_without_projects_creates_nothing() {
 }
 
 #[test]
-fn legacy_binary_alias_keeps_the_compatibility_data_root() {
+fn the_binary_keeps_the_herdr_projects_data_root() {
     let home = tempfile::tempdir().unwrap();
-    let output = Command::new(LEGACY_BIN)
+    let output = Command::new(BIN)
         .env_clear()
         .env("HOME", home.path())
         .args(["new", "Legacy"])
@@ -555,4 +554,49 @@ fn template_delete_removes_the_template_and_show_fails() {
     );
     assert!(!shown.status.success());
     assert!(String::from_utf8_lossy(&shown.stderr).contains("template `x` not found"));
+}
+
+#[test]
+fn gate_run_queues_on_one_slot_and_passes_the_exit_code_through() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    let marker = home.path().join("first-done");
+    let first = std::process::Command::new(BIN)
+        .env("HOME", home.path())
+        .args(["--root", root_arg, "gate", "run", "--", "sh", "-c"])
+        .arg(format!("sleep 1; touch {}", marker.display()))
+        .spawn()
+        .unwrap();
+    // Wait until the first command holds the slot.
+    let lock = root.join(".gates/heavy-0.lock");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&lock).is_ok_and(|t| t.contains("pid")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let second = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "gate",
+            "run",
+            "--",
+            "sh",
+            "-c",
+            &format!("test -e {} && exit 7", marker.display()),
+        ],
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(7),
+        "the second ran before the first finished"
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("gate heavy: waiting"));
+    let mut first = first;
+    assert!(first.wait().unwrap().success());
+    let none = hp(home.path(), &["--root", root_arg, "gate", "run"]);
+    assert!(!none.status.success());
 }

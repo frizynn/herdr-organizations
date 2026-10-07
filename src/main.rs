@@ -7,6 +7,7 @@ mod cli;
 mod command_link;
 mod coordinator;
 mod doctor;
+mod gate;
 mod grouping;
 mod herdr;
 mod inbox;
