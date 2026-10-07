@@ -2431,39 +2431,43 @@ impl<'a> Popup<'a> {
                 queue!(
                     out,
                     cursor::MoveTo(0, body_top as u16),
-                    SetAttribute(Attribute::Bold),
-                    Print(fit(&format!(" {title}"), width)),
-                    SetAttribute(Attribute::Reset)
+                    Print(theme.title.paint(&fit(&format!(" {title}"), width)))
                 )?;
-                let file_start = lines.len();
-                let all: Vec<String> = lines
-                    .iter()
-                    .cloned()
-                    .chain(files.iter().map(|f| format!("  {}", f.display())))
-                    .collect();
+                // The report wraps to the width; files stay one per line.
+                let mut all: Vec<(String, crate::theme::Style)> = Vec::new();
+                for line in lines {
+                    if let Some((text, style)) = markdown_line(theme, line) {
+                        all.extend(wrap(&text, width).into_iter().map(|l| (l, style)));
+                    }
+                }
+                let file_start = all.len();
+                all.extend(
+                    files
+                        .iter()
+                        .map(|f| (format!("  {}", f.display()), theme.muted)),
+                );
                 let start = if files.is_empty() {
-                    *scroll
+                    (*scroll).min(all.len().saturating_sub(1))
                 } else {
                     (file_start + selected).saturating_sub(body_height.saturating_sub(2))
                 };
-                for (i, line) in all
+                for (i, (line, style)) in all
                     .iter()
                     .skip(start)
                     .take(body_height.saturating_sub(1))
                     .enumerate()
                 {
                     let index = start + i;
-                    queue!(out, cursor::MoveTo(0, (body_top + 1 + i) as u16))?;
-                    if !files.is_empty() && index == file_start + selected {
-                        queue!(
-                            out,
-                            SetAttribute(Attribute::Reverse),
-                            Print(fit(line, width)),
-                            SetAttribute(Attribute::Reset)
-                        )?;
+                    let style = if !files.is_empty() && index == file_start + selected {
+                        theme.selection
                     } else {
-                        queue!(out, Print(fit(line, width)))?;
-                    }
+                        *style
+                    };
+                    queue!(
+                        out,
+                        cursor::MoveTo(0, (body_top + 1 + i) as u16),
+                        Print(style.paint(&fit(line, width)))
+                    )?;
                 }
             }
             Mode::Confirm { lines, .. } if !lines.is_empty() => {
@@ -2779,8 +2783,7 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
         return Mode::List;
     };
     let mut lines = vec![format!(
-        "{} · {} · {}",
-        t.id,
+        "# {} · {}",
         crate::sidebar::word(row.group),
         t.title
     )];
@@ -2793,7 +2796,7 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
     lines.extend(report.lines().map(str::to_string));
     if !row.next.is_empty() {
         lines.push(String::new());
-        lines.push("Next (press the number in the list):".into());
+        lines.push("## Next (its number in the list sends it)".into());
         for (i, n) in row.next.iter().enumerate() {
             lines.push(format!("  {}. {n}", i + 1));
         }
@@ -2816,7 +2819,7 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
     }
     if !files.is_empty() {
         lines.push(String::new());
-        lines.push("Files (↵ opens, y copies the path):".into());
+        lines.push("## Files".into());
     }
     Mode::Detail {
         title: format!("{} · {}", row.slug, t.id),
@@ -2825,6 +2828,66 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
         selected: 0,
         scroll: 0,
     }
+}
+
+/// A report line as it reads: headings bold and without `#`, bullets as
+/// `•`, emphasis and code marks dropped, table rules hidden (`None`) and
+/// table rows as aligned cells.
+fn markdown_line(theme: &Theme, line: &str) -> Option<(String, crate::theme::Style)> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    let clean = |text: &str| text.replace("**", "").replace('`', "");
+    if let Some(heading) = trimmed.strip_prefix('#') {
+        return Some((
+            format!(" {}", clean(heading.trim_start_matches('#').trim())),
+            theme.heading,
+        ));
+    }
+    if trimmed.starts_with('|') {
+        if trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+            return None;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| clean(cell.trim()))
+            .collect();
+        return Some((format!(" {indent}{}", cells.join("  │  ")), theme.text));
+    }
+    for bullet in ["- ", "* "] {
+        if let Some(rest) = trimmed.strip_prefix(bullet) {
+            return Some((format!(" {indent}• {}", clean(rest)), theme.text));
+        }
+    }
+    Some((format!(" {}", clean(line)), theme.text))
+}
+
+/// `text` in lines of at most `width` columns, broken at spaces, the
+/// continuation indented like the first line.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if text.chars().count() <= width || width < 20 {
+        return vec![text.to_string()];
+    }
+    let body = text.trim_start_matches([' ', '•']);
+    let indent = &text[..text.len() - body.len()];
+    let pad = " ".repeat(indent.chars().count());
+    let mut lines = Vec::new();
+    let mut line = indent.to_string();
+    let mut empty = true;
+    for word in body.split(' ') {
+        let len = line.chars().count();
+        if !empty && len + 1 + word.chars().count() > width {
+            lines.push(std::mem::replace(&mut line, pad.clone()));
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(word);
+        empty = false;
+    }
+    lines.push(line);
+    lines
 }
 
 /// `text` cut to `width` columns with an ellipsis, not padded.
@@ -3174,6 +3237,24 @@ pub fn run(ctx: &Ctx, scope: Option<String>, workspace: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapped_lines_keep_their_indent_and_fit() {
+        let lines = wrap(" • one two three four five six seven eight nine ten", 24);
+        assert_eq!(lines[0], " • one two three four");
+        assert!(lines[1].starts_with("   five"));
+        assert!(lines.iter().all(|l| l.chars().count() <= 24));
+    }
+
+    #[test]
+    fn report_markdown_reads_without_its_marks() {
+        let theme = Theme::default();
+        let read = |line: &str| markdown_line(&theme, line).map(|(text, _)| text);
+        assert_eq!(read("## Report").as_deref(), Some(" Report"));
+        assert_eq!(read("- **done** `x`").as_deref(), Some(" • done x"));
+        assert_eq!(read("|---|:--|"), None);
+        assert_eq!(read("| a | b |").as_deref(), Some(" a  │  b"));
+    }
 
     #[test]
     fn tasks_parse_with_lists_owners_and_threads() {

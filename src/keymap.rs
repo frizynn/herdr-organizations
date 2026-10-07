@@ -638,7 +638,12 @@ impl Keymap {
     /// The help bar: `key desc` pairs that fit `width`, then `? help`. Keys
     /// with more than one binding show the first one.
     pub fn hint(&self, context: Context, width: usize) -> String {
-        let help = format!("{} help", self.key_for(Context::Global, Action::Help));
+        // Only the lists answer the help key.
+        let help = if context.falls_back() {
+            format!("{} help", self.key_for(Context::Global, Action::Help))
+        } else {
+            String::new()
+        };
         let mut line = String::new();
         let skip = [
             Action::Down,
@@ -669,7 +674,7 @@ impl Keymap {
             }
             line.push_str(&item);
         }
-        if context == Context::Help || context == Context::Input {
+        if !context.falls_back() {
             line
         } else if line.is_empty() {
             help
