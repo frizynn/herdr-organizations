@@ -12,6 +12,17 @@
 
 <br />
 
+## This fork: Organizations
+
+This is [herdr-projects](https://github.com/eliasstravik/herdr-projects) with a project run as a tree instead of a flat list of threads. It installs under the same plugin id and binary name, so it replaces the upstream plugin and reads the same project folders.
+
+- **Leads by area.** A thread can be a lead (`thread start --role coordinator`) that starts and watches its own threads, with standing rules and memory that reach only its subtree. Saved leads are templates.
+- **Quiet, batched wake-ups.** Each event goes to the nearest lead, not to the top. Idle, resolved and opened-PR events never wake anyone; the rest wait 90 seconds so close events arrive together, and arrive with the first three lines of each report (`PR:`, `Status:`, `Needs:`). The top coordinator's `context` lists only its own items.
+- **One queue for heavy commands.** `gate run -- <command>` lets threads on one computer take turns for test suites and builds, and waits while memory is short.
+- **The project tree.** A docked view with the tree of leads and workers, their state, their pull requests, what needs you (`n` jumps to the next one) and the selected report's header.
+
+Install it from this repository's checkout (there are no prebuilt releases; the build step compiles it). [Architecture](docs/architecture.md) has the details.
+
 ## Keep one conversation going while the work happens in parallel
 
 The coordinator never does the work itself, so it's always free to answer you. Each task runs in its own thread: a separate agent in its own git worktree and branch, or in its own folder when there's no repository. You read reports and answer the threads that need you instead of briefing every agent yourself.

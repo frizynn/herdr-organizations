@@ -28,51 +28,44 @@ A node brief composes project context, then each ancestor from root to parent, t
 
 Node scopes are treated as regular directories. Symbolic links for a node scope or its memory directory are refused, and symbolic-link memory files are skipped. This prevents a node brief from reading through a redirected scope.
 
-`node start --rules-file <file>` stores trimmed rules in `nodes/<id>/INSTRUCTIONS.md`, which the existing ancestor context includes for descendants. `node rules <slug> <id>` reads those instructions; `--text-file <file>` replaces them for the next brief or restart. Reports can include a `## Summary` section. `node summary <slug> <id>` prints that section up to 1,500 characters and points out when it is missing.
+`thread start --rules-file <file>` stores trimmed rules in `nodes/<id>/INSTRUCTIONS.md`, which the ancestor context includes for descendants. `thread rules <slug> <id>` reads those instructions; `--text-file <file>` replaces them for the next brief or restart. `node` is an alias of `thread`.
 
 ## Agent profiles
 
-Each node stores the effective harness, model, reasoning effort, permission profile and raw argv components inherited from its parent. Raw argv components are inherited only while the harness stays the same. Creation can override any supported value. Repeatable `--raw-agent-arg` values remain separate argv entries. The implementation never turns profile fields into a shell command string.
+A thread launches from a named profile (harness, model, effort and extra arguments) that the user keeps in `config.toml`; agents only ever pass a name. A lead (`--role coordinator`) chooses from the project's coordinator profiles, a worker from its thread profiles, and the ticker checks the name against that allow-list again at every launch. Without `--profile`, the project's default for the role is used. Profiles are described in [operations](operations.md#agent-profiles).
 
-Codex adapter:
-
-- `--model <value>` maps to `--model <value>`.
-- Reasoning effort accepts `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, mapped to `--config model_reasoning_effort="<value>"`.
-- `read-only` maps to `--sandbox read-only --ask-for-approval on-request`.
-- `workspace-write` maps to `--sandbox workspace-write --ask-for-approval on-request`.
-- `full-access` maps to `--sandbox danger-full-access --ask-for-approval never`.
-
-Claude Code adapter:
-
-- `--model <value>` maps to `--model <value>`.
-- Permission profiles `default`, `plan`, `accept-edits` and `bypass-permissions` map to Claude Code's `--permission-mode` values.
-- The adapter does not map reasoning effort. Supply a harness-specific option as a raw argv component when needed.
-
-Other harness kinds receive raw argv only. Built-in profile fields are rejected for harnesses without an adapter. The `herdr agent start` boundary receives the harness kind and exact argv vector. Project-wide `thread_agent_args` remain appended after profile arguments for compatibility, but conflicting permission, sandbox and approval flags are rejected in raw and project safety args when a permission profile is selected. This checks argv values only. It does not provide OS isolation or restrict an agent's shell access.
-
-These flags are adapters for current CLI interfaces, not a promise that all agent CLIs accept the same options. See the [Codex sandbox documentation](https://developers.openai.com/es-419/docs/sandboxing), [Codex configuration reference](https://developers.openai.com/es-419/docs/config-file/config-advanced), and [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-usage).
+Records from the first version of this fork also carried a model, an effort, a permission profile and raw arguments per node. Those fields are no longer read: such a node restarts on its harness's built-in profile unless `thread restart --profile <name>` picks another.
 
 ## Templates
 
-Global templates are stored under `.templates/<name>/` and project templates under `<slug>/templates/<name>/`. `TEMPLATE.toml` stores role and profile fields, `RULES.md` stores node instructions without the generated heading, and `MEMORY.md` stores template-specific memory. When a project is selected, its template takes precedence over a global template with the same name. Without a project, resolution is global only. The commands are <code>template save &lt;name&gt;</code>, <code>template list</code>, <code>template show &lt;name&gt;</code>, <code>template memory &lt;name&gt;</code> and <code>template delete &lt;name&gt;</code>.
+Global templates are stored under `.templates/<name>/` and project templates under `<slug>/templates/<name>/`. `TEMPLATE.toml` stores the role, spawn permission and a profile name (older templates' harness and model fields are ignored), `RULES.md` stores node instructions without the generated heading, and `MEMORY.md` stores template-specific memory. When a project is selected, its template takes precedence over a global template with the same name. Without a project, resolution is global only. The commands are <code>template save &lt;name&gt;</code>, <code>template list</code>, <code>template show &lt;name&gt;</code>, <code>template memory &lt;name&gt;</code> and <code>template delete &lt;name&gt;</code>.
 
-`node start <slug> --template <name> --title ... --task-file ...` creates a node with the template's role, spawn permission, profile and rules. Explicit role, spawn and profile flags take precedence, and `--template` cannot be combined with `--rules-file`. The node record stores the template name so scoped context can include that template's current `MEMORY.md` for the node and its descendants, subject to the existing memory budget. Updating template memory changes future contexts for those nodes; siblings do not receive it. A missing template is ignored when building context. `RULES.md` is copied into the node's instructions at creation, so later changes to `RULES.md` do not change existing node instructions.
+`thread start <slug> --template <name> --title ... --task-file ...` creates a node with the template's role, spawn permission, profile and rules. Explicit role, spawn and profile flags take precedence, and `--template` cannot be combined with `--rules-file`. The node record stores the template name so scoped context can include that template's current `MEMORY.md` for the node and its descendants, subject to the existing memory budget. Updating template memory changes future contexts for those nodes; siblings do not receive it. A missing template is ignored when building context. `RULES.md` is copied into the node's instructions at creation, so later changes to `RULES.md` do not change existing node instructions.
 
-## Organization picker
+## Wake-ups
 
-The `organizations` action remains the global project picker popup. The distinct `organization-sidebar` action resolves its project from the current Herdr workspace and opens a recursive tree in a split pane. Its compact terminal UI supports keyboard navigation, coordinator disclosure, status colors and an in-pane settings screen. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone.
+The ticker writes an inbox item for each event (a new report, a thread that needs someone, a pull request change, a due routine). Each item goes to the nearest open, local coordinator above the thread it is about, else to the project coordinator; routing reads records only, so `context` and the ticker agree. A lead that is away keeps its items until it is back, and its own state change goes to its parent.
 
-The popup starts with a project picker, then shows the virtual root and descendants in tree order with title, state, role and id. The split sidebar stays within one project, leads rows with titles and can hide role/status or include resolved nodes. Resolved leaves stay in durable history but are hidden by default. Its settings are stored under the Herdr-provided plugin config directory. A plugin-owned metadata token plus project and workspace tokens identify each split. The sticky open state owns a tab-to-pane map scoped to the workspace and Herdr session socket. When a new tab is focused, its event ensures one local sidebar without closing siblings; a previously visited tab therefore switches with no split or process creation. The source pane id is injected once at launch so the first frame selects that tab's coordinator or worker without live inventory. Closing from the shortcut, `q`, or Esc clears the sticky set. The sidebar heartbeats the tokens while open. Both terminal views use a stable leading selection marker, restrained status color and synchronized updates instead of reverse-video rows or unsynchronized full-screen redraws.
+An item whose class is listed in `quiet_events` in `PROJECT.md` (by default `idle`, `landing`, `resolved`, `pr-opened`, `pr-updated`) is written straight to `inbox/done/`: it stays as history and wakes nobody. The other items for a coordinator wait `wake_batch_secs` (90 by default) after the oldest of them, then for that coordinator to be idle for a minute with an input box that has looked empty for ten seconds. They then go out as one prompt that names subjects and fixed event phrases and quotes the first three lines of each new report, marked as data. Delivering the prompt archives the items, so the coordinator needs no follow-up command. The project coordinator's `context` lists only its own items and counts the rest per lead.
 
-Opening the contextual sidebar uses a two-phase paint. The first frame reads the ticker's persisted groups and does no live Herdr inventory call. Immediately after that frame, the sidebar hydrates agent and pane state and repaints only rows that changed. The plugin stores exact sidebar pane ids scoped by tab, workspace and session socket, so normal toggles skip workspace inventory and cannot reuse ids from another Herdr session. The first action after an upgrade still discovers existing panes once for compatibility. Identity metadata is registered by each sidebar process after its first flushed frame instead of blocking the shortcut action. The first visit to a tab still pays Herdr's split and process startup cost; switching back to a prewarmed tab performs no plugin layout work. This keeps keyboard navigation visually immediate without token-consuming agent checks or switch-time polling.
+The thread brief asks every report to start with three lines, `PR:`, `Status:` and `Needs:`, and says not to prompt the coordinator directly. `PR: none` means no pull request.
 
-The pure tree layout, collapse, settings and selection helpers are unit-testable without a terminal. Actual split geometry, terminal colors and key forwarding remain client-side checks.
+## Heavy commands
+
+`gate run [--name heavy] [--slots 1] -- <command>` queues a command per machine. A slot is an exclusive lock on `<root>/.gates/<name>-<n>.lock`, released by the operating system when the holder exits, so a killed thread never blocks the queue. Before running, the command also waits while the kernel reports memory pressure (macOS `kern.memorystatus_vm_pressure_level` at warn or critical, Linux PSI `some avg10` above 10%). The holder writes its pid, start time, folder and command into its lock file, which a waiting command prints once. The gated command inherits the terminal and its exit code is passed through. Thread briefs ask for it around full test suites, builds and browser runs.
+
+## Project tree
+
+The `organization-sidebar` action resolves its project from the current Herdr workspace and opens the project's tree in a split pane. Upstream's projects popup (`prefix+a`) stays the place for tasks, inbox, routines, settings and memory; the tree is for watching and moving between agents.
+
+The first row under the title summarises the project (`16 nodes · 2 need you · 5 working · 3 PRs open`). Each row shows a node's title, the ticker's state line (`working · ~40%`, `review · report`), its pull request (`PR #12 open`) and, for leads, their role. The three rows under the tree show the selected node's report header, or for the root the ids that need the user. Enter focuses the node's agent, reopening an open node whose pane is gone; Space folds a lead; `n` jumps to the next node that needs the user; `x` twice closes the panes of a node and everything under it; `s` opens settings. Resolved leaves are hidden unless the settings show them; a resolved lead stays while it has open work under it.
+
+Everything a row shows comes from records and report files the ticker keeps, so the first frame needs no live Herdr call. A plugin-owned metadata token plus project and workspace tokens identify each split. The sticky open state maps tabs to sidebar panes per workspace and session socket, so returning to a visited tab does no layout work. Closing from the shortcut, `q` or Esc clears that set. Frames are diffed per row and written in synchronized updates.
 
 ## Compatibility and intentional limits
 
-- `~/.herdr-projects/`, `~/.config/herdr-projects/` and `HERDR_PROJECTS_ROOT` remain unchanged.
-- `herdr-organizations` is the primary binary. Cargo also builds `herdr-projects` as a compatibility name.
-- `thread start` remains a direct worker-under-root alias. Node lifecycle commands provide the hierarchy-aware names.
+- `~/.herdr-projects/`, `~/.config/herdr-projects/` and `HERDR_PROJECTS_ROOT` remain unchanged, and so do the plugin id and the `herdr-projects` binary, so hooks and `AGENTS.md` files that call it keep working.
+- `thread` is the one command group for workers and leads; `node` is an alias.
 - Existing ticker cadence, inbox format, reports, routines, worktree behavior and SSH transport remain in place.
 - Remote workers remain supported. Remote coordinators with child-spawn permission are refused until a remote CLI bridge exists.
 - `can_spawn` is deterministic CLI validation, not an ACL. Agents still have the shell and permissions of their harness.
