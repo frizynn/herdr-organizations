@@ -15,7 +15,18 @@ use crate::thread::{Group, Live, Thread};
 
 pub const TOKEN_TTL_MS: u64 = 300_000;
 /// Tokens this plugin wrote before 0.2.0; cleared on every report.
-pub const OLD_TOKENS: [&str; 4] = ["project", "thread", "review", "rank"];
+/// Tokens earlier versions set on agent panes, cleared whenever a pane is
+/// reported: upstream's four and the fork's tree tokens.
+pub const OLD_TOKENS: [&str; 8] = [
+    "project",
+    "thread",
+    "review",
+    "rank",
+    "depth",
+    "parent",
+    "role",
+    "tree-order",
+];
 pub const POPUP_ACTION: &str = "herdr-projects.open-popup";
 pub const DEFAULT_KEY: &str = "prefix+a";
 /// Minutes without a self-report after which a working row says "Nm quiet".

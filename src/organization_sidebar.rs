@@ -670,9 +670,60 @@ struct TreeView {
     project: Project,
     entries: Vec<TreeEntry>,
     groups: HashMap<String, Group>,
+    details: HashMap<String, Detail>,
     omitted_nodes: usize,
 }
 
+/// What a row shows beyond its title, from the record the ticker keeps and
+/// the report's header: no Herdr call.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Detail {
+    /// The ticker's state line without its PR fact (`working · ~55%`).
+    state: String,
+    /// `PR #146 merged`, empty without a pull request.
+    pr: String,
+    /// The report's three header lines, one per entry.
+    header: Vec<String>,
+}
+
+fn detail(project: &Project, thread: &thread_model::Thread) -> Detail {
+    let number = thread
+        .pr
+        .rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    let pr = number
+        .map(|n| {
+            let state = thread.pr_state.to_ascii_lowercase();
+            format!("PR #{n} {}", if state.is_empty() { "open" } else { &state })
+        })
+        .unwrap_or_default();
+    let state = match number {
+        Some(n) => thread.state_line.replace(&format!(" · PR #{n}"), ""),
+        None => thread.state_line.clone(),
+    };
+    let header = if thread.status == thread_model::Status::Resolved {
+        Vec::new()
+    } else {
+        std::fs::read_to_string(thread_model::home_report_path(project, &thread.id))
+            .ok()
+            .and_then(|report| organizations::report_header(&report))
+            .map(|h| h.split(" | ").map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    Detail { state, pr, header }
+}
+
+fn details(project: &Project, entries: &[TreeEntry]) -> HashMap<String, Detail> {
+    entries
+        .iter()
+        .map(|entry| (entry.thread.id.clone(), detail(project, &entry.thread)))
+        .collect()
+}
+
+// One `Screen` lives for the whole sidebar process; boxing its tree buys
+// nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum Screen {
     Tree {
@@ -990,6 +1041,21 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     stop_asked = Some(id);
                 }
             }
+            (
+                Screen::Tree {
+                    view,
+                    collapsed,
+                    root_collapsed,
+                    selected,
+                },
+                KeyCode::Char('n'),
+            ) => {
+                let rows = visible_rows(view, collapsed, *root_collapsed);
+                match next_needing_you(&rows, view, *selected) {
+                    Some(index) => *selected = index,
+                    None => message = "Nothing needs you".into(),
+                }
+            }
             (Screen::Tree { .. }, KeyCode::Char('r')) => reload = true,
             _ => {}
         }
@@ -1119,6 +1185,7 @@ fn tree_view_changed(current: &TreeView, refreshed: &TreeView) -> bool {
         || current.project.slug != refreshed.project.slug
         || current.entries != refreshed.entries
         || current.groups != refreshed.groups
+        || current.details != refreshed.details
         || current.omitted_nodes != refreshed.omitted_nodes
         || project_label(&current.project) != project_label(&refreshed.project)
 }
@@ -1132,10 +1199,12 @@ fn load_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<TreeView> {
         .into_iter()
         .map(|row| (row.thread.id, row.group))
         .collect();
+    let details = details(&project, &entries);
     Ok(TreeView {
         project,
         entries,
         groups,
+        details,
         omitted_nodes,
     })
 }
@@ -1154,10 +1223,12 @@ fn load_recorded_view(ctx: &Ctx, slug: &str, show_resolved: bool) -> Result<Tree
             )
         })
         .collect();
+    let details = details(&project, &entries);
     Ok(TreeView {
         project,
         entries,
         groups,
+        details,
         omitted_nodes,
     })
 }
@@ -1182,6 +1253,82 @@ fn project_label(project: &Project) -> String {
         .read_project_md()
         .map(|(settings, _)| project::display_name(&settings.name, &project.slug))
         .unwrap_or_else(|_| project::humanize(&project.slug))
+}
+
+/// `12 nodes · 2 need you · 5 working · 3 PRs open`.
+fn summary_line(view: &TreeView) -> String {
+    let groups: Vec<Group> = view
+        .entries
+        .iter()
+        .filter_map(|entry| view.groups.get(&entry.thread.id).copied())
+        .collect();
+    let nodes = view.entries.len();
+    let mut line = format!("{nodes} {}", if nodes == 1 { "node" } else { "nodes" });
+    let states = crate::sidebar::project_line(&groups, false);
+    if states != "idle" {
+        line.push_str(&format!(" · {states}"));
+    }
+    let open_prs = view
+        .details
+        .values()
+        .filter(|d| d.pr.ends_with(" open"))
+        .count();
+    if open_prs > 0 {
+        line.push_str(&format!(
+            " · {open_prs} {} open",
+            if open_prs == 1 { "PR" } else { "PRs" }
+        ));
+    }
+    line
+}
+
+/// The three rows under the tree: the selected node's report header, or for
+/// the root, which nodes need the user.
+fn selection_lines(view: &TreeView, row: Option<VisibleRow<'_>>) -> Vec<String> {
+    match row {
+        Some(VisibleRow::Entry(entry)) => {
+            let header = view
+                .details
+                .get(&entry.thread.id)
+                .map(|d| d.header.clone())
+                .unwrap_or_default();
+            if header.is_empty() {
+                vec![format!("{}: no report yet", entry.thread.id)]
+            } else {
+                header
+            }
+        }
+        _ => {
+            let waiting: Vec<&str> = view
+                .entries
+                .iter()
+                .filter(|e| {
+                    view.groups
+                        .get(&e.thread.id)
+                        .is_some_and(|g| crate::sidebar::needs_you(*g))
+                })
+                .map(|e| e.thread.id.as_str())
+                .collect();
+            if waiting.is_empty() {
+                vec!["Nothing needs you".to_string()]
+            } else {
+                vec![format!("Needs you: {}", waiting.join(", "))]
+            }
+        }
+    }
+}
+
+/// The next visible row after `selected` whose node needs the user, wrapping.
+fn next_needing_you(rows: &[VisibleRow<'_>], view: &TreeView, selected: usize) -> Option<usize> {
+    (1..=rows.len())
+        .map(|step| (selected + step) % rows.len())
+        .find(|index| match rows[*index] {
+            VisibleRow::Entry(entry) => view
+                .groups
+                .get(&entry.thread.id)
+                .is_some_and(|g| crate::sidebar::needs_you(*g)),
+            VisibleRow::Root => false,
+        })
 }
 
 fn visible_rows<'a>(
@@ -1304,17 +1451,9 @@ fn build_frame(
         } => {
             set_accent_row(&mut frame, 0, &project_label(&view.project), width);
             let rows = visible_rows(view, collapsed, *root_collapsed);
-            let node_count = rows.len();
-            set_muted_row(
-                &mut frame,
-                1,
-                &format!(
-                    "Organization  ·  {node_count} {}",
-                    if node_count == 1 { "node" } else { "nodes" }
-                ),
-                width,
-            );
-            let body_capacity = height.saturating_sub(5).max(1);
+            set_muted_row(&mut frame, 1, &summary_line(view), width);
+            // Title, summary, three detail rows and two help rows around the tree.
+            let body_capacity = height.saturating_sub(7).max(1);
             let range = visible_range(rows.len(), *selected, body_capacity);
             let row_context = TreeRowContext {
                 view,
@@ -1344,11 +1483,15 @@ fn build_frame(
                     width,
                 );
             }
+            let lines = selection_lines(view, rows.get(*selected).copied());
+            for (offset, line) in lines.iter().enumerate() {
+                set_plain_row(&mut frame, height.saturating_sub(5) + offset, line, width);
+            }
             if message.is_empty() {
-                set_plain_row(
+                set_muted_row(
                     &mut frame,
-                    height.saturating_sub(3),
-                    "↑↓ Navigate   Enter Focus   Space Fold",
+                    height.saturating_sub(2),
+                    "↑↓ Move  Enter Focus  Space Fold  n Next needing you",
                     width,
                 );
                 set_muted_row(
@@ -1603,10 +1746,19 @@ fn row_text_with_color(
                 });
             let mut text = format!("{}{disclosure}{}", entry.prefix, entry.thread.title);
             if settings.show_status {
-                text.push_str(&format!("  ● {}", group.label()));
+                let detail = view.details.get(&entry.thread.id);
+                let state = detail
+                    .map(|d| d.state.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(group.label());
+                text.push_str(&format!("  ● {state}"));
+                if let Some(pr) = detail.map(|d| d.pr.as_str()).filter(|p| !p.is_empty()) {
+                    text.push_str(&format!("  {pr}"));
+                }
             }
-            if settings.show_role {
-                text.push_str(&format!("  {}", entry.thread.role.as_str()));
+            // Workers are the default; only a coordinator is marked.
+            if settings.show_role && entry.thread.role == NodeRole::Coordinator {
+                text.push_str("  coordinator");
             }
             let color = match group {
                 Group::ReadyForReview => Color::Blue,
@@ -1929,6 +2081,70 @@ fn fit_terminal_row(value: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn rows_show_live_state_and_pr_and_the_selection_shows_its_header() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let lead = thread_model::Thread {
+            id: "t-0001".into(),
+            title: "Frontend lead".into(),
+            role: NodeRole::Coordinator,
+            can_spawn: true,
+            status: thread_model::Status::Open,
+            state_line: "working · ~40%".into(),
+            ..thread_model::Thread::default()
+        };
+        let worker = thread_model::Thread {
+            id: "t-0002".into(),
+            title: "Form".into(),
+            parent_id: "t-0001".into(),
+            status: thread_model::Status::Open,
+            state_line: "review · PR #12".into(),
+            pr: "https://github.com/o/r/pull/12".into(),
+            pr_state: "OPEN".into(),
+            ..thread_model::Thread::default()
+        };
+        std::fs::write(
+            thread_model::home_report_path(&project, "t-0002"),
+            "PR: https://github.com/o/r/pull/12\nStatus: done, tested\nNeeds: a merge\n",
+        )
+        .unwrap();
+        let entries = organizations::tree_from(&[lead, worker]).unwrap();
+        let view = TreeView {
+            details: details(&project, &entries),
+            project,
+            entries,
+            groups: HashMap::from([
+                ("t-0001".into(), Group::Working),
+                ("t-0002".into(), Group::ReadyForReview),
+            ]),
+            omitted_nodes: 0,
+        };
+        assert_eq!(
+            summary_line(&view),
+            "2 nodes · 1 need you · 1 working · 1 PR open"
+        );
+        let collapsed = BTreeSet::new();
+        let rows = visible_rows(&view, &collapsed, false);
+        let settings = SidebarSettings::default();
+        let worker_row = row_text(&view, &rows[2], &settings, &collapsed, false);
+        assert!(
+            worker_row.contains("Form  ● review  PR #12 open"),
+            "{worker_row}"
+        );
+        assert_eq!(
+            selection_lines(&view, Some(rows[2])),
+            [
+                "PR: https://github.com/o/r/pull/12",
+                "Status: done, tested",
+                "Needs: a merge"
+            ]
+        );
+        assert_eq!(selection_lines(&view, Some(rows[0])), ["Needs you: t-0002"]);
+        assert_eq!(next_needing_you(&rows, &view, 0), Some(2));
+        assert_eq!(next_needing_you(&rows, &view, 2), Some(2));
+    }
+
     use crate::runner::fake::ok;
     use crate::scenarios::World;
 
@@ -2010,6 +2226,7 @@ mod tests {
         let project = world.project("demo", "a.sock");
         let current = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[thread_model::Thread {
                 id: "t-0001".into(),
                 title: "Stable worker".into(),
@@ -2057,6 +2274,7 @@ mod tests {
         .unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::new(),
             omitted_nodes: 0,
@@ -2072,6 +2290,7 @@ mod tests {
         let project = world.project("demo", "a.sock");
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[thread_model::Thread {
                 id: "t-0001".into(),
                 title: "Current worker".into(),
@@ -2102,6 +2321,7 @@ mod tests {
         let project = world.project("demo", "a.sock");
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[
                 thread_model::Thread {
                     id: "t-0001".into(),
@@ -2139,6 +2359,7 @@ mod tests {
         let project = world.project("demo", "a.sock");
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[
                 thread_model::Thread {
                     id: "t-0001".into(),
@@ -2170,11 +2391,12 @@ mod tests {
     }
 
     #[test]
-    fn moving_selection_repaints_only_the_two_changed_rows() {
+    fn moving_selection_repaints_only_the_changed_rows() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries: organizations::tree_from(&[thread_model::Thread {
                 id: "t-0001".into(),
                 title: "Worker".into(),
@@ -2211,7 +2433,8 @@ mod tests {
             .windows(clear_sequence.len())
             .filter(|window| *window == clear_sequence)
             .count();
-        assert_eq!(changed_rows, 2);
+        // The two tree rows and the selection's detail row below the tree.
+        assert_eq!(changed_rows, 3);
         assert!(output.len() < full_render_bytes);
 
         output.clear();
@@ -2246,6 +2469,7 @@ mod tests {
         let entries = organizations::tree_from(&records).unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::new(),
             omitted_nodes: 0,
@@ -2266,11 +2490,14 @@ mod tests {
         let entries = organizations::tree_from(&[thread_model::Thread {
             id: "t-0001".into(),
             title: "Review the release".into(),
+            role: NodeRole::Coordinator,
+            can_spawn: true,
             ..thread_model::Thread::default()
         }])
         .unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::from([("t-0001".into(), Group::ReadyForReview)]),
             omitted_nodes: 0,
@@ -2283,7 +2510,7 @@ mod tests {
         let title_position = visible_text.find("Review the release").unwrap();
         let status_position = visible_text.find("Ready for review").unwrap();
         assert!(title_position < status_position);
-        assert!(visible_text.contains("worker"));
+        assert!(visible_text.ends_with("coordinator"));
         assert_eq!(visible_color, Some(Color::Blue));
 
         let hidden_settings = SidebarSettings {
@@ -2295,7 +2522,7 @@ mod tests {
             row_text_with_color(&view, &row, &hidden_settings, &BTreeSet::new(), false);
         assert!(hidden_text.contains("Review the release"));
         assert!(!hidden_text.contains("Ready for review"));
-        assert!(!hidden_text.contains("worker"));
+        assert!(!hidden_text.contains("coordinator"));
         assert_eq!(hidden_color, None);
     }
 
@@ -2311,6 +2538,7 @@ mod tests {
         .unwrap();
         let view = TreeView {
             project,
+            details: HashMap::new(),
             entries,
             groups: HashMap::from([("t-0001".into(), Group::ReadyForReview)]),
             omitted_nodes: 0,
