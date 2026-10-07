@@ -631,7 +631,7 @@ pub fn agents_md(name: &str, slug: &str, prefix: &str) -> String {
     format!(
         "# {name}\n\n\
          This folder is the home of the Herdr project \"{name}\" (`{slug}`). Written by herdr-projects; `doctor --fix` refreshes it.\n\n\
-         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, and run `{prefix} context {slug}` now and whenever you need project state.\n\n\
+         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, read the instructions in `PROJECT.md` and the handoff in `HANDOFF.md` once, and run `{prefix} context {slug}` now and whenever you need project state.\n\n\
          If your working directory is under `threads/`, you are a thread: your brief is in your own folder (`.herdr-project/{slug}-<id>/brief.md`); ignore the rest of this file.\n"
     )
 }

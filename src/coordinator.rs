@@ -23,7 +23,6 @@ use crate::{inbox, names, organizations, ticker};
 /// A coordinator counts as idle for a nudge once its `(agent_status,
 /// state_change_seq)` pair has been `idle` this long (four ticks).
 pub const NUDGE_IDLE_SECS: i64 = 60;
-const MAX_HANDOFF_CHARS: usize = 8_000;
 
 /// `<binary> --root <root>`: the fixed shape every printed command starts
 /// with, so allow-list patterns can match on it. Values with spaces are quoted.
@@ -754,33 +753,18 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         let _ = writeln!(out, "Uploads: {}", uploads.join(", "));
     }
 
-    let _ = writeln!(out, "\n## Project instructions (PROJECT.md)");
-    let _ = writeln!(
-        out,
-        "{}",
-        if instructions.trim().is_empty() {
-            "(none)"
-        } else {
-            instructions.trim()
-        }
-    );
-
-    let _ = writeln!(out, "\n## Current handoff (HANDOFF.md)");
+    // Instructions and the handoff are pickup material, read once per
+    // session (AGENTS.md says so), not reprinted on every turn.
     let handoff = std::fs::read_to_string(project.dir().join("HANDOFF.md")).unwrap_or_default();
-    let handoff_chars = handoff.chars().count();
-    let bounded_handoff: String = handoff.chars().take(MAX_HANDOFF_CHARS).collect();
     let _ = writeln!(
         out,
-        "{}",
-        if bounded_handoff.trim().is_empty() {
-            "(none; coordinator must maintain HANDOFF.md)".to_string()
-        } else if handoff_chars > MAX_HANDOFF_CHARS {
-            format!(
-                "{}\n\n(truncated after {MAX_HANDOFF_CHARS} characters; compact HANDOFF.md)",
-                bounded_handoff.trim()
-            )
+        "Pickup, read once per session: PROJECT.md instructions ({} chars), HANDOFF.md ({} chars{})",
+        instructions.trim().chars().count(),
+        handoff.trim().chars().count(),
+        if handoff.trim().is_empty() {
+            "; write it when work starts"
         } else {
-            bounded_handoff.trim().to_string()
+            "; keep it current"
         }
     );
 
@@ -811,34 +795,30 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         .count();
     let _ = writeln!(out, "\n## Organization ({open_count} open nodes)");
     let _ = writeln!(out, "- root [active] coordinator: project coordinator");
-    match organizations::tree(project) {
+    // Indentation is the tree; a resolved lead stays while it still has
+    // open work under it.
+    match organizations::visible_tree(project, false) {
         Ok(entries) => {
             for entry in entries {
                 let Some(row) = rows_by_id.get(entry.thread.id.as_str()) else {
                     continue;
                 };
-                if row.group == crate::thread::Group::Resolved {
-                    continue;
-                }
                 let thread = &row.thread;
-                let place = if thread.branch.is_empty() {
-                    "tab".to_string()
-                } else {
-                    thread.branch.clone()
-                };
                 let title: String = thread
                     .title
                     .chars()
                     .map(|ch| if ch.is_control() { ' ' } else { ch })
                     .collect();
+                let role = match thread.role {
+                    crate::thread::NodeRole::Coordinator => " coordinator",
+                    crate::thread::NodeRole::Worker => "",
+                };
                 let _ = writeln!(
                     out,
-                    "{}- {} [{}] {} parent={} {} ({place}; {}; {})",
+                    "{}- {} [{}]{role} {} ({}; {})",
                     "  ".repeat(entry.depth),
                     thread.id,
                     row.group.label(),
-                    thread.role.as_str(),
-                    organizations::parent_id(thread),
                     title.trim(),
                     row.note,
                     if thread.profile.is_empty() {

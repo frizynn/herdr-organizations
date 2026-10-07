@@ -3052,7 +3052,7 @@ fn the_digest_prints_the_task_list_or_none() {
 }
 
 #[test]
-fn the_digest_orders_project_handoff_and_recursive_organization() {
+fn the_digest_points_at_pickup_files_and_lists_the_tree_in_order() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
     let project_md = std::fs::read_to_string(project.project_md()).unwrap();
@@ -3080,17 +3080,18 @@ fn the_digest_orders_project_handoff_and_recursive_organization() {
     .unwrap();
 
     let digest = coordinator::digest(&world.ctx(), &project, "hp").unwrap().0;
-    let instructions = digest.find("## Project instructions").unwrap();
-    let handoff = digest.find("## Current handoff").unwrap();
+    // Pickup material is named with its size, never reprinted every turn.
+    let pickup = digest.find("Pickup, read once per session").unwrap();
     let memory = digest.find("## Memory index").unwrap();
     let organization = digest.find("## Organization").unwrap();
-    assert!(instructions < handoff && handoff < memory && memory < organization);
-    assert!(digest.contains("Project rule sentinel."));
-    assert!(digest.contains("Handoff sentinel."));
+    assert!(pickup < memory && memory < organization);
+    assert!(digest.contains("HANDOFF.md (50 chars; keep it current)"));
+    assert!(!digest.contains("Project rule sentinel.") && !digest.contains("Handoff sentinel."));
     let parent_pos = digest.find(&format!("- {} [", parent.id)).unwrap();
     let child_pos = digest.find(&format!("- {} [", child.id)).unwrap();
     assert!(parent_pos < child_pos);
-    assert!(digest[child_pos..].contains(&format!("parent={}", parent.id)));
+    // The child sits one level deeper than its lead.
+    assert!(digest.contains(&format!("\n    - {} [", child.id)));
 }
 
 // ------------------------------------------------------------------ slice 1
