@@ -60,6 +60,29 @@ pub fn safe_subject(subject: &str) -> String {
     }
 }
 
+/// Every class `class` returns, for validating `quiet_events`.
+pub const CLASSES: [&str; 19] = [
+    "needs-you",
+    "new-report",
+    "report-no-needs",
+    "idle",
+    "landing",
+    "resolved",
+    "pr-opened",
+    "pr-updated",
+    "pr-review",
+    "pr-merged",
+    "pr-closed",
+    "checks-failed",
+    "routine",
+    "routine-approval",
+    "outage",
+    "config-error",
+    "session",
+    "space",
+    "rename",
+];
+
 /// What an item is about, for `quiet_events` in PROJECT.md: `needs-you`,
 /// `new-report`, `report-no-needs`, `idle`, `landing`, `resolved`, `pr-opened`, `pr-updated`,
 /// `pr-review`, `pr-merged`, `pr-closed`, `checks-failed`, or else the
@@ -311,6 +334,16 @@ mod tests {
         assert_eq!(class_of("thread-state", "pane closed"), "needs-you");
         assert_eq!(class_of("pr", "PR checks failing"), "checks-failed");
         assert_eq!(class_of("routine", ""), "routine");
+        // Every class an item can get is a valid `quiet_events` entry.
+        for (kind, event) in [
+            ("thread-state", "new report"),
+            ("thread-state", "report, needs nothing"),
+            ("thread-state", "idle"),
+            ("pr", "PR review activity"),
+            ("rename", "project renamed"),
+        ] {
+            assert!(CLASSES.contains(&class_of(kind, event).as_str()));
+        }
     }
 
     #[test]

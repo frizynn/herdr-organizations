@@ -11,7 +11,7 @@ use crate::paths::Ctx;
 use crate::project::{self, Project, Settings};
 
 /// The keys `set` accepts, with what they hold.
-pub const KEYS: [(&str, &str); 10] = [
+pub const KEYS: [(&str, &str); 12] = [
     ("name", "text"),
     ("goal", "text"),
     ("coordinator_profile", "profile name"),
@@ -20,6 +20,8 @@ pub const KEYS: [(&str, &str); 10] = [
     ("auto_resolve_days", "number (0 = never)"),
     ("nudge", "true/false"),
     ("mute", "true/false"),
+    ("quiet_events", "comma-separated event classes, or none"),
+    ("wake_batch_secs", "seconds (0 = no wait)"),
     ("repos.add", "PATH or PATH@MACHINE"),
     ("repos.remove", "PATH"),
 ];
@@ -114,6 +116,31 @@ pub fn set_in(text: &str, key: &str, value: &str) -> Result<String> {
             doc[key] = toml_edit::value(n);
         }
         "nudge" | "mute" => doc[key] = toml_edit::value(parse_bool(value)?),
+        "wake_batch_secs" => {
+            let n: i64 = value
+                .parse()
+                .ok()
+                .filter(|n: &i64| (0..=3600).contains(n))
+                .with_context(|| format!("`{value}` is not a number of seconds from 0 to 3600"))?;
+            doc[key] = toml_edit::value(n);
+        }
+        "quiet_events" => {
+            let mut list = toml_edit::Array::new();
+            for class in value
+                .split(',')
+                .map(str::trim)
+                .filter(|c| !c.is_empty() && *c != "none")
+            {
+                if !crate::inbox::CLASSES.contains(&class) {
+                    bail!(
+                        "`{class}` is not an event class; use {}",
+                        crate::inbox::CLASSES.join(", ")
+                    );
+                }
+                list.push(class);
+            }
+            doc[key] = toml_edit::value(list);
+        }
         "repos.add" => {
             let repo = project::parse_repo_arg(value);
             if repo.path.is_empty() {
@@ -173,6 +200,11 @@ pub fn set_in(text: &str, key: &str, value: &str) -> Result<String> {
 
 /// `set <slug> <key> <value>`.
 pub fn set(ctx: &Ctx, slug: &str, key: &str, value: &str) -> Result<()> {
+    if key.starts_with("tree.") {
+        crate::organization_sidebar::set_setting(ctx, key, value)?;
+        println!("{key} = {}", value.trim());
+        return Ok(());
+    }
     let project = Project::load(&ctx.root, slug)?;
     if let Some(role) = key.strip_suffix("_profile").or(key.strip_suffix("_agent")) {
         // A default must be a profile this project may use.
@@ -363,6 +395,23 @@ mod tests {
             "sol"
         );
         assert!(set_in(MD, "whatever", "x").is_err());
+        let quiet = set_in(MD, "quiet_events", "idle, pr-merged").unwrap();
+        assert!(
+            quiet.contains("quiet_events = [\"idle\", \"pr-merged\"]"),
+            "{quiet}"
+        );
+        assert!(set_in(MD, "quiet_events", "idle, typo").is_err());
+        assert!(
+            set_in(MD, "quiet_events", "none")
+                .unwrap()
+                .contains("quiet_events = []")
+        );
+        assert!(
+            set_in(MD, "wake_batch_secs", "30")
+                .unwrap()
+                .contains("wake_batch_secs = 30")
+        );
+        assert!(set_in(MD, "wake_batch_secs", "-1").is_err());
         let muted = set_in(MD, "mute", "on").unwrap();
         assert!(project::parse_project_md(&muted).unwrap().0.mute);
         let goal = set_in(MD, "goal", "Ship \"it\"").unwrap();

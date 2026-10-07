@@ -105,6 +105,57 @@ impl SidebarSettings {
     }
 }
 
+/// The tree view's settings as `set` keys and values, for the popup.
+pub fn setting_values(settings: &SidebarSettings) -> Vec<(&'static str, String)> {
+    let on = |value: bool| value.to_string();
+    vec![
+        ("tree.dock", settings.dock_side.label().to_ascii_lowercase()),
+        ("tree.width", settings.width_percent.to_string()),
+        ("tree.focus_on_open", on(settings.focus_on_open)),
+        ("tree.auto_open", on(settings.auto_open)),
+        ("tree.close_on_shortcut", on(settings.strict_toggle)),
+        ("tree.show_resolved", on(settings.show_resolved)),
+        ("tree.show_status", on(settings.show_status)),
+        ("tree.show_role", on(settings.show_role)),
+    ]
+}
+
+/// `set <project> tree.<key> <value>`: the tree view's settings are this
+/// user's, the same for every project, so the project is not used.
+pub fn set_setting(ctx: &Ctx, key: &str, value: &str) -> Result<()> {
+    let mut settings = load_settings(ctx)?;
+    let flag = |value: &str| match value.trim() {
+        "true" | "on" | "yes" => Ok(true),
+        "false" | "off" | "no" => Ok(false),
+        other => bail!("`{other}` is not true or false"),
+    };
+    match key {
+        "tree.dock" => {
+            settings.dock_side = match value.trim() {
+                "left" => DockSide::Left,
+                "right" => DockSide::Right,
+                other => bail!("`{other}` is not left or right"),
+            }
+        }
+        "tree.width" => {
+            settings.width_percent = value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|w| (15..=50).contains(w))
+                .with_context(|| format!("`{value}` is not a width from 15 to 50 (percent)"))?
+        }
+        "tree.focus_on_open" => settings.focus_on_open = flag(value)?,
+        "tree.auto_open" => settings.auto_open = flag(value)?,
+        "tree.close_on_shortcut" => settings.strict_toggle = flag(value)?,
+        "tree.show_resolved" => settings.show_resolved = flag(value)?,
+        "tree.show_status" => settings.show_status = flag(value)?,
+        "tree.show_role" => settings.show_role = flag(value)?,
+        other => bail!("`{other}` is not a tree setting"),
+    }
+    save_settings(ctx, &settings)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToggleResult {
     Opened,
@@ -2156,6 +2207,24 @@ mod tests {
             ("HERDR_SOCKET_PATH", socket.to_str().unwrap()),
         ];
         crate::paths::Env::for_test(world.home.path(), &vars)
+    }
+
+    #[test]
+    fn tree_settings_are_set_by_key_from_the_popup_and_checked() {
+        let world = World::new();
+        let env = plugin_env(&world);
+        let ctx = plugin_ctx(&world, &env);
+        crate::settings::set(&ctx, "any", "tree.dock", "left").unwrap();
+        crate::settings::set(&ctx, "any", "tree.width", "40").unwrap();
+        crate::settings::set(&ctx, "any", "tree.show_resolved", "on").unwrap();
+        let settings = load_settings(&ctx).unwrap();
+        assert_eq!(settings.dock_side, DockSide::Left);
+        assert_eq!(settings.width_percent, 40);
+        assert!(settings.show_resolved);
+        assert!(setting_values(&settings).contains(&("tree.dock", "left".into())));
+        assert!(set_setting(&ctx, "tree.width", "90").is_err());
+        assert!(set_setting(&ctx, "tree.dock", "up").is_err());
+        assert!(set_setting(&ctx, "tree.nope", "true").is_err());
     }
 
     fn plugin_ctx<'a>(world: &'a World, env: &'a crate::paths::Env) -> Ctx<'a> {

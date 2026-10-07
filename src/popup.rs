@@ -407,6 +407,14 @@ fn header(text: impl Into<String>) -> Row {
 fn thread_line(r: &ThreadRow, with_project: bool) -> String {
     let t = &r.thread;
     let mut parts = vec![format!("{}  {}", t.id, t.title)];
+    // The tree lives in the sidebar; here a row says where it sits.
+    if t.role == crate::thread::NodeRole::Coordinator {
+        parts.push("lead".into());
+    }
+    let parent = crate::organizations::parent_id(t);
+    if parent != crate::organizations::ROOT_ID {
+        parts.push(format!("under {parent}"));
+    }
     let state = if t.state_line.is_empty() {
         crate::sidebar::word(r.group).to_string()
     } else {
@@ -659,6 +667,15 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                         ("auto_resolve_days", s.auto_resolve_days.to_string()),
                         ("nudge", s.nudge.to_string()),
                         ("mute", s.mute.to_string()),
+                        (
+                            "quiet_events",
+                            if s.quiet_events.is_empty() {
+                                "none".to_string()
+                            } else {
+                                s.quiet_events.join(", ")
+                            },
+                        ),
+                        ("wake_batch_secs", s.wake_batch_secs.to_string()),
                         ("repos.add", crate::settings::repos_text(&s)),
                         ("repos.remove", crate::settings::repos_text(&s)),
                     ];
@@ -678,6 +695,22 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                                 value,
                             },
                         });
+                    }
+                    // The tree view's settings: this user's, every project.
+                    if let Ok(tree) = crate::organization_sidebar::load_settings(ctx) {
+                        rows.push(header("tree view (yours, for every project)"));
+                        for (key, value) in crate::organization_sidebar::setting_values(&tree) {
+                            rows.push(Row {
+                                header: false,
+                                text: format!("  {key:<22} {value}"),
+                                color: None,
+                                kind: RowKind::Setting {
+                                    slug: slug.to_string(),
+                                    key: key.to_string(),
+                                    value,
+                                },
+                            });
+                        }
                     }
                 }
             }
@@ -2081,12 +2114,32 @@ impl<'a> Popup<'a> {
                         }
                         "thread_profiles" => self.allow_toggle(&slug, Role::Thread),
                         "coordinator_profiles" => self.allow_toggle(&slug, Role::Coordinator),
-                        "nudge" | "mute" => {
+                        "nudge"
+                        | "mute"
+                        | "tree.focus_on_open"
+                        | "tree.auto_open"
+                        | "tree.close_on_shortcut"
+                        | "tree.show_resolved"
+                        | "tree.show_status"
+                        | "tree.show_role" => {
                             let mut action = action;
                             action.push("{}".into());
                             Mode::Pick {
                                 label: name.clone(),
                                 options: vec![(value != "true").to_string(), value.clone()],
+                                selected: 0,
+                                action,
+                            }
+                        }
+                        "tree.dock" => {
+                            let mut action = action;
+                            action.push("{}".into());
+                            Mode::Pick {
+                                label: name.clone(),
+                                options: vec![
+                                    if value == "left" { "right" } else { "left" }.to_string(),
+                                    value.clone(),
+                                ],
                                 selected: 0,
                                 action,
                             }
