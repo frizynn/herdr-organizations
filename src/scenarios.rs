@@ -5181,6 +5181,8 @@ fn by_default_idle_resolved_and_opened_events_never_wake_and_others_wait_for_the
     inbox::write(&project, "pr", "t-0001", "PR opened", "s", "").unwrap();
     assert!(inbox::unhandled(&project).is_empty());
     inbox::write(&project, "pr", "t-0001", "PR merged", "s", "").unwrap();
+    assert!(inbox::unhandled(&project).is_empty());
+    inbox::write(&project, "pr", "t-0001", "PR checks failing", "s", "").unwrap();
     world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
     let ctx = world.ctx();
     let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), "a.sock", ctx.runner);
@@ -5227,7 +5229,7 @@ fn by_default_idle_resolved_and_opened_events_never_wake_and_others_wait_for_the
         quiet,
     )
     .unwrap();
-    assert_eq!(nudges(&world), ["[hp inbox] t-0001 PR merged"]);
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 PR checks failing"]);
 }
 
 #[test]

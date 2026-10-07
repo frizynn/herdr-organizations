@@ -494,6 +494,41 @@ fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
 pub const HEADER_LINES: usize = 3;
 const HEADER_LINE_CHARS: usize = 160;
 
+/// True when a report's header says it needs nothing and is not stuck: its
+/// `Needs:` line (the third) starts with nothing, none or nada, and its
+/// `Status:` line (the second) is not blocked or waiting for a decision. A
+/// report without that header needs its coordinator, to be safe.
+pub fn report_needs_nothing(report: &str) -> bool {
+    let Some(header) = report_header(report) else {
+        return false;
+    };
+    let lines: Vec<&str> = header.split(" | ").collect();
+    let value = |line: Option<&&str>| {
+        line.and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+    let (status, needs) = (value(lines.get(1)), value(lines.get(2)));
+    let nothing = ["nothing", "none", "nada", "ninguno", "ninguna", "n/a", "-"]
+        .iter()
+        .any(|word| {
+            needs == *word
+                || needs
+                    .strip_prefix(word)
+                    .is_some_and(|rest| rest.starts_with(|c: char| !c.is_alphanumeric()))
+        });
+    let stuck = [
+        "blocked",
+        "bloque",
+        "needs-decision",
+        "decision",
+        "decisión",
+    ]
+    .iter()
+    .any(|word| status.contains(word));
+    nothing && !stuck
+}
+
 pub fn report_header(report: &str) -> Option<String> {
     let lines: Vec<String> = report
         .lines()
@@ -1052,6 +1087,26 @@ mod tests {
         assert_eq!(error, "--rules-file is over 8192 bytes");
         assert!(thread::list(&project).is_empty());
         assert!(!project.dir().join("nodes").exists());
+    }
+
+    #[test]
+    fn only_a_report_that_asks_for_nothing_and_is_not_stuck_stays_quiet() {
+        assert!(report_needs_nothing(
+            "PR: none\nStatus: in-progress\nNeeds: nothing\n"
+        ));
+        assert!(report_needs_nothing(
+            "PR: none\nEstado: en curso\nQué necesito: nada todavía.\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: done\nNeeds: a merge of #12\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: blocked on CI\nNeeds: nothing\n"
+        ));
+        assert!(!report_needs_nothing(
+            "PR: none\nStatus: done\nNeeds: nothingness\n"
+        ));
+        assert!(!report_needs_nothing("Long prose without a header."));
     }
 
     #[test]

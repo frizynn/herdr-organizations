@@ -336,7 +336,12 @@ pub fn write_thread_items(
                 notes.join("; ")
             ));
         }
-        inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
+        // A report that asks for nothing is recorded without waking anyone.
+        let event = match std::fs::read_to_string(thread::home_report_path(project, &t.id)) {
+            Ok(report) if organizations::report_needs_nothing(&report) => "report, needs nothing",
+            _ => "new report",
+        };
+        inbox::write(project, "thread-state", &t.id, event, &summary, "")?;
         notifier.send(
             &t.id,
             &format!("review · new report: {}", t.title),

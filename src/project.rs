@@ -164,10 +164,18 @@ pub struct Settings {
     pub repos: Vec<Repo>,
 }
 
-/// Thread chatter that needs no coordinator turn: the tree and the popup
-/// still show it.
-pub const DEFAULT_QUIET_EVENTS: [&str; 5] =
-    ["idle", "landing", "resolved", "pr-opened", "pr-updated"];
+/// What needs no coordinator turn: chatter, reports that ask for nothing,
+/// and merges, which the ticker resolves itself. The tree and the popup
+/// still show them.
+pub const DEFAULT_QUIET_EVENTS: [&str; 7] = [
+    "idle",
+    "landing",
+    "resolved",
+    "pr-opened",
+    "pr-updated",
+    "pr-merged",
+    "report-no-needs",
+];
 
 impl Default for Settings {
     fn default() -> Self {

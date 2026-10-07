@@ -61,12 +61,13 @@ pub fn safe_subject(subject: &str) -> String {
 }
 
 /// What an item is about, for `quiet_events` in PROJECT.md: `needs-you`,
-/// `new-report`, `idle`, `landing`, `resolved`, `pr-opened`, `pr-updated`,
+/// `new-report`, `report-no-needs`, `idle`, `landing`, `resolved`, `pr-opened`, `pr-updated`,
 /// `pr-review`, `pr-merged`, `pr-closed`, `checks-failed`, or else the
 /// item's kind (`routine`, `outage`, `config-error`, ...).
 pub fn class(item: &Item) -> String {
     let class = match (item.kind.as_str(), item.event.as_str()) {
         ("thread-state", "new report") => "new-report",
+        ("thread-state", "report, needs nothing") => "report-no-needs",
         ("thread-state", "idle") => "idle",
         ("thread-state", "landing") => "landing",
         ("thread-state", "resolved") => "resolved",
@@ -279,6 +280,7 @@ mod tests {
         let idle = write(&project, "thread-state", "t-0001", "idle", "s", "").unwrap();
         let report = write(&project, "thread-state", "t-0001", "new report", "s", "").unwrap();
         let opened = write(&project, "pr", "t-0001", "PR opened", "s", "").unwrap();
+        let failing = write(&project, "pr", "t-0001", "PR checks failing", "s", "").unwrap();
         let merged = write(&project, "pr", "t-0001", "PR merged", "s", "").unwrap();
         let blocked = write(
             &project,
@@ -290,8 +292,8 @@ mod tests {
         )
         .unwrap();
         let queued: BTreeSet<String> = unhandled(&project).into_iter().map(|i| i.id).collect();
-        assert_eq!(queued, BTreeSet::from([report, merged, blocked]));
-        for id in [idle, opened] {
+        assert_eq!(queued, BTreeSet::from([report, failing, blocked]));
+        for id in [idle, opened, merged] {
             assert!(
                 inbox_dir(&project)
                     .join("done")
