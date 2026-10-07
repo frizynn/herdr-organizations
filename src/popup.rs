@@ -934,6 +934,20 @@ pub fn summary(root: &Path) -> String {
     )
 }
 
+/// Thread rows without the resolved ones; their heading stays, with the
+/// key that lists them.
+fn hide_resolved(rows: Vec<Row>, key: &str) -> Vec<Row> {
+    rows.into_iter()
+        .filter(|row| !matches!(&row.kind, RowKind::Thread(r) if r.group == Group::Resolved))
+        .map(|mut row| {
+            if row.header && row.text.starts_with(Group::Resolved.label()) {
+                row.text = format!("{} · {key} lists them", row.text);
+            }
+            row
+        })
+        .collect()
+}
+
 /// The rows whose text holds `filter` (any case), each under its heading;
 /// a heading with no match left goes too.
 fn filter_rows(rows: Vec<Row>, filter: &str) -> Vec<Row> {
@@ -1020,6 +1034,8 @@ pub struct Popup<'a> {
     filter: String,
     /// The filter is being typed.
     filtering: bool,
+    /// Resolved threads are listed, not only counted.
+    show_resolved: bool,
 }
 
 impl<'a> Popup<'a> {
@@ -1039,6 +1055,7 @@ impl<'a> Popup<'a> {
             theme: Theme::load(&ctx.config_dir, ctx.env),
             filter: String::new(),
             filtering: false,
+            show_resolved: false,
         };
         let errors: Vec<String> = popup
             .keymap
@@ -1083,6 +1100,12 @@ impl<'a> Popup<'a> {
         if SECTIONS[self.section] == Section::Settings {
             self.rows
                 .extend(safety_rows(self.ctx, self.scope.as_deref()));
+        }
+        if SECTIONS[self.section] == Section::Threads && !self.show_resolved {
+            let key = self
+                .keymap
+                .key_for(Context::Threads, Action::ToggleResolved);
+            self.rows = hide_resolved(std::mem::take(&mut self.rows), &key);
         }
         if !self.filter.is_empty() {
             self.rows = filter_rows(std::mem::take(&mut self.rows), &self.filter);
@@ -1830,6 +1853,11 @@ impl<'a> Popup<'a> {
     }
 
     fn thread_key(&mut self, act: Action, typed: Option<char>) {
+        if act == Action::ToggleResolved {
+            self.show_resolved = !self.show_resolved;
+            self.reload();
+            return;
+        }
         let slug_for_coordinator =
             self.scope
                 .clone()
@@ -3290,6 +3318,33 @@ pub fn run(ctx: &Ctx, scope: Option<String>, workspace: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_threads_are_counted_until_listed() {
+        let thread = |group| Row {
+            header: false,
+            text: String::new(),
+            tone: Tone::Plain,
+            kind: RowKind::Thread(Box::new(ThreadRow {
+                slug: "demo".into(),
+                socket: String::new(),
+                thread: Thread::default(),
+                group,
+                next: Vec::new(),
+                pr_facts: String::new(),
+            })),
+        };
+        let rows = vec![
+            header("Working (1)"),
+            thread(Group::Working),
+            header("Resolved (2)"),
+            thread(Group::Resolved),
+            thread(Group::Resolved),
+        ];
+        let shown = hide_resolved(rows, ".");
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown[2].text, "Resolved (2) · . lists them");
+    }
 
     #[test]
     fn wrapped_lines_keep_their_indent_and_fit() {
