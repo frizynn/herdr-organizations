@@ -1650,7 +1650,7 @@ fn a_finishing_thread_gives_one_item_and_one_nudge_until_a_new_item_arrives() {
     assert!(items[0].summary.contains("threads/t-0001.md"));
     assert!(items[0].body.is_empty());
     // One nudge, to the coordinator's pane, saying what happened.
-    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report «done»"]);
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report"]);
     let calls = world.runner.calls.borrow();
     let nudge = calls
         .iter()
@@ -5257,4 +5257,77 @@ fn the_root_digest_counts_a_subtrees_items_instead_of_listing_them() {
     assert!(digest.contains("- waiting for their own coordinators: t-0001 (1)"));
     assert!(digest.contains("LEAD") && !digest.contains("SUBTREE"));
     assert_eq!(shown.len(), 1);
+}
+
+#[test]
+fn a_due_routine_keeps_its_prompt_for_context_after_the_wake_up() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    inbox::write(
+        &project,
+        "routine",
+        "nightly",
+        "due",
+        "s",
+        "Summarise the day.",
+    )
+    .unwrap();
+    inbox::write(&project, "thread-state", "t-0001", "new report", "s", "").unwrap();
+    world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    let ctx = world.ctx();
+    let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), "a.sock", ctx.runner);
+    let (settings, _) = project.read_project_md().unwrap();
+    let root = crate::coordinator::LivePane {
+        pane_id: "w1:p1".into(),
+        agent: "claude".into(),
+        ..Default::default()
+    };
+    let mut state = crate::steps::State {
+        boxes: [("w1:p1".to_string(), "2026-01-01T00:00:00Z".to_string())].into(),
+        ..Default::default()
+    };
+    let now = jiff::Timestamp::now();
+    crate::steps::nudge(
+        &project,
+        &mut state,
+        &settings,
+        &herdr,
+        Some(&root),
+        &[],
+        now,
+    )
+    .unwrap();
+    let prompt = world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .find_map(|c| {
+            c.args
+                .last()
+                .filter(|a| a.starts_with("[hp inbox]"))
+                .cloned()
+        })
+        .unwrap();
+    assert!(
+        prompt.ends_with("Run `context` for the other items' details."),
+        "{prompt}"
+    );
+    // The report item is archived; the routine and its prompt stay for
+    // `context`, marked seen so they do not wake the coordinator again.
+    let left = inbox::unhandled(&project);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].body, "Summarise the day.");
+    assert!(inbox::seen(&project).contains(&left[0].id));
+    crate::steps::nudge(
+        &project,
+        &mut state,
+        &settings,
+        &herdr,
+        Some(&root),
+        &[],
+        now,
+    )
+    .unwrap();
+    assert_eq!(world.runner.count("agent prompt"), 1);
 }

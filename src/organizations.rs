@@ -488,7 +488,8 @@ fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
 
 /// A report's header is its first three lines of text: the fixed
 /// `Status:` / `Needs:` / `PR:` lines the thread brief asks for. Headings and
-/// blank lines are skipped, each line is cut to `HEADER_LINE_CHARS`, and the
+/// blank lines are skipped, the header stops at the first line that is not
+/// `Label: value`, each line is cut to `HEADER_LINE_CHARS`, and the
 /// result is one line, so it can ride in a wake-up as data.
 pub const HEADER_LINES: usize = 3;
 const HEADER_LINE_CHARS: usize = 160;
@@ -499,6 +500,16 @@ pub fn report_header(report: &str) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .take(HEADER_LINES)
+        // A header line is `Label: value` with a short label (`PR`,
+        // `Status`, `Needs`, or the same in the project's language). A
+        // report that starts with prose or a table has no header.
+        .take_while(|line| {
+            line.split_once(':').is_some_and(|(label, _)| {
+                !label.is_empty()
+                    && label.chars().count() <= 24
+                    && label.chars().all(|c| c.is_alphanumeric() || c == ' ')
+            })
+        })
         .map(|line| {
             let clean: String = line
                 .chars()
@@ -1055,6 +1066,11 @@ mod tests {
         assert_eq!(header.chars().count(), 160);
         assert!(header.ends_with('…') && !header.contains('\u{1b}'));
         assert_eq!(report_header("# Only a title\n\n"), None);
+        assert_eq!(report_header("| Producto | Antes |\nStatus: x"), None);
+        assert_eq!(
+            report_header("Estado: hecho\nDe vos: nada\nUn párrafo largo.").as_deref(),
+            Some("Estado: hecho | De vos: nada")
+        );
     }
 
     #[test]

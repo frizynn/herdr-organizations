@@ -950,6 +950,11 @@ fn launch_pass(
             let config = crate::profiles::load(&ctx.config_dir)?;
             let (settings, _) = project.read_project_md()?;
             let legacy = crate::profiles::legacy_agent(&config, &settings, role);
+            // Old project-wide flags belong to the role's own harness.
+            let legacy_args = match role {
+                crate::profiles::Role::Thread => &safety.thread_agent_args,
+                crate::profiles::Role::Coordinator => &safety.coordinator_agent_args,
+            };
             let (kind, mut args) = if t.profile.is_empty() {
                 // A thread started before profiles: the built-in of its kind
                 // plus its stored model flag, which passes the same model-only
@@ -974,7 +979,7 @@ fn launch_pass(
                 let builtin = config
                     .get(&t.agent)
                     .filter(|p| p.builtin)
-                    .map(|p| crate::profiles::launch_args(&p, &safety.thread_agent_args, &legacy))
+                    .map(|p| crate::profiles::launch_args(&p, legacy_args, &legacy))
                     .unwrap_or_default();
                 (t.agent.clone(), [builtin, model].concat())
             } else if t.remote_profile {
@@ -1038,7 +1043,7 @@ fn launch_pass(
                 }
                 (
                     profile.agent().to_string(),
-                    crate::profiles::launch_args(&profile, &safety.thread_agent_args, &legacy),
+                    crate::profiles::launch_args(&profile, legacy_args, &legacy),
                 )
             };
             if !t.is_remote() {

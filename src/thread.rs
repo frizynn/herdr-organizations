@@ -505,13 +505,14 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
     let (settings, _) = project.read_project_md()?;
     let project_name = project::display_name(&settings.name, &project.slug);
     let uploads = project.dir().join("uploads").to_string_lossy().into_owned();
+    let command_prefix = crate::coordinator::current_prefix(&project.root).unwrap_or_default();
+    // A remote thread cannot run this machine's binary.
     let prefix = if thread.is_remote() {
         String::new()
     } else {
-        crate::coordinator::current_prefix(&project.root).unwrap_or_default()
+        command_prefix.clone()
     };
     let context = organizations::scoped_context(project, thread)?;
-    let command_prefix = crate::coordinator::current_prefix(&project.root)?;
     let protocol = organizations::node_protocol(thread, &command_prefix, &project.slug);
     Ok(compose_brief(&BriefInput {
         project_name: &project_name,
