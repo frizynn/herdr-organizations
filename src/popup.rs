@@ -627,64 +627,76 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
             Some(slug) => {
                 if let Ok(project) = Project::load(root, slug) {
                     let (s, _) = project.read_project_md().unwrap_or_default_settings();
-                    rows.push(header(format!(
-                        "{} · {}",
-                        project::display_name(&s.name, slug),
-                        project.status()
-                    )));
-                    let values = [
-                        ("name", s.name.clone()),
-                        ("goal", s.goal.clone()),
-                        ("coordinator_profile", s.coordinator_profile.clone()),
-                        ("thread_profile", s.thread_profile.clone()),
+                    let repos = crate::settings::repos_text(&s);
+                    let groups: [(&str, Vec<(&str, String)>); 3] = [
                         (
-                            "coordinator_profiles",
-                            allowed_text(ctx, Some(&project), Role::Coordinator),
+                            "Project",
+                            vec![
+                                ("name", s.name.clone()),
+                                ("goal", s.goal.clone()),
+                                ("repos.remove", repos.clone()),
+                                ("repos.add", String::new()),
+                            ],
                         ),
                         (
-                            "thread_profiles",
-                            allowed_text(ctx, Some(&project), Role::Thread),
+                            "Agents",
+                            vec![
+                                ("coordinator_profile", s.coordinator_profile.clone()),
+                                ("thread_profile", s.thread_profile.clone()),
+                                (
+                                    "coordinator_profiles",
+                                    allowed_text(ctx, Some(&project), Role::Coordinator),
+                                ),
+                                (
+                                    "thread_profiles",
+                                    allowed_text(ctx, Some(&project), Role::Thread),
+                                ),
+                                ("max_parallel_threads", s.max_parallel_threads.to_string()),
+                                ("auto_resolve_days", s.auto_resolve_days.to_string()),
+                            ],
                         ),
-                        ("max_parallel_threads", s.max_parallel_threads.to_string()),
-                        ("auto_resolve_days", s.auto_resolve_days.to_string()),
-                        ("nudge", s.nudge.to_string()),
-                        ("mute", s.mute.to_string()),
                         (
-                            "quiet_events",
-                            if s.quiet_events.is_empty() {
-                                "none".to_string()
-                            } else {
-                                s.quiet_events.join(", ")
-                            },
+                            "Wake-ups and notifications",
+                            vec![
+                                ("nudge", s.nudge.to_string()),
+                                (
+                                    "quiet_events",
+                                    if s.quiet_events.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        s.quiet_events.join(", ")
+                                    },
+                                ),
+                                ("wake_batch_secs", s.wake_batch_secs.to_string()),
+                                ("mute", s.mute.to_string()),
+                            ],
                         ),
-                        ("wake_batch_secs", s.wake_batch_secs.to_string()),
-                        ("repos.add", crate::settings::repos_text(&s)),
-                        ("repos.remove", crate::settings::repos_text(&s)),
                     ];
-                    for (key, value) in values {
-                        let label = match key {
-                            "repos.add" => "repos (↵ add)".to_string(),
-                            "repos.remove" => "repos (↵ remove)".to_string(),
-                            k => k.to_string(),
-                        };
-                        rows.push(Row {
-                            header: false,
-                            text: format!("  {label:<22} {value}"),
-                            tone: Tone::Plain,
-                            kind: RowKind::Setting {
-                                slug: slug.to_string(),
-                                key: key.to_string(),
-                                value,
-                            },
-                        });
-                    }
+                    let mut groups: Vec<(String, Vec<(&str, String)>)> = groups
+                        .into_iter()
+                        .map(|(title, values)| (title.to_string(), values))
+                        .collect();
+                    groups[0].0 = format!("Project · {}", project.status());
                     // The tree view's settings: this user's, every project.
                     if let Ok(tree) = crate::organization_sidebar::load_settings(ctx) {
-                        rows.push(header("tree view (yours, for every project)"));
-                        for (key, value) in crate::organization_sidebar::setting_values(&tree) {
+                        groups.push((
+                            "Tree view (yours, every project)".to_string(),
+                            crate::organization_sidebar::setting_values(&tree),
+                        ));
+                    }
+                    for (i, (title, values)) in groups.into_iter().enumerate() {
+                        if i > 0 {
+                            rows.push(header(String::new()));
+                        }
+                        rows.push(header(title));
+                        for (key, value) in values {
                             rows.push(Row {
                                 header: false,
-                                text: format!("  {key:<22} {value}"),
+                                text: format!(
+                                    "  {:<30} {}",
+                                    setting_label(key),
+                                    setting_value(&value)
+                                ),
                                 tone: Tone::Plain,
                                 kind: RowKind::Setting {
                                     slug: slug.to_string(),
@@ -747,26 +759,29 @@ pub fn safety_rows(ctx: &Ctx, scope: Option<&str>) -> Vec<Row> {
             Err(_) => return Vec::new(),
         },
     };
-    let mut rows = vec![header(match scope {
-        None => {
-            "safety · all projects (yours; no agent can change it; running agents keep theirs until restarted)"
-        }
-        Some(_) => {
-            "safety (yours; no agent can change it; running agents keep theirs until restarted)"
-        }
-    })];
+    let mut rows = vec![
+        header(String::new()),
+        header(match scope {
+            None => "Safety · all projects (yours alone; agents keep theirs until restarted)",
+            Some(_) => "Safety (yours alone; agents keep theirs until restarted)",
+        }),
+    ];
     match crate::safety::rows(&ctx.config_dir, &target) {
         Ok(list) => {
             for r in list {
-                let label = if r.key == "yolo" {
-                    "yolo mode (Y)"
-                } else {
-                    r.key
+                let label = match r.key {
+                    "yolo" => "Yolo mode",
+                    "start_threads" => "Start threads",
+                    "trust_screens" => "Trust screens answered by",
+                    "coordinator_agent_args" => "Coordinator launch flags",
+                    "thread_agent_args" => "Thread launch flags",
+                    "routine_commands" => "Routine commands",
+                    other => other,
                 };
                 let yolo_on = r.key == "yolo" && r.value == "on";
                 rows.push(Row {
                     header: false,
-                    text: format!("  {label:<22} {}  · {}", r.text(), r.source),
+                    text: format!("  {label:<30} {}  · {}", r.text(), r.source),
                     tone: if yolo_on { Tone::Warn } else { Tone::Plain },
                     kind: RowKind::Safety {
                         slug: scope.map(str::to_string),
@@ -3007,6 +3022,44 @@ fn header_counts(theme: &Theme, root: &Path, scope: Option<&str>) -> (String, St
     (plain, painted)
 }
 
+/// What a setting is called in the menu: words and units, not its key.
+fn setting_label(key: &str) -> &str {
+    match key {
+        "name" => "Name",
+        "goal" => "Goal",
+        "repos.remove" => "Repositories (↵ removes one)",
+        "repos.add" => "Add a repository…",
+        "coordinator_profile" => "Coordinator profile",
+        "thread_profile" => "Thread profile",
+        "coordinator_profiles" => "Profiles leads may use",
+        "thread_profiles" => "Profiles threads may use",
+        "max_parallel_threads" => "Parallel threads (max)",
+        "auto_resolve_days" => "Auto-resolve idle (days)",
+        "nudge" => "Wake coordinators",
+        "quiet_events" => "Never wake for",
+        "wake_batch_secs" => "Batch wake-ups (seconds)",
+        "mute" => "Mute notifications",
+        "tree.dock" => "Dock side",
+        "tree.width" => "Width (% of the screen)",
+        "tree.focus_on_open" => "Focus it when it opens",
+        "tree.auto_open" => "Open it with the project",
+        "tree.close_on_shortcut" => "Shortcut also closes it",
+        "tree.show_resolved" => "Show resolved threads",
+        "tree.show_status" => "Show each state",
+        "tree.show_role" => "Mark the leads",
+        other => other,
+    }
+}
+
+/// A setting's value as read: on and off for switches.
+fn setting_value(value: &str) -> &str {
+    match value {
+        "true" => "on",
+        "false" => "off",
+        other => other,
+    }
+}
+
 /// The section tabs, shortened until they fit: names, three letters, digits.
 fn tabs_line(theme: &Theme, current: usize, width: usize) -> String {
     let names: Vec<String> = SECTIONS.iter().map(|s| s.title().to_string()).collect();
@@ -3349,7 +3402,7 @@ mod tests {
         assert!(
             settings
                 .iter()
-                .any(|r| r.text.contains("max_parallel_threads"))
+                .any(|r| r.text.contains("Parallel threads (max)"))
         );
         assert!(!build(&world.ctx(), Section::Tasks, Some("demo")).is_empty());
         std::fs::write(project.dir().join("TASKS.md"), "# Tasks\n\n## Backlog\n- [ ] Fix login (claude) · t-0003\n  Safari drops the cookie.\n  See issue 42.\n- [ ] Docs (me)\n").unwrap();
@@ -3658,7 +3711,7 @@ mod tests {
             popup
                 .rows
                 .iter()
-                .any(|r| r.header && r.text.starts_with("safety"))
+                .any(|r| r.header && r.text.starts_with("Safety"))
         );
         // Y asks before turning yolo on; n leaves it off.
         key(&mut popup, KeyCode::Char('Y'));
