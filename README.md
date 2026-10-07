@@ -19,6 +19,7 @@ This is [herdr-projects](https://github.com/eliasstravik/herdr-projects) with a 
 - **Leads by area.** A thread can be a lead (`thread start --role coordinator`) that starts and watches its own threads, with standing rules and memory that reach only its subtree. Saved leads are templates.
 - **Quiet, batched wake-ups.** Each event goes to the nearest lead, not to the top. Idle, resolved and opened-PR events never wake anyone; the rest wait 90 seconds so close events arrive together, and arrive with the first three lines of each report (`PR:`, `Status:`, `Needs:`). The top coordinator's `context` lists only its own items.
 - **One queue for heavy commands.** `gate run -- <command>` lets threads on one computer take turns for test suites and builds, and waits while memory is short.
+- **A menu you can set up.** Every key is an action you can rebind in `keymap.toml`, colors are set by meaning in `theme.toml` on your terminal's own palette, `?` shows the keys in effect, and the layout reflows to the window's size.
 - **The project tree.** A docked view with the tree of leads and workers, their state, their pull requests, what needs you (`n` jumps to the next one) and the selected report's header.
 
 Install it from this repository's checkout (there are no prebuilt releases; the build step compiles it). [Architecture](docs/architecture.md) has the details.
