@@ -136,3 +136,28 @@ Also learned:
 - With both default servers on 0.9.1 the plugin loads in them: all nine actions are listed on this Mac and on the second machine, `plugin link` works there without a named session, and no ticker runs on either (no projects yet).
 - **A herdr server not started from a login shell gives plugins a minimal `PATH`.** The `doctor` action in this Mac's default session reported `gh` as not installed although it is at `/opt/homebrew/bin/gh`. A ticker started by `[[startup]]` would have silently skipped pull request follow-up. The binary now appends `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin` to its own `PATH` at startup; the same action then reported `gh` and `gh auth` as ok.
 - The upstream repository was historically named `herdr-projects`. This fork uses `herdr-organizations` as its repository and primary binary name while retaining the `herdr-projects` plugin id for state compatibility.
+
+## Terminal UI redesign (2026-10-10, herdr 0.9.3, disposable server)
+
+Checked in a throwaway Herdr with its own `HOME`, config, plugin registry and socket; the user's Herdr, config and plugin registration were not touched. Agents were shell panes given a state with `pane.report_agent`, so no agent ran. The user's running server is 0.9.1, so these results describe 0.9.3.
+
+| Assumption | Result |
+| --- | --- |
+| `events.subscribe` can watch every agent status at once | **Does not hold.** `pane.agent_status_changed` needs a `pane_id` (`missing field pane_id`). The ticker subscribes one entry per agent pane plus the lifecycle events, and rebuilds the list after `pane_created`, `pane_closed`, `pane_exited` and `pane_agent_detected`. |
+| Token reports wake a subscriber | **Holds** for `workspace.metadata_updated`, which is why the ticker does not subscribe to it (its own reports would wake it). |
+| Socket `pane.report_metadata` takes tokens and state labels in one request | **Holds.** One request sets nine tokens, `state_labels.blocked = "needs you"` and a TTL; no CLI fork. A server that rejects `state_labels` gets the tokens alone (fallback, unit tested; not observed). |
+| Token rows break the sidebar headers or row clicks | **Does not happen.** With Herdr's default layout, with the user's own layout, each plus the rows `sidebar install` appends: `new` created a workspace, `menu` opened the menu, the sort word cycled `grouped`/`priority`, a workspace row and an agent row moved focus. `spaces` and `agents` header clicks had no visible effect with or without the rows. |
+| The focus view keeps the `agents` header | **Did not hold** with the old label `project: <slug>`, which covered the whole header row. The label is now the project name cut to 14 columns and the header stays. |
+| A popup process ends with the popup | **Holds.** After Esc no `herdr-organizations pane ui` process remains. Popup open, from action invoke to first frame on an attached client: 38-62 ms over 10 opens, the same with and without a running ticker. |
+| A custom agent reported as `done` stays listed | **Does not hold**: it dropped out of `agent list`; `idle` stays. Fixture detail only. |
+
+Resource use, same fixture (1 project, 3 coordinators, 8 threads, 13 panes), `ps` sampled every second, Herdr CLI forks counted through a `HERDR_BIN_PATH` wrapper:
+
+| Process | Before | After |
+| --- | --- | --- |
+| Ticker, 120 s idle | 5.3 MB avg RSS, 0.09 s CPU, 113 herdr forks (88 of them `pane report-metadata`) | 5.1 MB avg, 0.03 s CPU, 12 forks |
+| Ticker, 120 s with a state change every 20 s | not measured (the old ticker polls the same either way) | 5.2 MB avg, 0.05 s CPU, 21 forks; a working/idle change reaches the sidebar tokens in 0.45 s, a blocked agent counts as needs you after its 30 s debounce plus 2.6 s |
+| Split sidebar / dock, 60 s | 4.4 MB, 0.03 s CPU, 30 forks (agent list and pane list every 5 s, heartbeat every 10 s) | 5.1 MB, 0.00 s CPU, no Herdr calls (it reads the state file) |
+| Popup, open and idle | 2.3 MB, wakes 4 times a second | 3.2 MB, 0.00 s CPU over 20 s, no Herdr calls |
+
+The remaining ticker forks are its per-pass `agent list` and `pane list` CLI calls and, in this fixture, a parent nudge that a fake coordinator refuses. Moving those lists to socket requests is the next saving.

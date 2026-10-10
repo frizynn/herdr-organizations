@@ -203,6 +203,9 @@ pub struct ProjectView {
     pub inbox: Vec<InboxItem>,
     /// A coordinator priming or a thread launch or brief is still due.
     pub pending: bool,
+    /// Seconds until a blocked agent counts as "needs you" (the 30 s
+    /// debounce), so the ticker can look again exactly then.
+    pub recheck_in: Option<u64>,
 }
 
 impl ProjectView {
@@ -476,6 +479,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         });
     let mut coordinators = vec![root];
     let mut workers = Vec::new();
+    let mut recheck_in: Option<u64> = None;
     for entry in &entries {
         let t = &entry.thread;
         let local_live = live.filter(|_| !t.is_remote());
@@ -496,7 +500,12 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
                         .unwrap_or_else(|| "no agent".into())
                 };
                 let agent = l.agents.iter().find(|a| thread::agent_matches(t, a));
-                (thread::group(&fresh, &state, now), note, agent)
+                let group = thread::group(&fresh, &state, now);
+                if state.agent_state.as_deref() == Some("blocked") && group != Group::WaitingOnYou {
+                    let left = (thread::BLOCKED_DEBOUNCE_SECS - state.state_secs).max(1) as u64;
+                    recheck_in = Some(recheck_in.map_or(left, |r| r.min(left)));
+                }
+                (group, note, agent)
             }
             _ => (threads::recorded_group(t), t.last_state.clone(), None),
         };
@@ -593,6 +602,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         counts,
         inbox,
         pending,
+        recheck_in,
     }
 }
 

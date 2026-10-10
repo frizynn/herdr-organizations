@@ -324,11 +324,11 @@ pub fn nudge(
     command_prefix: &str,
 ) -> Result<()> {
     let seen = inbox::seen(project);
-    let unseen: BTreeSet<String> = inbox::unhandled(project)
+    let items: Vec<inbox::Item> = inbox::unhandled(project)
         .into_iter()
-        .map(|i| i.id)
-        .filter(|id| !seen.contains(id))
+        .filter(|i| !seen.contains(&i.id))
         .collect();
+    let unseen: BTreeSet<String> = items.iter().map(|i| i.id.clone()).collect();
     if unseen.is_empty() {
         return Ok(());
     }
@@ -348,11 +348,14 @@ pub fn nudge(
         );
         herdr.agent_prompt(pane, &prompt)?;
     } else {
-        let body = format!(
-            "{} new inbox item(s). The coordinator reads them at its next turn.",
-            unseen.len()
-        );
-        let _ = herdr.notification_show(&format!("herdr-projects: {}", project.slug), &body);
+        // Thread transitions get their own toast from the ticker ("panel depo
+        // needs you"), chosen in Settings; this one covers everything else.
+        let other = items.iter().filter(|i| i.kind != "thread-state").count();
+        if other > 0 {
+            let body =
+                format!("{other} new inbox item(s). The coordinator reads them at its next turn.");
+            let _ = herdr.notification_show(&format!("herdr-projects: {}", project.slug), &body);
+        }
     }
     state.nudged = hash;
     Ok(())

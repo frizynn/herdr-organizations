@@ -38,25 +38,28 @@ Use the installed Codex CLI to check a node with a model, reasoning effort and e
 
 ## Organizations popup
 
-Open **Herdr Organizations: organization tree** from Herdr's action menu.
+Open **Herdr Organizations: launcher** (or the bound key) in a disposable session.
 
-1. Select a project with keyboard arrows, `j` or `k`, and press Enter.
-2. Confirm root and every active descendant render in the same stable order as `node list`, with title, state, role and id. Confirm resolved leaves are absent.
-3. Move through root and children using Up/Down and `j`/`k`. Press Enter on a live child and confirm the selected pane receives focus and the popup closes. Repeat for root.
-4. Close an active tab, reopen the popup, select that node and press Enter. Confirm a replacement tab is created, focused and the popup closes.
-5. Press Esc to return to project selection, then `q` to close.
-6. Click a row to select it. Double-click to open or focus when Herdr forwards mouse events. If no mouse event reaches the popup, keyboard support remains available.
-7. Press `r` after creating a node and confirm the tree refreshes.
+1. Confirm needs-you rows list first, oldest first, then each project with its coordinators numbered 1-9. Press a digit and confirm the tree opens on that coordinator.
+2. In the tree, move with Up/Down and press Enter on a live node: the pane receives focus and the popup closes. Close an active tab and confirm Enter recreates it. Space folds a coordinator and the fold survives a state-file change.
+3. Press `b` for the board; Left/Right/Up/Down move between cards, `f` cycles the coordinator filter, Enter opens the detail, Esc returns.
+4. On a thread in review with a pull request, press `m`: the confirmation is drawn inside the popup. With a blocker it only offers Esc. Merge only in a scratch repository.
+5. Press `n`: type a name and confirm the inline validation and the CLI preview update. Esc cancels without creating anything.
+6. Press `s`: change dock side and notification choice with Left/Right, rebind a command (Enter, then a key) and confirm `~/.config/herdr-projects/tui.toml` holds only the changed key. A conflicting key is refused with a message.
+7. Press Esc until the popup closes and confirm no `herdr-organizations pane ui` process remains.
+8. Click a row to select it and click it again to open it when the client forwards mouse events.
 
-## Contextual organization sidebar
+## Native sidebar tokens and headers
 
-1. From a coordinator or worker pane in a project workspace, run **Herdr Organizations: toggle project hierarchy sidebar**. Confirm one split appears on the configured side at the configured width and is scoped to that project.
-2. Navigate with Up/Down and `j`/`k`. Press Space on a coordinator and confirm only its descendants fold. Press Enter on root and a live node; confirm the pane focuses and the sidebar remains available. Close a node tab and confirm Enter recreates an active node.
-3. Open the visible gear with `s`. Change dock side and width, close and reopen, and confirm the layout updates. Toggle focus-on-open, auto-open, resolved nodes, status, role and strict toggle; reopen the settings and confirm values persist in Herdr's plugin config directory.
-4. Confirm the settings are grouped under Layout, Behavior and Tree, values align consistently, the selected row uses a leading marker, and changing a setting does not change Herdr's global keybindings.
-5. Open an unrelated pane in the same workspace and give it a similar label. Toggle the organization sidebar and confirm only the pane with matching organization sidebar, project and workspace tokens closes. Repeat with another project's workspace.
-6. With auto-open enabled, focus a project tab and confirm the sidebar is ensured once. With it disabled, focus the tab and confirm no split is created.
-7. Close and reopen the sidebar repeatedly from a warm release build. Confirm the first toggle adopts any existing sidebar, later toggles do not scan the workspace, the tree paints before identity and live-status hydration, and the UI remains interactive without flashing, clearing or repainting unchanged rows.
+1. Run `herdr-organizations sidebar install --config <disposable config>` and reload the config. Confirm a coordinator workspace shows a second row with its counts and agent rows show `$org_task` and "needs you".
+2. With tokens reported, click every header: `new` creates a workspace, `menu` opens the menu, the sort word right of `agents` cycles the sort, and `spaces` and `agents` behave as they do with Herdr's default layout. Click a workspace row and an agent row and confirm focus moves.
+3. Run **focus sidebar on this project** and confirm the `agents` header stays visible next to the short project label. `unfocus` clears it.
+
+## Dock
+
+1. Turn the dock on in Settings, then run **Herdr Organizations: toggle dock** from a project workspace. Confirm one split appears on the chosen side and width.
+2. Change a thread's state and confirm the dock redraws without a key press. Confirm the dock process makes no Herdr calls while idle.
+3. Toggle again and confirm only the dock pane closes. Open an unrelated pane with a similar label and confirm the toggle never closes it.
 
 ## Existing behavior
 

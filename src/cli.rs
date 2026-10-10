@@ -89,9 +89,6 @@ enum Command {
     /// Print threads grouped by what needs you
     Overview {
         slug: Option<String>,
-        /// Wait for Enter before exiting (only when on a terminal; used by the popup)
-        #[arg(long, conflicts_with = "json")]
-        wait: bool,
         /// Print the versioned JSON contract (docs/json.md); never asks for a project
         #[arg(long)]
         json: bool,
@@ -572,11 +569,11 @@ pub fn run() -> Result<()> {
             },
         ),
         Command::Context { slug, peek } => coordinator::context(&ctx, &slug, peek),
-        Command::Overview { slug, wait, json } => {
+        Command::Overview { slug, json } => {
             if json {
                 overview::run_json(&ctx, slug.as_deref())
             } else {
-                overview::run(&ctx, slug.as_deref(), wait)
+                overview::run(&ctx, slug.as_deref())
             }
         }
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),

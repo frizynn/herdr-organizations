@@ -40,11 +40,13 @@ TASK
 
 New descendants inherit omitted profile fields from their parent. Use `--no-spawn` for a coordinator that must remain a leaf. Permission profiles validate the harness argv; they are not OS isolation. `thread start` remains a backward-compatible way to start a worker directly under the project root.
 
-## Organization tree
+## Organizations popup, sidebar tokens and dock
 
-Herdr's **Herdr Organizations: organization tree** action remains the global project picker popup. It lists projects and then shows the selected project's root and descendants. Use Up/Down or `j`/`k` to move, Enter to open, Esc or `q` to go back or close, and `r` to refresh. Enter focuses a live agent, opens an existing tab without an agent, or recreates an active node whose tab was closed. The popup closes after a successful open. Mouse selection and double-click work when the Herdr client forwards terminal mouse events.
+**Herdr Organizations: launcher** opens one popup TUI for every interactive screen: needs-you across all coordinators, projects with several coordinators nested, a New form for projects, coordinators, threads and workspaces, the project tree, a four-column threads board, thread detail, an in-popup merge confirmation and settings. The process exists only while the popup is open. It reads the state file the ticker writes and never polls Herdr.
 
-Inside a project workspace, **Herdr Organizations: toggle project hierarchy sidebar** opens a right split at 30% by default. The recursive tree stays scoped to that project. Use Up/Down or `j`/`k` to move, Enter to focus or reopen a node, Space to collapse a coordinator, `s` to open settings, and `q` or Esc to close the split. The grouped settings screen controls layout, opening behavior, shortcut behavior and tree detail. Changes save automatically to `HERDR_PLUGIN_CONFIG_DIR/organization-sidebar.json`. The action does not write Herdr's global keybindings; the recommended binding is `prefix+shift+y`, documented in [Getting started](docs/getting-started.md#browse-and-focus-the-tree).
+The ticker is the one resident process. It listens to Herdr events instead of polling, reconciles once a minute, and reports display tokens that Herdr draws in its own sidebar: per coordinator workspace `●need ●working ●review` counts, per agent `$org_task`, and "needs you" in place of "blocked". `herdr-organizations sidebar install` adds the rows that render them without touching your rows or the sidebar headers. An optional dock split shows one coordinator next to its agents from the same state file.
+
+Keybindings default to the design (`n` new, `c` coordinator, `t` thread, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` jump or answer) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
 
 Pane metadata includes project, node id, role, parent, depth, tree order and current review group. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
 

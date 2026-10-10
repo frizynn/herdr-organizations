@@ -313,8 +313,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             log.line("no project has had a reachable session for five minutes; exiting");
             return Ok(());
         }
-        let pending = publisher.publish(ctx, &log);
-        let wait = if pending { TICK } else { RECONCILE };
+        let wait = publisher.publish(ctx, &log);
         if !wait_for_wake(root, &rx, wait, &mut publisher) {
             log.line("stop file found; exiting");
             return Ok(());
@@ -421,8 +420,10 @@ impl Publisher {
         sockets
     }
 
-    /// Returns whether any project has a launch or prompt pending.
-    fn publish(&mut self, ctx: &Ctx, log: &Log) -> bool {
+    /// Returns how long to wait before the next pass without an event: 15 s
+    /// while a launch or prompt is pending, the moment a blocked agent's
+    /// debounce ends, else the reconcile interval.
+    fn publish(&mut self, ctx: &Ctx, log: &Log) -> Duration {
         let now = Instant::now();
         let mut lives = Vec::new();
         for socket in self.sockets(ctx) {
@@ -461,7 +462,16 @@ impl Publisher {
         if let Err(error) = crate::state::write_if_changed(&ctx.root, &snapshot) {
             log.line(&format!("state file: {error:#}"));
         }
-        snapshot.projects.iter().any(|p| p.pending)
+        let mut wait = RECONCILE;
+        for project in &snapshot.projects {
+            if project.pending {
+                wait = wait.min(TICK);
+            }
+            if let Some(secs) = project.recheck_in {
+                wait = wait.min(Duration::from_secs(secs + 1));
+            }
+        }
+        wait
     }
 
     /// One toast per transition into "needs you" or "review", as the
@@ -1147,13 +1157,19 @@ mod tests {
     fn publish_writes_the_state_file_without_forking_herdr() {
         let world = crate::scenarios::World::new();
         let project = world.project("demo", "a.sock");
-        project.update_coordinator(|c| c.prime_pending = true).unwrap();
+        project
+            .update_coordinator(|c| c.prime_pending = true)
+            .unwrap();
         let ctx = world.ctx();
         let log = Log {
             path: world.home.path().join("log"),
         };
         let mut publisher = Publisher::new(&Info::default());
-        assert!(publisher.publish(&ctx, &log), "a priming prompt is pending");
+        assert_eq!(
+            publisher.publish(&ctx, &log),
+            TICK,
+            "a priming prompt is pending"
+        );
         let snapshot = crate::state::read(&ctx.root).unwrap();
         assert_eq!(snapshot.projects[0].slug, "demo");
         assert!(snapshot.ticker.is_some());
@@ -1162,8 +1178,10 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        project.update_coordinator(|c| c.prime_pending = false).unwrap();
-        assert!(!publisher.publish(&ctx, &log));
+        project
+            .update_coordinator(|c| c.prime_pending = false)
+            .unwrap();
+        assert_eq!(publisher.publish(&ctx, &log), RECONCILE);
         assert!(
             std::fs::metadata(crate::state::path(&ctx.root))
                 .unwrap()
@@ -1171,6 +1189,50 @@ mod tests {
                 .unwrap()
                 >= written
         );
+    }
+
+    #[test]
+    fn transitions_into_needs_you_get_one_toast_as_settings_choose() {
+        use crate::state::{Node, ProjectView, Snapshot, Status as S};
+        let world = crate::scenarios::World::new();
+        world
+            .runner
+            .on("notification show", ok(r#"{"result":{"shown":true}}"#));
+        let ctx = world.ctx();
+        let herdr = Herdr::new("herdr", "a.sock", &world.runner);
+        let snapshot = |status: S| Snapshot {
+            projects: vec![ProjectView {
+                slug: "demo".into(),
+                socket: "a.sock".into(),
+                threads: vec![Node {
+                    id: "t-0001".into(),
+                    title: "panel depo".into(),
+                    status,
+                    ..Node::default()
+                }],
+                ..ProjectView::default()
+            }],
+            ..Snapshot::default()
+        };
+        let mut publisher = Publisher::new(&Info::default());
+        publisher.notify(&ctx, &herdr, &snapshot(S::Work), "a.sock");
+        assert_eq!(
+            world.runner.count("notification show"),
+            0,
+            "the first pass only records"
+        );
+        publisher.notify(&ctx, &herdr, &snapshot(S::Need), "a.sock");
+        publisher.notify(&ctx, &herdr, &snapshot(S::Need), "a.sock");
+        assert_eq!(
+            world.runner.count("notification show panel depo needs you"),
+            1
+        );
+
+        let mut config = crate::tui_config::Config::default();
+        config.view.notify = crate::tui_config::Notify::Off;
+        crate::tui_config::save(&ctx.config_dir, &config).unwrap();
+        publisher.notify(&ctx, &herdr, &snapshot(S::Review), "a.sock");
+        assert_eq!(world.runner.count("notification show"), 1);
     }
 
     #[test]

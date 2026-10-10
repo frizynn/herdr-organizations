@@ -174,6 +174,8 @@ type Sent = (
 #[derive(Default)]
 pub struct Cache {
     sent: BTreeMap<String, Sent>,
+    /// Set once a server refused `state_labels`; tokens are still sent.
+    no_labels: bool,
 }
 
 impl Cache {
@@ -205,14 +207,32 @@ impl Cache {
                 continue;
             }
             let result = match &want.target {
-                Target::Pane(pane) => herdr.pane_report_metadata_rpc(
-                    pane,
-                    &PaneMetadata {
+                Target::Pane(pane) => {
+                    let mut metadata = PaneMetadata {
                         tokens: want.tokens.clone(),
-                        state_labels: want.state_labels.clone(),
+                        state_labels: if self.no_labels {
+                            Vec::new()
+                        } else {
+                            want.state_labels.clone()
+                        },
                         ttl: Some(TTL),
-                    },
-                ),
+                    };
+                    let first = herdr.pane_report_metadata_rpc(pane, &metadata);
+                    // An older server that does not know state labels must
+                    // still get the tokens.
+                    match first {
+                        Err(error)
+                            if error.code.starts_with("invalid")
+                                && !metadata.state_labels.is_empty() =>
+                        {
+                            metadata.state_labels.clear();
+                            let retry = herdr.pane_report_metadata_rpc(pane, &metadata);
+                            self.no_labels = retry.is_ok();
+                            retry
+                        }
+                        other => other,
+                    }
+                }
                 Target::Workspace(ws) => {
                     herdr.workspace_report_metadata_rpc(ws, &want.tokens, Some(TTL))
                 }
@@ -379,6 +399,34 @@ mod tests {
         assert!(requests[0].1.contains("pane.report_metadata"));
         assert!(requests[0].1.contains("\"ttl_ms\":300000"));
         assert_eq!(runner.calls.borrow().len(), 0, "no CLI fork");
+    }
+
+    #[test]
+    fn a_server_without_state_labels_still_gets_the_tokens() {
+        let runner = FakeRunner::new();
+        runner.on_socket(
+            "state_labels",
+            r#"{"id":"x","error":{"code":"invalid_request","message":"unknown field `state_labels`"}}"#,
+        );
+        let herdr = Herdr::new("herdr", "s.sock", &runner);
+        let p = project();
+        let wanted = wanted(&p);
+        let mut cache = Cache::default();
+        assert_eq!(
+            cache.report(&herdr, "s.sock", &wanted, Instant::now()),
+            wanted.len()
+        );
+        let requests = runner.socket_requests.borrow();
+        let panes = requests
+            .iter()
+            .filter(|(_, l)| l.contains("pane.report_metadata"))
+            .count();
+        let labelled = requests
+            .iter()
+            .filter(|(_, l)| l.contains("state_labels"))
+            .count();
+        assert_eq!(labelled, 1, "asked once, then never again");
+        assert!(panes > labelled);
     }
 
     #[test]

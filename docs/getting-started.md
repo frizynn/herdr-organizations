@@ -24,7 +24,7 @@ The plugin id remains `herdr-projects` to preserve its config and project store.
 
 ## Create and open a project
 
-Run **Herdr Organizations: new project** from the Herdr action menu, or use the CLI:
+Press `n` in the Organizations popup, or use the CLI:
 
 ```sh
 target/release/herdr-organizations new "Billing" --goal "Ship the new billing page" --repo ~/dev/billing
@@ -75,42 +75,76 @@ The existing `thread start` command remains a worker-under-root alias. Use `node
 
 Resolving a node and closing its terminal surface are intentionally distinct. Use `node resolve <project> <id> --close-view` when finished work should disappear from both the organization tree and Herdr's tabs or workspaces. The branch, worktree and copied report remain available. Removing a worktree still requires the separate `--remove-worktree` option.
 
-## Browse and focus the tree
+## The Organizations popup
 
-Run **Herdr Organizations: organization tree** from Herdr's action menu to browse all projects. The popup first lists projects, then renders the selected project root and all descendants with role and state.
+Run **Herdr Organizations: launcher** from Herdr's action menu, or bind it to a key (below). Every interactive screen is one small TUI inside a Herdr popup. It exists only while the popup is open; Esc goes back, then closes it.
 
-- Up and Down or `k` and `j` move the selection.
-- Enter opens a project's tree. Inside the tree it focuses a live agent, opens an existing tab, or recreates an active node whose tab was closed. The popup closes after a successful open.
-- Esc or `q` goes back or closes the popup.
-- `r` refreshes the current tree.
-- A mouse click selects a row. A double-click opens or focuses it when the Herdr client forwards terminal mouse events.
+- **Launcher**: "needs you" across every coordinator (oldest first), then each project with its coordinators nested and their counts, then workspaces outside a project. `1`-`9` jump to a coordinator, `n` new project, `c` new coordinator, `a` turns the current workspace into a project, `/` filters, `b` opens the board, `s` settings.
+- **New** (`n`): one form for a project, coordinator, thread or workspace. Up/Down switch what to create, Tab moves between fields, Left/Right choose, Enter creates. The last line shows the exact CLI call the form makes.
+- **Project tree** (Enter on a project or coordinator): project › coordinators › threads. Enter goes to the selected pane, Space folds a coordinator, `t` starts a thread under it, `m` merges a reviewed pull request, `1`-`9` press that option in the pane of an agent that is waiting on you.
+- **Board** (`b`): every thread in four columns (needs you, working, review, resolved), idle threads on one line and the running coordinators below. `f` cycles the coordinator filter.
+- **Thread detail** (Enter on a card or a needs-you row): the question or the agent's current line, the PR and its checks, the thread's inbox items (`d` marks one done) and the last lines of its pane, read once.
+- **Merge confirm** (`m`): drawn by the same process, because Herdr shows one popup at a time. It merges only when the pull request passes the same guard as `thread merge`, then resolves the thread and tells its coordinator. `k` keeps the worktree.
+- **Settings** (`s`): dock side and width, resolved threads as a count or a list, which transitions show a Herdr notification, every keybinding, and the ticker's health.
 
-Inside a project workspace, run **Herdr Organizations: toggle project hierarchy sidebar** to show a right split scoped to that project. It defaults to 30% width and does not steal focus on open.
+The popup reads `~/.herdr-projects/.organizations-state.json`, which the ticker rewrites when something changes, and redraws on a key or a change of that file. It never polls Herdr. Without a running ticker it builds the same view from the records once when it opens.
 
-- Up and Down or `j` and `k` move through visible rows; Enter focuses or reopens a node while leaving the tree available.
-- Space folds or expands a coordinator. `s` opens the visible gear/settings surface.
-- `q` or Esc closes the split. Settings can move the dock, change width, control auto-open and focus behavior, include resolved nodes, hide status or role, and change strict toggle behavior.
-- Herdr keybindings remain user-managed. The settings screen only controls the contextual sidebar and keeps command ids out of the normal navigation flow.
+### Keybindings
 
-To bind the global picker and project hierarchy without starting a shell subprocess, add this to `~/.config/herdr/config.toml`, then run `herdr server reload-config`:
+Defaults follow the design: `↵` open, `n` new project, `c` new coordinator, `t` new thread, `b` board, `m` merge, `1`-`9` jump or answer, `s` settings, `/` search, `esc` back. Rebind any command in Settings (select it, press Enter, press the new key; Backspace restores the default) or edit `~/.config/herdr-projects/tui.toml`:
+
+```toml
+[view]
+dock = "right"        # off, right or left
+dock_width = 30       # 15-50
+resolved = "count"    # count or list
+notify = "needs-you-and-review"  # or needs-you, off
+
+[keys]
+board = "w"
+up = ["up", "k"]
+```
+
+Only changed keys are written. A key that two commands on the same screen would share is refused, and a bad entry in the file keeps its default and is listed under KEYS in Settings.
+
+### Launcher key
+
+Herdr keybindings stay in Herdr's own config. Add this to `~/.config/herdr/config.toml`, then reload Herdr's config:
 
 ```toml
 [[keys.command]]
-key = "prefix+shift+o"
+key = "prefix+a"
 type = "plugin_action"
 command = "herdr-projects.organizations"
-description = "Open Herdr Organizations project picker"
+description = "Organizations"
 
 [[keys.command]]
 key = "prefix+shift+y"
 type = "plugin_action"
 command = "herdr-projects.organization-sidebar"
-description = "Toggle Herdr Organizations hierarchy sidebar"
+description = "Organizations dock"
 ```
 
-With Herdr's default prefix, press `Ctrl+B`, release it, then press `Shift+O` or `Shift+Y`. `Shift+H` is intentionally avoided because Herdr already uses `prefix+shift+h` to swap the active pane left.
+## What stays on screen without a plugin process
 
-Sidebar settings are saved to `organization-sidebar.json` in Herdr's `HERDR_PLUGIN_CONFIG_DIR`. Auto-open is off by default and checks project/workspace metadata before creating a split.
+The ticker reports display tokens and Herdr draws them in its own sidebar:
+
+- each coordinator's workspace gets `$org_need`, `$org_work` and `$org_review` (for example `●2`), hidden when zero;
+- each agent pane gets `$org_task` (its coordinator, `review #1342`, `merged #1338`) and the state label "needs you" instead of "blocked";
+- **Herdr Organizations: focus sidebar on this project** filters the agents list to one project; the short label sits where the sort word was, so the `agents` header stays.
+
+Herdr only renders tokens that its sidebar layout names. Add the rows once:
+
+```sh
+target/release/herdr-organizations sidebar install --dry-run   # print the edited config
+target/release/herdr-organizations sidebar install             # write it, keeping a dated backup
+```
+
+It appends rows to `[ui.sidebar.spaces]` and `[ui.sidebar.agents]` (and `state_text` when no row shows the state). It never edits or removes your rows and never touches the panel headers (`spaces`, `new`, `menu`, `agents`, the sort word), which Herdr draws outside `rows`. Reload Herdr's config afterwards.
+
+## The optional dock
+
+**Herdr Organizations: toggle dock** opens a split next to the current workspace's coordinator: needs you, review, working, idle, resolved count, inbox and a new-thread row. It is off by default; turn it on in Settings first. It reads the same state file and never polls Herdr. Enter goes to a pane and keeps the dock, `m` merges, `t` opens the New form in the popup, `?` lists the keys. The same action closes it.
 
 ## Preserve existing projects
 

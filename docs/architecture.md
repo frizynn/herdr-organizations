@@ -2,7 +2,7 @@
 
 ## Scope
 
-Herdr Organizations is a Rust 2024 modular monolith and a CLI-first plugin for Herdr. The CLI owns durable state transitions and delegates pane, worktree, agent and remote operations to the existing Herdr and Runner boundaries. There is no daemon, database, MCP server, web UI or harness-registered tool.
+Herdr Organizations is a Rust 2024 modular monolith and a CLI-first plugin for Herdr. The CLI owns durable state transitions and delegates pane, worktree, agent and remote operations to the existing Herdr and Runner boundaries. The only resident process is the ticker. There is no database, MCP server, web UI or harness-registered tool.
 
 The project folder remains the unit of settings, lifecycle, locks, ticker, inbox, routines, reports and remote configuration. Its node hierarchy is stored with the existing thread records so placement and lifecycle state are not duplicated.
 
@@ -50,15 +50,19 @@ Other harness kinds receive raw argv only. Built-in profile fields are rejected 
 
 These flags are adapters for current CLI interfaces, not a promise that all agent CLIs accept the same options. See the [Codex sandbox documentation](https://developers.openai.com/es-419/docs/sandboxing), [Codex configuration reference](https://developers.openai.com/es-419/docs/config-file/config-advanced), and [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-usage).
 
-## Organization picker
+## Terminal UI and refresh
 
-The `organizations` action remains the global project picker popup. The distinct `organization-sidebar` action resolves its project from the current Herdr workspace and opens a recursive tree in a split pane. Its compact terminal UI supports keyboard navigation, coordinator disclosure, status colors and an in-pane settings screen. Selecting a node focuses its live agent, focuses its existing tab when no agent is attached, or runs the existing restart mechanic when its active tab is gone.
+One process stays resident: the ticker. It holds one `events.subscribe` connection per project socket (workspace, tab and pane lifecycle plus `pane.agent_status_changed` for each agent pane) and runs a pass when an event arrives, after a 250 ms settle. Without events it reconciles every 60 s, every 15 s while a launch or brief is pending, and exactly when a blocked agent's 30 s debounce ends. Events are wake-up signals only; every pass re-reads state, so a missed event costs one reconcile. A subscription that fails (a pane closed between the list and the subscribe, `events_lost`) is rebuilt with backoff, and Settings shows it as down.
 
-The popup starts with a project picker, then shows the virtual root and descendants in tree order with title, state, role and id. The split sidebar stays within one project, leads rows with titles and can hide role/status or include resolved nodes. Resolved leaves stay in durable history but are hidden by default. Its settings are stored under the Herdr-provided plugin config directory. A plugin-owned metadata token plus project and workspace tokens identify the split; the toggle only focuses or closes panes matching all three values in that workspace. The sidebar heartbeats the tokens while open. Both terminal views use a stable leading selection marker, restrained status color and synchronized updates instead of reverse-video rows or unsynchronized full-screen redraws.
+After each pass the ticker builds one view model (`state.rs`) and writes `<root>/.organizations-state.json` only when its content changed. From the same model it reports sidebar tokens over the socket (`pane.report_metadata`, `workspace.report_metadata`) with a 300 s TTL, sending a value only when it changed or half its TTL passed. Agent and pane lists for the model and all token reports use socket requests instead of CLI forks. Metadata events are not subscribed, so the ticker's own reports never wake it.
 
-Opening the contextual sidebar uses a two-phase paint. The first frame reads the ticker's persisted groups and does no live Herdr inventory call. Immediately after that frame, the sidebar hydrates agent and pane state and repaints only rows that changed. The plugin stores the exact sidebar pane id scoped by workspace and session socket, so normal toggles target one pane, skip workspace inventory and cannot reuse an id from another Herdr session. The first action after an upgrade still discovers an existing pane once for compatibility. Identity metadata is registered by the sidebar process after its first flushed frame instead of blocking the shortcut action. This keeps the keyboard action visually immediate without sacrificing live state or adding polling.
+Every interactive screen is one TUI (`ui.rs`) in a single manifest popup. Herdr shows one popup at a time, so the merge confirmation is a dialog inside the same process. The TUI blocks on terminal input or a kqueue/inotify wake on the projects root (`watch.rs`); it has no timer. It calls Herdr only for an action the user asked for (`ui_ops.rs`), reusing the CLI mechanic of the same name: go to pane is `focus`/`restart`, merge is `thread merge` plus `node resolve`, New is `new`, `node start` or `workspace create`. Without a running ticker the popup builds the model once from the records and four socket reads.
 
-The pure tree layout, collapse, settings and selection helpers are unit-testable without a terminal. Actual split geometry, terminal colors and key forwarding remain client-side checks.
+The optional dock runs the same TUI in a split. The toggle finds it by a stored pane id plus identity tokens the dock reports once without a TTL, so a pane id reused after a server restart is never closed and no heartbeat is needed.
+
+`sidebar install` edits Herdr's config with `toml_edit`: it appends rows that name the tokens and never edits or removes existing rows. Panel headers are drawn by Herdr outside `rows`, so header and row clicks keep working; this was checked in a disposable Herdr (docs/herdr-notes.md, 2026-10-10).
+
+Keybindings and view settings live in `~/.config/herdr-projects/tui.toml`. Commands are scoped to screens, so a key may be shared only by commands that never appear on the same screen; conflicts are refused in Settings and reported for hand edits.
 
 ## Compatibility and intentional limits
 
