@@ -55,7 +55,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `role` | `"worker"` or `"coordinator"` | |
 | `can_spawn` | bool | |
 | `status` | `"starting"`, `"open"`, `"failed"` or `"resolved"` | The record's lifecycle. |
-| `kind` | `"worktree"`, `"tab"` or `"adopted"` | |
+| `kind` | `"worktree"`, `"tab"`, `"checkout"` or `"adopted"` | |
 | `group` | string | `ready-for-review`, `waiting-on-you`, `working`, `landing`, `idle` or `resolved`. |
 | `group_label` | string | The same group as the text views print it. |
 | `rank` | number | Display order of the group, 1 to 6, as the overview sorts: waiting on you 1, ready for review 2, landing 3, working 4, idle 5, resolved 6 (the order of Herdr Projects 0.2.34). |
@@ -103,7 +103,7 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | string | Starts with a UTC timestamp, so ids sort oldest first. |
-| `kind` | string | `thread-state`, `pr`, `routine`, `routine-approval`, `outage`, `session` or `config-error`. |
+| `kind` | string | `thread-state`, `pr`, `routine`, `routine-approval`, `outage`, `session`, `config-error`, `rename` or `space`. |
 | `subject` | string | A thread id, routine name or machine label. |
 | `created` | string | RFC 3339 timestamp. |
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
@@ -123,7 +123,7 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 
 `thread merge`, and `thread set --auto-merge on`, are refused when `HERDR_PANE_ID` is the pane of this project's coordinator or of one of its local threads. Merging stays the user's call, from their own terminal or Nenu. This is defense in depth, not access control: an agent can unset the variable or run `gh` itself.
 
-A pull request with no checks is refused because, right after a push, GitHub may not have registered the checks yet. The merge runs `gh pr merge --squash --match-head-commit <checked commit>` against the repository's own GitHub host. If anything is pushed after the check, GitHub refuses the merge instead of merging code that was not checked. The branch is not deleted, because the thread's worktree still uses it. A merge leaves an inbox item, and the ticker then resolves the thread as it does for any merged pull request.
+A pull request with no checks is refused because, right after a push, GitHub may not have registered the checks yet. The merge runs `gh pr merge --<method> --match-head-commit <checked commit>` (`--method squash|merge|rebase`, squash by default) against the repository's own GitHub host. If anything is pushed after the check, GitHub refuses the merge instead of merging code that was not checked. The branch is not deleted, because the thread's worktree still uses it. A merge leaves an inbox item, and the ticker then resolves the thread as it does for any merged pull request.
 
 Both flags are off by default and are only changed with `thread set`. The ticker never turns them on.
 

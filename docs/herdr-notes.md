@@ -165,8 +165,6 @@ Checked against a throwaway Herdr server with its own `HOME`, never the default 
 - Releases are the `vX.Y.Z` tags (GitHub releases). `update` reads them with `git ls-remote --tags --refs origin` in the plugin root, which works for both install types, and installs the newest tag with `--ref`. A release must be tagged for `update` and `doctor` to see it.
 - On macOS, copying a new binary over the file of one that has run gets the next run killed (exit 137, code signature cache). Cargo and Herdr's swap both write a new file, so neither is affected.
 
-- The upstream repository was historically named `herdr-projects`. This fork uses `herdr-organizations` as its repository and primary binary name while retaining the `herdr-projects` plugin id for state compatibility.
-
 ## Terminal UI redesign (2026-10-10, herdr 0.9.3, disposable server)
 
 Checked in a throwaway Herdr with its own `HOME`, config, plugin registry and socket; the user's Herdr, config and plugin registration were not touched. Agents were shell panes given a state with `pane.report_agent`, so no agent ran. The user's running server is 0.9.1, so these results describe 0.9.3.

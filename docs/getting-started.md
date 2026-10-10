@@ -14,10 +14,9 @@ The plugin needs no hosted service and no API key. It depends on Herdr and nothi
 
 ## 2. Install the plugin
 
-The plugin id stays `herdr-projects`, so Herdr Organizations replaces an installed Herdr Projects: uninstall that registration first (your projects in `~/.herdr-projects/` and settings in `~/.config/herdr-projects/` stay), then install or link this repository:
+The plugin id stays `herdr-projects`, so Herdr Organizations replaces an installed Herdr Projects. If you have it installed, follow [Moving from Herdr Projects 0.2.34](#moving-from-herdr-projects-0234) instead: it backs up your projects and stops the old ticker before the uninstall. Otherwise install or link this repository:
 
 ```bash
-herdr plugin uninstall herdr-projects        # only when Herdr Projects is installed
 herdr plugin install frizynn/herdr-organizations
 # or, from a checkout:  sh scripts/install.sh && herdr plugin link .
 ```
@@ -42,7 +41,7 @@ Or run `herdr plugin action invoke configure --plugin herdr-projects`. It change
 
 - **Your Herdr config** (`~/.config/herdr/config.toml`). The sub-line row under agents (`$hp_sub`), a one-line card in place of Herdr's built-in rows that shows each project's head in bold (rows you wrote yourself are left alone), the popup key `prefix+a` and a tab-bar entry `projects: N need you`. Herdr checks the result with `herdr config check` before anything is written. Pick another key with `configure --key prefix+y`; a key Herdr or you already use is refused.
 - **Progress hooks** for each installed harness: Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`), Droid (`~/.factory/settings.json`), Gemini CLI (`~/.gemini/settings.json`) and Copilot CLI (its own `~/.copilot/hooks/herdr-projects.json`). They tell an agent running in a Herdr pane how to report its progress, and remind it about once a minute. Outside Herdr they do nothing. Existing hooks and comments are kept.
-- **The `autoproject` skill**, linked from the plugin's `skill/autoproject` into `~/.claude/skills` and Codex's `~/.agents/skills`. A coordinator loads it with `/autoproject` to run an independently reviewed improvement loop. A skill of that name that is not the plugin's link is left alone, and `doctor` names it. If you configured before the skill shipped, `update` links it for you.
+- **The `autoproject` skill**, linked from the plugin's `skill/autoproject` into `~/.claude/skills` and Codex's `~/.agents/skills`. A coordinator loads it with `/autoproject` to run an independently reviewed improvement loop. A skill of that name that is not the plugin's link is left alone, and `doctor` names it. If you configured before the skill shipped, `doctor --fix` links it for you.
 
 Configure reloads the Herdr server's config. The sidebar rows are drawn by your client: if they don't show yet, run **reload config** in Herdr (`prefix+shift+r`).
 
@@ -50,7 +49,7 @@ If you used the standalone Agent Progress plugin, `doctor` prints the two comman
 
 ## 4. Create and open a project
 
-From a Herdr pane, run **Projects: new project** with `herdr plugin action invoke new --plugin herdr-projects`. It asks for a name and a goal, creates the project, and opens it. Or from a terminal inside Herdr:
+From a Herdr pane, run **Herdr Organizations: new project, coordinator, thread or workspace** (`herdr plugin action invoke new --plugin herdr-projects`). It opens the New form of the Organizations popup, which creates the project and opens it. Or from a terminal inside Herdr:
 
 ```bash
 herdr-projects new "Billing" --goal "Ship the new billing page" --repo ~/dev/app
@@ -61,7 +60,7 @@ herdr-projects open billing
 
 - `open billing --tab` starts it in a new tab of the project's own workspace instead. The plugin's actions and the popup always do that, and so does `open` run outside Herdr.
 - When a coordinator is already running, `open` jumps to it. `open --new` starts another beside it, with a fresh conversation.
-- `open billing --profile codex` starts another agent: every installed, signed-in harness is a profile, and your own profiles (a model, an effort, extra flags) are made in the popup's settings or with `profile add` ([operations](operations.md#agent-profiles)). Any agent you start by hand in that folder is a coordinator too, with no `open` needed, and several can run side by side.
+- `open billing --profile codex` starts another agent: every installed, signed-in harness is a profile, and your own profiles (a model, an effort, extra flags) are made in the Projects popup's settings or with `profile add` ([operations](operations.md#agent-profiles)). Any agent you start by hand in that folder is a coordinator too, with no `open` needed, and several can run side by side.
 - `open` resumes the agent's last session when Herdr recorded one for that profile.
 - The first time, your agent may ask whether you trust the folder: answer it in the coordinator's pane.
 
@@ -78,8 +77,8 @@ Everything about the project can be changed in chat: goal, instructions, repos, 
 Each code thread runs in its own worktree workspace on a branch named `hp/<project>/<id>-<title>`; a task with no repository runs as a tab in the project's workspace.
 
 - **The sidebar** shows each thread as `t-0003 · <title>` with a line under it that adds what Herdr's own state word does not say: `needs you · ~55%`, `review · PR #4`, `~40%`, `12m quiet`, `landing · PR #4`. The agent's own activity follows on the same line. The tab bar says `projects: 2 need you`. Agents and Spaces are grouped by project: each project starts with its own head row, the home Space and the coordinator, which show the project's name in bold, and its threads by need and its other Spaces follow as Herdr's own rows; agents or Spaces outside any project come last. Selecting a row lights only that row. The ticker keeps the Spaces in these blocks, so a Space you drag elsewhere moves back.
-- **The popup** (`prefix+a`) lists threads, tasks, inbox, routines, settings and memory. Every thread report ends with a `## Next` list; press a number to send that line back to the thread, which then does it with its own tools. Other keys jump to a thread, stop it, restart it with another profile, resolve it, open its PR, edit settings, pause or archive the project.
-- **Notifications** name the project and thread: `Billing · t-0003`, `needs you · blocked` with a sound; a new report or a merge with a softer one. `mute = true` (popup settings) silences a project.
+- **The Projects popup** (action **projects**, or `herdr-projects popup` in a terminal) lists threads, tasks, inbox, routines, settings and memory. Every thread report ends with a `## Next` list; press a number to send that line back to the thread, which then does it with its own tools. Other keys jump to a thread, stop it, restart it with another profile, resolve it, open its PR, edit settings, pause or archive the project.
+- **Notifications** name the project and thread: `Billing · t-0003`, `needs you · blocked` with a sound; a new report or a merge with a softer one. `mute = true` (Projects popup settings) silences a project.
 
 New worktrees are folders your agent hasn't trusted yet, so a code thread usually starts with your agent's trust dialog and shows `needs you` until it is answered. Who answers is the `trust_screens` safety setting: in yolo mode the coordinator does (with `thread keys`); otherwise you do, in its pane. The brief waits until then. Codex lets a worktree inherit its repo's trust, so trusting the repo once there covers its worktrees.
 
@@ -129,7 +128,7 @@ Run **Herdr Organizations: launcher** from Herdr's action menu, or bind it to a 
 
 - **Launcher**: "needs you" across every coordinator (oldest first), then each project with its coordinators nested and their counts, then workspaces outside a project. `1`-`9` jump to a coordinator, `n` new project, `c` new coordinator, `a` turns the current workspace into a project, `/` filters, `b` opens the board, `s` settings.
 - **New** (`n`): one form for a project, coordinator, thread or workspace. Up/Down switch what to create, Tab moves between fields, Left/Right choose, Enter creates. The last line shows the exact CLI call the form makes.
-- **Project tree** (Enter on a project or coordinator): project › coordinators › threads. Enter goes to the selected pane, Space folds a coordinator, `t` starts a thread under it, `m` merges a reviewed pull request, `1`-`9` press that option in the pane of an agent that is waiting on you.
+- **Project tree** (Enter on a project or coordinator): project › coordinators › threads. Enter goes to the selected pane, Space folds a coordinator, `t` starts a thread under it, `m` merges a reviewed pull request, `1`-`9` on an agent that is waiting on you open its detail, where a digit answers.
 - **Board** (`b`): every thread in four columns (needs you, working, review, resolved), idle threads on one line and the running coordinators below. `f` cycles the coordinator filter.
 - **Thread detail** (Enter on a card or a needs-you row): the question or the agent's current line, the PR and its checks, the thread's inbox items (`d` marks one done) and the last lines of its pane, read once.
 - **Merge confirm** (`m`): drawn by the same process, because Herdr shows one popup at a time. It merges only when the pull request passes the same guard as `thread merge`, then resolves the thread and tells its coordinator. `k` keeps the worktree.
@@ -198,7 +197,7 @@ For operational details and agent permission guidance, see [Operations](operatio
 
 ### Moving from Herdr Projects 0.2.34
 
-Two things change for scripts: `thread list --json` and `thread show --json` print the versioned document in [json.md](json.md) instead of a bare record, and the `overview` header separates a project's goal with a colon.
+Two things change for scripts: `thread list --json` and `thread show --json` print the versioned document in [json.md](json.md) instead of a bare record, and the `overview` header separates a project's goal with a colon. Two change for people: `prefix+a` opens the Organizations launcher (the Projects popup moved to the **projects** action), and `update` needs release tags this fork does not publish yet (see [Updating](#updating)).
 
 Link a checkout that stays put, not a worktree you will delete or switch: every path that `configure` and `doctor --fix` write (agent hooks, the tab bar, each coordinator's `AGENTS.md`, the `~/.local/bin` links) points into the linked folder. Wait until no coordinator or thread is mid-task, then:
 
@@ -211,8 +210,8 @@ herdr-projects ticker stop
 herdr plugin uninstall herdr-projects
 
 # 2. Install from a stable checkout
-git clone --branch <branch> <repository> ~/Developer/herdr/organizations-live
-cd ~/Developer/herdr/organizations-live && sh scripts/install.sh && herdr plugin link .
+git clone https://github.com/frizynn/herdr-organizations ~/src/herdr-organizations
+cd ~/src/herdr-organizations && sh scripts/install.sh && herdr plugin link .
 herdr-organizations configure
 herdr-organizations doctor --fix     # rewrites the old binary path in each AGENTS.md and links ~/.local/bin
 herdr-organizations ticker status

@@ -268,7 +268,7 @@ enum Command {
         /// Print what would change and change nothing
         #[arg(long)]
         dry_run: bool,
-        /// The key that opens the projects popup (default: prefix+a)
+        /// The key that opens the Organizations launcher (default: prefix+a)
         #[arg(long, value_name = "KEY")]
         key: Option<String>,
         /// Only the hooks: leave Herdr's config.toml alone

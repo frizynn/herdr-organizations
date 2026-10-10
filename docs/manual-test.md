@@ -2,38 +2,12 @@
 
 Automated tree, hierarchy, context, profile, CLI and scenario checks run with `cargo test --locked`. The following checks require a real Herdr client and installed agent CLIs. Use a disposable session and project root.
 
-## 0.2.0: the Herdr-native redesign
-
-Checked on 2026-09-23 in a scratch `hp-dev` session (herdr 0.9.1, macOS, Claude Code 2.1.280). "Builder" means the builder ran it and read the result; "client-witnessed" needs a person looking at an attached Herdr client.
-
-| Slice | Check | How it was checked |
-| --- | --- | --- |
-| 1 | `new` writes `AGENTS.md`, `CLAUDE.md` → `AGENTS.md`, `uploads/`; `open` starts an agent there and its first reply runs `skill` and `context` through the absolute path | Builder (Claude Code). Codex and OpenCode: client-witnessed |
-| 1 | A `--kind tab` thread's first turn does not run them and does not call itself the coordinator | Builder |
-| 1 | A brief starts with the project header and has no operational settings; `thread prompt` lands under `## Follow-ups`; `thread show --json` has the Next list | Builder, unit |
-| 1 | `doctor --fix` adds the priming files and `routines/pr-followup.md` to an older project | Builder, unit |
-| 2 | After `configure`, a thread's sub-line shows its activity within one tick; a thread that asks a question is `needs you` within one tick | Builder (hooks from a scratch settings file via `--settings`) |
-| 2 | `unconfigure` leaves the hook files byte-identical, keeping later user edits | Unit, builder |
-| 2 | A thread survives a server restart with native resume and keeps its group and name; a cleared name is re-applied | Builder (client attached through `script`) |
-| 3 | Tokens `hp_project`, `hp_rank`, `hp_group`, the display name and `hp_sub` are set, a coordinator's display name is its project's name; old tokens cleared | Builder (`herdr api snapshot`) |
-| 3 | Four-line rows, colours, the project count and `projects: N need you` render; `focus <slug>` narrows and `unfocus` restores the by-need order | Client-witnessed |
-| 4 | `prefix+a` opens the popup scoped to the current project (also in a thread's workspace), and on all projects elsewhere; `P` opens the project picker on the current scope, `/` filters it, `esc` clears then closes, from any section; `↵` focuses the thread and the popup is gone | Client-witnessed (the same TUI was driven in a pane by the builder) |
-| 4 | A Next number key reaches the thread and its task file; `s` stops a working thread; a settings edit reaches PROJECT.md; `X` asks first | Builder |
-| 5 | Resolving a merged thread leaves no worktree, branch or workspace and keeps `threads/<id>.md` and `library/<id>/`; an unmerged one keeps its branch and says so | Builder |
-| 5 | `sweep --dry-run` lists a planted orphan worktree and `sweep --yes` removes it; `archive` closes and hides, `unarchive` reopens | Builder |
-| 6 | A real pull request is polled; a review comment fires `pr-followup` and the thread fixes it; forwarding "Merge the PR" merges it; the merge resolves and cleans the thread | Builder (private scratch repo `eliasstravik/hp-pr-probe`) |
-| 6 | A needs-you event gives one notification titled `<Project> · t-0009` with the request sound; `mute` silences it; the nudge waits for a minute of idle | Unit. Seeing the notification: client-witnessed |
-
-## Before 0.2.0
-
-The acceptance checks from the original plan, by stage, with how each was checked on 2026-09-17 (herdr 0.9.1; macOS 26 on the home Mac, Linux aarch64 on the second machine). "Builder" means the builder ran it in the throwaway `hp-dev` session and read the result; "unit" means a test in `cargo test`; "client-witnessed" means it is visual and the client has to look. Details of each run are in [`herdr-notes.md`](herdr-notes.md).
-
 ## Prepare a disposable session
 
 ```sh
 scripts/dev-server
-scripts/dev-hp --root "$PWD/.dev-root" new demo
-scripts/dev-hp --root "$PWD/.dev-root" open demo --session hp-dev
+scripts/dev-hp new demo
+scripts/dev-hp open demo --session hp-dev
 ```
 
 Use a scratch Git repository for worktree checks. Do not point these checks at a personal project root or default Herdr session.
@@ -43,15 +17,15 @@ Use a scratch Git repository for worktree checks. Do not point these checks at a
 1. Create a coordinator directly under root:
 
    ```sh
-   node start demo --parent root --role coordinator --title "Area lead" --task-file - <<'TASK'
+   scripts/dev-hp node start demo --parent root --role coordinator --title "Area lead" --task-file - <<'TASK'
    Coordinate the demo organization and create a worker child.
    TASK
    ```
 
 2. In the resulting pane, verify its brief contains the root-to-node instructions, the exact CLI prefix, its node id and the instruction to create children beneath itself.
 3. Create a worker and another coordinator beneath that coordinator. Create a worker under the second coordinator. Confirm the tree is at least four levels deep including root.
-4. Run `node list demo`. Confirm rows include role, parent, state and stable preorder. Restart one child, resolve another, and verify only that node's state changes.
-5. Attempt `node start demo --parent <worker-id> ...`. Confirm the CLI rejects it and no record, task or node scope is created.
+4. Run `scripts/dev-hp node list demo`. Confirm rows include role, parent, state and stable preorder. Restart one child, resolve another, and verify only that node's state changes.
+5. Attempt `scripts/dev-hp node start demo --parent <worker-id> ...`. Confirm the CLI rejects it and no record, task or node scope is created.
 6. Close a node pane and use `node restart`. Confirm it reuses the recorded worktree or tab and preserves its profile and ancestor context.
 
 ## Scoped instructions and memory
@@ -96,6 +70,32 @@ Open **Herdr Organizations: launcher** (or the bound key) in a disposable sessio
 - Confirm the old `herdr-projects` binary alias and existing `~/.herdr-projects` and `~/.config/herdr-projects` data locations still work.
 
 Record the Herdr client and server versions, operating system, harness versions, and any client-only limitations with results.
+
+## 0.2.0: the Herdr-native redesign
+
+Checked on 2026-09-23 in a scratch `hp-dev` session (herdr 0.9.1, macOS, Claude Code 2.1.280). "Builder" means the builder ran it and read the result; "client-witnessed" needs a person looking at an attached Herdr client.
+
+| Slice | Check | How it was checked |
+| --- | --- | --- |
+| 1 | `new` writes `AGENTS.md`, `CLAUDE.md` → `AGENTS.md`, `uploads/`; `open` starts an agent there and its first reply runs `skill` and `context` through the absolute path | Builder (Claude Code). Codex and OpenCode: client-witnessed |
+| 1 | A `--kind tab` thread's first turn does not run them and does not call itself the coordinator | Builder |
+| 1 | A brief starts with the project header and has no operational settings; `thread prompt` lands under `## Follow-ups`; `thread show --json` has the Next list | Builder, unit |
+| 1 | `doctor --fix` adds the priming files and `routines/pr-followup.md` to an older project | Builder, unit |
+| 2 | After `configure`, a thread's sub-line shows its activity within one tick; a thread that asks a question is `needs you` within one tick | Builder (hooks from a scratch settings file via `--settings`) |
+| 2 | `unconfigure` leaves the hook files byte-identical, keeping later user edits | Unit, builder |
+| 2 | A thread survives a server restart with native resume and keeps its group and name; a cleared name is re-applied | Builder (client attached through `script`) |
+| 3 | Tokens `hp_project`, `hp_rank`, `hp_group`, the display name and `hp_sub` are set, a coordinator's display name is its project's name; old tokens cleared | Builder (`herdr api snapshot`) |
+| 3 | Four-line rows, colours, the project count and `projects: N need you` render; `focus <slug>` narrows and `unfocus` restores the by-need order | Client-witnessed |
+| 4 | `prefix+a` opens the popup scoped to the current project (also in a thread's workspace), and on all projects elsewhere; `P` opens the project picker on the current scope, `/` filters it, `esc` clears then closes, from any section; `↵` focuses the thread and the popup is gone | Client-witnessed (the same TUI was driven in a pane by the builder) |
+| 4 | A Next number key reaches the thread and its task file; `s` stops a working thread; a settings edit reaches PROJECT.md; `X` asks first | Builder |
+| 5 | Resolving a merged thread leaves no worktree, branch or workspace and keeps `threads/<id>.md` and `library/<id>/`; an unmerged one keeps its branch and says so | Builder |
+| 5 | `sweep --dry-run` lists a planted orphan worktree and `sweep --yes` removes it; `archive` closes and hides, `unarchive` reopens | Builder |
+| 6 | A real pull request is polled; a review comment fires `pr-followup` and the thread fixes it; forwarding "Merge the PR" merges it; the merge resolves and cleans the thread | Builder (private scratch repo `eliasstravik/hp-pr-probe`) |
+| 6 | A needs-you event gives one notification titled `<Project> · t-0009` with the request sound; `mute` silences it; the nudge waits for a minute of idle | Unit. Seeing the notification: client-witnessed |
+
+## Before 0.2.0
+
+The acceptance checks from the original plan, by stage, with how each was checked on 2026-09-17 (herdr 0.9.1; macOS 26 on the home Mac, Linux aarch64 on the second machine). "Builder" means the builder ran it in the throwaway `hp-dev` session and read the result; "unit" means a test in `cargo test`; "client-witnessed" means it is visual and the client has to look. Details of each run are in [`herdr-notes.md`](herdr-notes.md).
 
 ## Checks by stage
 
