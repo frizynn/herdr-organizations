@@ -348,9 +348,21 @@ pub fn nudge(
         );
         herdr.agent_prompt(pane, &prompt)?;
     } else {
-        // Thread transitions get their own toast from the ticker ("panel depo
-        // needs you"), chosen in Settings; this one covers everything else.
-        let other = items.iter().filter(|i| i.kind != "thread-state").count();
+        // Threads that now need the user or a review get their own toast from
+        // the ticker ("billing ui needs you"); this one covers the rest,
+        // idle and auto-resolved threads included.
+        let toasted = |item: &inbox::Item| {
+            item.kind == "thread-state"
+                && thread::load(project, &item.subject).is_ok_and(|t| {
+                    Group::from_token(&t.last_group).is_some_and(|g| {
+                        matches!(
+                            g,
+                            Group::WaitingOnYou | Group::ReadyForReview | Group::Landing
+                        )
+                    })
+                })
+        };
+        let other = items.iter().filter(|i| !toasted(i)).count();
         if other > 0 {
             let body =
                 format!("{other} new inbox item(s). The coordinator reads them at its next turn.");

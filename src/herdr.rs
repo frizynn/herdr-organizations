@@ -955,8 +955,8 @@ mod tests {
     #[test]
     fn view_labels_leave_room_for_the_agents_header() {
         assert_eq!(view_label("producto"), "producto");
-        assert_eq!(view_label("AWAM Comercio SaaS"), "AWAM Comercio…");
-        assert_eq!(view_label("AWAM Comercio SaaS").chars().count(), 14);
+        assert_eq!(view_label("Acme Billing Suite"), "Acme Billing …");
+        assert_eq!(view_label("Acme Billing Suite").chars().count(), 14);
     }
 
     #[test]

@@ -431,25 +431,25 @@ mod tests {
     #[test]
     fn previews_are_the_exact_cli_calls() {
         let project = NewProject {
-            name: "Panel mayorista".into(),
+            name: "Pricing panel".into(),
             repos: vec!["~/dev/app".into(), " ".into()],
             ..NewProject::default()
         };
         assert_eq!(
             preview_project(&project),
-            "$ herdr-organizations new \"Panel mayorista\" --repo ~/dev/app"
+            "$ herdr-organizations new \"Pricing panel\" --repo ~/dev/app"
         );
         let node = NewNode {
-            slug: "awam".into(),
+            slug: "acme".into(),
             parent: "t-0001".into(),
             role: NodeRole::Worker,
-            title: "panel depo".into(),
+            title: "billing ui".into(),
             harness: "claude".into(),
             ..NewNode::default()
         };
         assert_eq!(
             preview_node(&node),
-            "$ herdr-organizations node start awam --parent t-0001 --role worker --title \"panel depo\" --harness claude --task-file -"
+            "$ herdr-organizations node start acme --parent t-0001 --role worker --title \"billing ui\" --harness claude --task-file -"
         );
     }
 }

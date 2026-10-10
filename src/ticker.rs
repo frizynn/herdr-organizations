@@ -305,8 +305,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                 spawn_listener(ctx, socket, tx.clone());
             }
         }
-        // Remote polls and failure back-off count in 15-second units.
-        memory.tick = (started.elapsed().as_secs() / TICK.as_secs()).max(memory.tick);
+        // Remote polls and failure back-off count in 15-second units, not
+        // passes: events can run a pass every few hundred milliseconds.
+        memory.tick = started.elapsed().as_secs() / TICK.as_secs();
         if tick(ctx, &log, &mut memory) {
             last_reachable = Instant::now();
         } else if last_reachable.elapsed() > IDLE_EXIT {
@@ -389,6 +390,7 @@ struct Publisher {
     tokens: crate::tokens::Cache,
     down: std::collections::BTreeSet<PathBuf>,
     groups: std::collections::BTreeMap<(String, String), crate::state::Status>,
+    primed: std::collections::BTreeSet<String>,
 }
 
 impl Publisher {
@@ -402,6 +404,7 @@ impl Publisher {
             tokens: Default::default(),
             down: Default::default(),
             groups: Default::default(),
+            primed: Default::default(),
         }
     }
 
@@ -475,7 +478,8 @@ impl Publisher {
     }
 
     /// One toast per transition into "needs you" or "review", as the
-    /// Settings screen chose. The first pass only records.
+    /// Settings screen chose, for sub-coordinators and workers alike. A
+    /// socket's first pass only records.
     fn notify(
         &mut self,
         ctx: &Ctx,
@@ -488,9 +492,9 @@ impl Publisher {
         let notify = crate::tui_config::load(&ctx.config_dir)
             .map(|c| c.view.notify)
             .unwrap_or_default();
-        let first = self.groups.is_empty();
+        let first = self.primed.insert(socket.to_string());
         for project in snapshot.projects.iter().filter(|p| p.socket == socket) {
-            for node in &project.threads {
+            for node in project.coordinators.iter().skip(1).chain(&project.threads) {
                 let key = (project.slug.clone(), node.id.clone());
                 let before = self.groups.insert(key, node.status);
                 if first || before == Some(node.status) {
@@ -1206,7 +1210,7 @@ mod tests {
                 socket: "a.sock".into(),
                 threads: vec![Node {
                     id: "t-0001".into(),
-                    title: "panel depo".into(),
+                    title: "billing ui".into(),
                     status,
                     ..Node::default()
                 }],
@@ -1224,7 +1228,7 @@ mod tests {
         publisher.notify(&ctx, &herdr, &snapshot(S::Need), "a.sock");
         publisher.notify(&ctx, &herdr, &snapshot(S::Need), "a.sock");
         assert_eq!(
-            world.runner.count("notification show panel depo needs you"),
+            world.runner.count("notification show billing ui needs you"),
             1
         );
 
@@ -1233,6 +1237,59 @@ mod tests {
         crate::tui_config::save(&ctx.config_dir, &config).unwrap();
         publisher.notify(&ctx, &herdr, &snapshot(S::Review), "a.sock");
         assert_eq!(world.runner.count("notification show"), 1);
+    }
+
+    #[test]
+    fn sub_coordinators_toast_and_each_socket_primes_on_its_own() {
+        use crate::state::{Node, ProjectView, Snapshot, Status as S};
+        let world = crate::scenarios::World::new();
+        world
+            .runner
+            .on("notification show", ok(r#"{"result":{"shown":true}}"#));
+        let ctx = world.ctx();
+        let herdr = Herdr::new("herdr", "a.sock", &world.runner);
+        let node = |id: &str, title: &str, status: S| Node {
+            id: id.into(),
+            title: title.into(),
+            status,
+            ..Node::default()
+        };
+        let snapshot = |sub: S, other: S| Snapshot {
+            projects: vec![
+                ProjectView {
+                    slug: "demo".into(),
+                    socket: "a.sock".into(),
+                    coordinators: vec![
+                        node("coordinator", "root", S::Need),
+                        node("t-0001", "mobile", sub),
+                    ],
+                    ..ProjectView::default()
+                },
+                ProjectView {
+                    slug: "other".into(),
+                    socket: "b.sock".into(),
+                    threads: vec![node("t-0001", "billing ui", other)],
+                    ..ProjectView::default()
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let mut publisher = Publisher::new(&Info::default());
+        let start = snapshot(S::Work, S::Need);
+        publisher.notify(&ctx, &herdr, &start, "a.sock");
+        publisher.notify(&ctx, &herdr, &start, "b.sock");
+        assert_eq!(
+            world.runner.count("notification show"),
+            0,
+            "a socket's first pass only records, even after another socket's"
+        );
+        publisher.notify(&ctx, &herdr, &snapshot(S::Need, S::Need), "a.sock");
+        assert_eq!(world.runner.count("notification show mobile needs you"), 1);
+        assert_eq!(
+            world.runner.count("notification show root"),
+            0,
+            "the root coordinator is the user's own pane"
+        );
     }
 
     #[test]

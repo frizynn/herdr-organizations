@@ -1123,6 +1123,21 @@ fn with_nudge_off_the_user_gets_one_notification_and_the_coordinator_no_prompt()
 }
 
 #[test]
+fn with_nudge_off_a_thread_going_idle_still_reaches_the_user() {
+    let (world, project, _) = finished_world("idle");
+    let ctx = world.ctx();
+    for _ in 0..3 {
+        ticker::tick_project(&ctx, &project).unwrap();
+    }
+    assert_eq!(items_of(&project, "thread-state").len(), 1);
+    assert_eq!(
+        world.runner.count("notification show herdr-projects: demo"),
+        1,
+        "the ticker's own toast covers only needs-you and review"
+    );
+}
+
+#[test]
 fn a_blocked_nudge_is_retried_and_a_busy_coordinator_is_not_prompted() {
     let (world, project, _) = finished_world("idle");
     set_front_matter(&project, "nudge = true");

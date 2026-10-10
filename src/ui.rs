@@ -28,6 +28,10 @@ use crate::ui_ops;
 pub const HARNESSES: [&str; 3] = ["claude", "codex", "opencode"];
 const EFFORTS: [&str; 4] = ["", "low", "medium", "high"];
 const HANDOFF: &str = "ui-handoff";
+/// Pane lines shown under QUESTION, enough for a permission dialog's command
+/// and its numbered options.
+const QUESTION_LINES: usize = 10;
+const DOCTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How the popup should open, written by the action that opened it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -989,9 +993,9 @@ impl<'a> App<'a> {
         let mut x = 1;
         let mut pairs = Vec::new();
         if node.status == Status::Need {
-            x = frame.chip(x, chip_y, "1-9", "answer") + 1;
+            x = frame.chip(x, chip_y, "1-9", "Question…") + 1;
             x = frame.chip(x, chip_y, &self.key_label(Action::Reply), "Reply…") + 1;
-            pairs.push(("1-9".into(), "answer"));
+            pairs.push(("1-9".into(), "question"));
         } else if node.pr.as_ref().is_some_and(|p| !p.merged()) && node.id != ROOT_ID {
             x = frame.chip(x, chip_y, &self.key_label(Action::Merge), "Merge") + 1;
             x = frame.chip(x, chip_y, &self.key_label(Action::OpenPr), "Open PR") + 1;
@@ -1150,7 +1154,7 @@ impl<'a> App<'a> {
         }
         let mut pairs = vec![("←→↑↓".to_string(), "move")];
         pairs.extend(self.hint(&[(Action::Open, "open"), (Action::GoToPane, "go to pane")]));
-        pairs.push(("1-9".into(), "answer"));
+        pairs.push(("1-9".into(), "question"));
         pairs.extend(self.hint(&[
             (Action::Merge, "merge"),
             (Action::Filter, "filter"),
@@ -1354,7 +1358,7 @@ impl<'a> App<'a> {
             }
         }
         let mut pairs = Vec::new();
-        if node.status == Status::Need {
+        if node.status == Status::Need && self.config.view.answer && !output.is_empty() {
             pairs.push(("1-9".to_string(), "answer"));
         }
         pairs.extend(self.hint(&[(Action::Reply, "reply"), (Action::GoToPane, "go to pane")]));
@@ -1373,7 +1377,7 @@ impl<'a> App<'a> {
     fn settings_lines(&self) -> Vec<Line> {
         let v = &self.config.view;
         let mut lines = vec![Line::new().at(1, "VIEW", HEAD)];
-        let rows: [(&str, String, &str); 5] = [
+        let rows: [(&str, String, &str); 6] = [
             (
                 "Dock",
                 match v.dock {
@@ -1405,6 +1409,11 @@ impl<'a> App<'a> {
                 "needs you, review · needs you · off",
             ),
             (
+                "Answer with 1-9",
+                if v.answer { "on" } else { "off" }.into(),
+                "on (thread detail only) · off",
+            ),
+            (
                 "Launcher key",
                 "prefix+a".into(),
                 "set in Herdr's config.toml",
@@ -1412,7 +1421,7 @@ impl<'a> App<'a> {
         ];
         for (i, (label, value, range)) in rows.into_iter().enumerate() {
             let line = Line::new().at(3, label, Style::PLAIN);
-            let line = if i == 4 {
+            let line = if i == 5 {
                 line.at(26, value, DIM)
             } else {
                 let close = 27 + value.chars().count() as isize;
@@ -1809,14 +1818,14 @@ impl<'a> App<'a> {
             .collect();
         let fields = match kind {
             Kind::Project => vec![
-                Field::text("Name", "", "Panel mayorista"),
+                Field::text("Name", "", "Pricing panel"),
                 Field::text("Goal", "", "What should be true when this project is done?"),
                 Field::text("Repositories", "", "~/dev/app, ~/dev/api"),
                 Self::harness_choice("Coordinator", false, "claude"),
                 Self::harness_choice("Threads run on", false, "claude"),
             ],
             Kind::Coordinator => vec![
-                Field::text("Title", "", "rediseño mobile"),
+                Field::text("Title", "", "mobile redesign"),
                 self.project_choice(&slug),
                 Field::text("Task", "", "What this coordinator owns"),
                 Field::text("Repository", "", "optional: its own worktree and workspace"),
@@ -1825,7 +1834,7 @@ impl<'a> App<'a> {
                 Field::choice("Effort", efforts, effort_names, 0),
             ],
             Kind::Thread => vec![
-                Field::text("Title", "", "panel depo"),
+                Field::text("Title", "", "billing ui"),
                 self.project_choice(&slug),
                 self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "One bounded task"),
@@ -2345,7 +2354,12 @@ impl<'a> App<'a> {
     }
 
     fn open_detail(&mut self, slug: &str, id: &str) {
-        let output = ui_ops::last_output(self.ctx, slug, id, 3);
+        let lines = if self.is_waiting(slug, id) {
+            QUESTION_LINES
+        } else {
+            3
+        };
+        let output = ui_ops::last_output(self.ctx, slug, id, lines);
         self.stack.push(View::Detail {
             slug: slug.into(),
             id: id.into(),
@@ -2545,6 +2559,7 @@ impl<'a> App<'a> {
                 let at = all.iter().position(|n| *n == v.notify).unwrap_or(0);
                 v.notify = all[cycle(3, at)];
             }
+            4 => v.answer = !v.answer,
             _ => return,
         }
         self.save_config();
@@ -2560,22 +2575,27 @@ impl<'a> App<'a> {
         let Ok(exe) = std::env::current_exe() else {
             return;
         };
-        let out = std::process::Command::new(exe)
+        let cmd = crate::runner::Cmd::new(exe.to_string_lossy(), DOCTOR_TIMEOUT)
             .arg("--root")
-            .arg(&self.ctx.root)
+            .arg(self.ctx.root.to_string_lossy())
             .arg("doctor")
-            .output();
-        self.message = match out {
-            Ok(out) if out.status.success() => "doctor: all required checks passed".into(),
+            .own_group();
+        self.message = match self.ctx.runner.run(&cmd) {
+            Ok(out) if out.success() => "doctor: all required checks passed".into(),
+            Ok(out) if out.timed_out => {
+                "doctor timed out; run `herdr-organizations doctor` in a shell".into()
+            }
             Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let failed = text
+                let failed = out
+                    .stdout
                     .lines()
                     .find(|l| l.contains("FAIL"))
-                    .unwrap_or("some checks failed");
-                format!("doctor: {}", failed.trim())
+                    .unwrap_or("some checks failed")
+                    .trim()
+                    .to_string();
+                format!("doctor: {failed}")
             }
-            Err(error) => format!("doctor did not run: {error}"),
+            Err(error) => format!("doctor did not run: {error:#}"),
         };
     }
 
@@ -2682,6 +2702,10 @@ impl<'a> App<'a> {
         self.on_action(action, &top);
     }
 
+    /// Digits jump on the launcher. Elsewhere they only answer from the
+    /// detail screen, where the question's own lines are on screen; the other
+    /// screens open the question first so no digit lands on a dialog the user
+    /// has not read.
     fn on_digit(&mut self, digit: char) {
         let n = digit.to_digit(10).unwrap_or(1) as usize;
         match self.stack.last() {
@@ -2691,24 +2715,58 @@ impl<'a> App<'a> {
                 }
             }
             Some(View::Confirm { .. } | View::Settings { .. } | View::Help) => {}
+            Some(View::Detail { .. }) => self.answer(digit),
             _ => {
                 let Some((slug, id)) = self.focused_node() else {
                     return;
                 };
-                let needs = self
-                    .project(&slug)
-                    .and_then(|p| p.node(&id))
-                    .is_some_and(|n| n.status == Status::Need);
-                if !needs {
+                if !self.is_waiting(&slug, &id) {
                     self.message = "this agent is not waiting on you".into();
-                    return;
-                }
-                match ui_ops::answer(self.ctx, &slug, &id, digit) {
-                    Ok(()) => self.message = format!("sent {digit}"),
-                    Err(error) => self.message = format!("{error:#}"),
+                } else if matches!(self.mode, Mode::Dock { .. }) {
+                    self.go(&slug, &id);
+                } else {
+                    self.open_detail(&slug, &id);
                 }
             }
         }
+    }
+
+    fn is_waiting(&self, slug: &str, id: &str) -> bool {
+        self.project(slug)
+            .and_then(|p| p.node(id))
+            .is_some_and(|n| n.status == Status::Need)
+    }
+
+    /// Sends the digit only when the pane still shows the lines on screen, so
+    /// a stale snapshot or a dialog that changed meanwhile gets re-read first.
+    fn answer(&mut self, digit: char) {
+        let Some(View::Detail {
+            slug, id, output, ..
+        }) = self.stack.last()
+        else {
+            return;
+        };
+        let (slug, id, shown) = (slug.clone(), id.clone(), output.clone());
+        if !self.config.view.answer {
+            self.message = "answering with 1-9 is off in Settings; reply or go to the pane".into();
+            return;
+        }
+        if !self.is_waiting(&slug, &id) || shown.is_empty() {
+            self.message = "no question on screen; go to the pane to answer".into();
+            return;
+        }
+        let now = ui_ops::last_output(self.ctx, &slug, &id, QUESTION_LINES);
+        if now != shown {
+            if let Some(View::Detail { output, .. }) = self.stack.last_mut() {
+                *output = now;
+            }
+            self.message = "the question changed; read it again before answering".into();
+            return;
+        }
+        self.message = match ui_ops::answer(self.ctx, &slug, &id, digit) {
+            Ok(()) => format!("sent {digit}"),
+            Err(error) => format!("{error:#}"),
+        };
     }
 
     fn on_action(&mut self, action: Action, top: &View) {
@@ -3174,21 +3232,21 @@ mod tests {
         };
         let mut mobile = node(
             "t-0001",
-            "rediseño mobile",
+            "mobile redesign",
             "coordinator",
             "root",
             Status::Work,
         );
         mobile.depth = 1;
-        mobile.workspace = "AWAM rediseno mobile".into();
+        mobile.workspace = "Acme mobile redesign".into();
         mobile.counts = Counts {
             need: 1,
             work: 1,
             review: 1,
             ..Counts::default()
         };
-        let mut merca = node("t-0004", "panel merca", "worker", "t-0001", Status::Review);
-        merca.pr = Some(Pr {
+        let mut review = node("t-0004", "billing api", "worker", "t-0001", Status::Review);
+        review.pr = Some(Pr {
             number: "1342".into(),
             url: "https://github.com/o/r/pull/1342".into(),
             review: "APPROVED".into(),
@@ -3202,15 +3260,15 @@ mod tests {
                 ..Ticker::default()
             }),
             projects: vec![ProjectView {
-                slug: "awam".into(),
-                name: "AWAM Comercio SaaS".into(),
-                repo: "/x/comercio-saas".into(),
+                slug: "acme".into(),
+                name: "Acme Billing Suite".into(),
+                repo: "/x/billing".into(),
                 status: "active".into(),
                 coordinators: vec![root, mobile],
                 threads: vec![
-                    node("t-0002", "panel depo", "worker", "t-0001", Status::Need),
+                    node("t-0002", "billing ui", "worker", "t-0001", Status::Need),
                     node("t-0003", "landing", "worker", "t-0001", Status::Work),
-                    merca,
+                    review,
                 ],
                 counts: Counts {
                     need: 1,
@@ -3248,11 +3306,11 @@ mod tests {
             let text = app.render(84, 22).text();
             let lines: Vec<&str> = text.lines().collect();
             assert!(lines[2].contains("NEEDS YOU"), "{text}");
-            assert!(lines[3].contains("› ● panel depo"), "{text}");
-            assert!(text.contains("AWAM Comercio SaaS"));
+            assert!(lines[3].contains("› ● billing ui"), "{text}");
+            assert!(text.contains("Acme Billing Suite"));
             assert!(text.contains("1 ├ ● Coordinator"), "{text}");
-            assert!(text.contains("2 └ ● rediseño mobile"), "{text}");
-            assert!(text.contains("+ New coordinator in AWAM Comercio SaaS"));
+            assert!(text.contains("2 └ ● mobile redesign"), "{text}");
+            assert!(text.contains("+ New coordinator in Acme Billing Suite"));
             assert!(text.contains("WORKSPACES"));
             assert!(lines[21].contains("↵ open · n new · 1-9 jump"), "{text}");
         });
@@ -3264,8 +3322,8 @@ mod tests {
             press(app, crossterm::event::KeyCode::Char('2'));
             assert!(matches!(app.stack.last(), Some(View::Tree { .. })));
             let text = app.render(90, 29).text();
-            assert!(text.contains("▾ ● rediseño mobile"), "{text}");
-            assert!(text.contains("├─ ● panel depo"), "{text}");
+            assert!(text.contains("▾ ● mobile redesign"), "{text}");
+            assert!(text.contains("├─ ● billing ui"), "{text}");
             press(app, crossterm::event::KeyCode::Esc);
             assert!(matches!(app.stack.last(), Some(View::Launcher { .. })));
             press(app, crossterm::event::KeyCode::Esc);
@@ -3274,15 +3332,45 @@ mod tests {
     }
 
     #[test]
+    fn digits_answer_only_from_the_detail_with_the_question_still_on_screen() {
+        with_app(|app| {
+            // On the tree a digit opens the question instead of answering.
+            app.open_tree("acme", Some("t-0002"));
+            press(app, crossterm::event::KeyCode::Char('2'));
+            assert!(matches!(app.stack.last(), Some(View::Detail { .. })));
+            assert!(app.message.is_empty(), "{}", app.message);
+
+            // No pane lines on screen: nothing to answer.
+            press(app, crossterm::event::KeyCode::Char('2'));
+            assert!(
+                app.message.contains("no question on screen"),
+                "{}",
+                app.message
+            );
+
+            // The pane no longer shows what the screen shows: re-read, not sent.
+            if let Some(View::Detail { output, .. }) = app.stack.last_mut() {
+                *output = vec!["Allow rm -rf build?".into(), "1. Yes".into()];
+            }
+            press(app, crossterm::event::KeyCode::Char('1'));
+            assert!(app.message.contains("question changed"), "{}", app.message);
+
+            app.config.view.answer = false;
+            press(app, crossterm::event::KeyCode::Char('1'));
+            assert!(app.message.contains("off in Settings"), "{}", app.message);
+        });
+    }
+
+    #[test]
     fn merge_opens_a_dialog_in_the_same_process() {
         with_app(|app| {
-            app.open_tree("awam", Some("t-0004"));
+            app.open_tree("acme", Some("t-0004"));
             press(app, crossterm::event::KeyCode::Char('m'));
             assert!(matches!(app.stack.last(), Some(View::Confirm { .. })));
             let text = app.render(90, 29).text();
             assert!(text.contains("Merge PR #1342"), "{text}");
             assert!(text.contains("Squash and merge, then"), "{text}");
-            assert!(text.contains("tell coordinator rediseño mobile"), "{text}");
+            assert!(text.contains("tell coordinator mobile redesign"), "{text}");
             press(app, crossterm::event::KeyCode::Esc);
             assert!(matches!(app.stack.last(), Some(View::Tree { .. })));
         });
@@ -3340,13 +3428,13 @@ mod tests {
     fn the_new_form_previews_the_cli_call_and_validates_the_name() {
         with_app(|app| {
             press(app, crossterm::event::KeyCode::Char('n'));
-            for c in "Panel mayorista".chars() {
+            for c in "Pricing panel".chars() {
                 press(app, crossterm::event::KeyCode::Char(c));
             }
             let text = app.render(90, 28).text();
             assert!(text.contains("✓ free"), "{text}");
             assert!(
-                text.contains("$ herdr-organizations new \"Panel mayorista\""),
+                text.contains("$ herdr-organizations new \"Pricing panel\""),
                 "{text}"
             );
             // Printable keys type into the field instead of running commands.
@@ -3360,18 +3448,18 @@ mod tests {
             let views = [
                 View::Launcher { sel: 0 },
                 View::Tree {
-                    slug: "awam".into(),
+                    slug: "acme".into(),
                     sel: 3,
                     folded: BTreeSet::new(),
                 },
                 View::Board {
-                    slug: "awam".into(),
+                    slug: "acme".into(),
                     col: 2,
                     row: 0,
                     filter: 1,
                 },
                 View::Detail {
-                    slug: "awam".into(),
+                    slug: "acme".into(),
                     id: "t-0004".into(),
                     sel: 0,
                     output: vec!["$ ok".into()],
@@ -3389,7 +3477,7 @@ mod tests {
                     assert_eq!((frame.width, frame.height), (w, h), "{view:?}");
                 }
             }
-            app.stack = vec![View::Form(app.form(Kind::Thread, "awam", "t-0001"))];
+            app.stack = vec![View::Form(app.form(Kind::Thread, "acme", "t-0001"))];
             for (w, h) in [(40, 12), (92, 31)] {
                 app.render(w, h);
             }

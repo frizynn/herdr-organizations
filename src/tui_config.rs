@@ -1,4 +1,4 @@
-//! `~/.config/herdr-projects/tui.toml`: the five view settings and the user's
+//! `~/.config/herdr-projects/tui.toml`: the view settings and the user's
 //! keybindings for the Organizations popup and dock. The Settings screen
 //! writes the same file, so hand edits and screen edits stay one source.
 
@@ -44,6 +44,8 @@ pub struct View {
     pub dock_width: u8,
     pub resolved: Resolved,
     pub notify: Notify,
+    /// Digits 1-9 answer a waiting agent from the thread detail screen.
+    pub answer: bool,
 }
 
 impl Default for View {
@@ -53,11 +55,13 @@ impl Default for View {
             dock_width: 30,
             resolved: Resolved::Count,
             notify: Notify::NeedsYouAndReview,
+            answer: true,
         }
     }
 }
 
-/// Every rebindable command. Digits 1-9 (jump or answer) are fixed.
+/// Every rebindable command. Digits 1-9 (jump, or answer from the thread
+/// detail) are fixed; Settings can turn answering off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {

@@ -46,7 +46,7 @@ New descendants inherit omitted profile fields from their parent. Use `--no-spaw
 
 The ticker is the one resident process. It listens to Herdr events instead of polling, reconciles once a minute, and reports display tokens that Herdr draws in its own sidebar: per coordinator workspace `●need ●working ●review` counts, per agent `$org_task`, and "needs you" in place of "blocked". `herdr-organizations sidebar install` adds the rows that render them without touching your rows or the sidebar headers. An optional dock split shows one coordinator next to its agents from the same state file.
 
-Keybindings default to the design (`n` new, `c` coordinator, `t` thread, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` jump or answer) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
+Keybindings default to the design (`n` new, `c` coordinator, `t` thread, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` jump, or answer from a thread's detail) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
 
 Pane metadata includes project, node id, role, parent, depth, tree order and current review group. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
 

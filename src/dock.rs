@@ -164,7 +164,11 @@ fn launch_argv(
 ) -> Result<Vec<String>> {
     let binary =
         std::env::current_exe().context("could not locate the herdr-organizations binary")?;
+    // `exec` replaces the split's shell, so the pane closes with the dock and
+    // its identity tokens never outlive it on a live shell the toggle would
+    // then close.
     let mut command = vec![
+        "exec".to_string(),
         "env".to_string(),
         format!("HERDR_PANE_ID={pane}"),
         format!("HERDR_WORKSPACE_ID={workspace}"),
@@ -204,7 +208,7 @@ pub fn context(ctx: &Ctx) -> Result<(String, String)> {
 }
 
 /// Reported once after the first frame. No TTL: the token lives as long as
-/// the pane, which is what the toggle needs to recognise it.
+/// the pane, which ends with the dock process (it was started with `exec`).
 pub fn report_identity(ctx: &Ctx) {
     let (Ok((slug, workspace)), Some(pane), Some(socket)) = (
         context(ctx),
@@ -291,6 +295,15 @@ mod tests {
             .unwrap()
             .display();
         assert!(split.contains("--ratio 0.7"), "{split}");
+        let run = world
+            .runner
+            .calls
+            .borrow()
+            .iter()
+            .find(|c| c.display().contains("pane run"))
+            .unwrap()
+            .display();
+        assert!(run.contains("pane run w1:p9 exec env "), "{run}");
 
         world.runner.on(
             "pane get",

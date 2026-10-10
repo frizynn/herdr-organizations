@@ -85,13 +85,13 @@ Run **Herdr Organizations: launcher** from Herdr's action menu, or bind it to a 
 - **Board** (`b`): every thread in four columns (needs you, working, review, resolved), idle threads on one line and the running coordinators below. `f` cycles the coordinator filter.
 - **Thread detail** (Enter on a card or a needs-you row): the question or the agent's current line, the PR and its checks, the thread's inbox items (`d` marks one done) and the last lines of its pane, read once.
 - **Merge confirm** (`m`): drawn by the same process, because Herdr shows one popup at a time. It merges only when the pull request passes the same guard as `thread merge`, then resolves the thread and tells its coordinator. `k` keeps the worktree.
-- **Settings** (`s`): dock side and width, resolved threads as a count or a list, which transitions show a Herdr notification, every keybinding, and the ticker's health.
+- **Settings** (`s`): dock side and width, resolved threads as a count or a list, which transitions show a Herdr notification, whether digits answer, every keybinding, and the ticker's health.
 
 The popup reads `~/.herdr-projects/.organizations-state.json`, which the ticker rewrites when something changes, and redraws on a key or a change of that file. It never polls Herdr. Without a running ticker it builds the same view from the records once when it opens.
 
 ### Keybindings
 
-Defaults follow the design: `↵` open, `n` new project, `c` new coordinator, `t` new thread, `b` board, `m` merge, `1`-`9` jump or answer, `s` settings, `/` search, `esc` back. Rebind any command in Settings (select it, press Enter, press the new key; Backspace restores the default) or edit `~/.config/herdr-projects/tui.toml`:
+Defaults follow the design: `↵` open, `n` new project, `c` new coordinator, `t` new thread, `b` board, `m` merge, `1`-`9` jump, `s` settings, `/` search, `esc` back. On a thread that needs you, `1`-`9` first opens its detail with the last lines of the pane; only there does a digit go to the agent, and only if the pane still shows those lines. Settings can turn that off. Rebind any command in Settings (select it, press Enter, press the new key; Backspace restores the default) or edit `~/.config/herdr-projects/tui.toml`:
 
 ```toml
 [view]
@@ -99,6 +99,7 @@ dock = "right"        # off, right or left
 dock_width = 30       # 15-50
 resolved = "count"    # count or list
 notify = "needs-you-and-review"  # or needs-you, off
+answer = true         # 1-9 answers from the thread detail; false turns it off
 
 [keys]
 board = "w"

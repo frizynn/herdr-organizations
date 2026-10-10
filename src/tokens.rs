@@ -29,8 +29,13 @@ pub struct Wanted {
     pub state_labels: Vec<(String, String)>,
 }
 
-fn rank(status: Status) -> u8 {
-    match status {
+/// The agent view's sort key: the finer group's rank, so landing threads sit
+/// between working and idle ones.
+fn rank(node: &Node) -> u8 {
+    if let Some(group) = crate::thread::Group::from_token(&node.group) {
+        return group.rank();
+    }
+    match node.status {
         Status::Review => 1,
         Status::Need => 2,
         Status::Work => 3,
@@ -95,7 +100,7 @@ fn pane_tokens(project: &ProjectView, node: &Node) -> Vec<(String, Option<String
             if root {
                 "0".into()
             } else {
-                rank(node.status).to_string()
+                rank(node).to_string()
             },
         ),
         ("depth", node.depth.to_string()),
@@ -282,7 +287,7 @@ mod tests {
         };
         let mobile = Node {
             id: "t-0001".into(),
-            title: "rediseño mobile".into(),
+            title: "mobile redesign".into(),
             role: "coordinator".into(),
             coordinator: "root".into(),
             parent: "root".into(),
@@ -295,9 +300,9 @@ mod tests {
             },
             ..Node::default()
         };
-        let depo = Node {
+        let waiting = Node {
             id: "t-0002".into(),
-            title: "panel depo".into(),
+            title: "billing ui".into(),
             role: "worker".into(),
             coordinator: "t-0001".into(),
             parent: "t-0001".into(),
@@ -308,7 +313,7 @@ mod tests {
             pane_id: "w2:p2".into(),
             ..Node::default()
         };
-        let merca = Node {
+        let review = Node {
             id: "t-0003".into(),
             role: "worker".into(),
             coordinator: "t-0001".into(),
@@ -322,10 +327,10 @@ mod tests {
             ..Node::default()
         };
         ProjectView {
-            slug: "awam".into(),
-            name: "AWAM Comercio SaaS".into(),
+            slug: "acme".into(),
+            name: "Acme Billing Suite".into(),
             coordinators: vec![root, mobile],
-            threads: vec![depo, merca],
+            threads: vec![waiting, review],
             ..ProjectView::default()
         }
     }
@@ -349,13 +354,13 @@ mod tests {
         };
         assert_eq!(
             token(pane("w1:p1"), "org_task"),
-            Some("coord AWAM Comercio SaaS")
+            Some("coord Acme Billing Suite")
         );
         assert_eq!(
             token(pane("w2:p1"), "org_task"),
-            Some("coord rediseño mobile")
+            Some("coord mobile redesign")
         );
-        assert_eq!(token(pane("w2:p2"), "org_task"), Some("rediseño mobile"));
+        assert_eq!(token(pane("w2:p2"), "org_task"), Some("mobile redesign"));
         assert_eq!(token(pane("w2:p3"), "org_task"), Some("review #1342"));
         assert_eq!(
             pane("w2:p2").state_labels,
@@ -376,6 +381,20 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "org_review" && v.is_none())
         );
+    }
+
+    #[test]
+    fn landing_threads_rank_between_working_and_idle() {
+        let mut p = project();
+        let rank_of = |p: &ProjectView| {
+            wanted(p)
+                .into_iter()
+                .find(|w| w.target == Target::Pane("w2:p3".into()))
+                .and_then(|w| token(&w, "rank").map(str::to_string))
+        };
+        assert_eq!(rank_of(&p).as_deref(), Some("1"));
+        p.threads[1].group = "landing".into();
+        assert_eq!(rank_of(&p).as_deref(), Some("4"));
     }
 
     #[test]
