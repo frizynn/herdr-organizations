@@ -111,6 +111,7 @@ enum Target {
     Project(String),
     Node(String, String),
     NewCoordinator(String),
+    NewThread(String),
     NewProject,
     Adopt,
     Resolved(String, String),
@@ -1987,7 +1988,7 @@ impl<'a> App<'a> {
                 .at(1, "+", BLUE)
                 .at(3, "New thread", Style::PLAIN)
                 .at(-2, self.key_label(Action::NewThread), DIM)
-                .target(Target::NewCoordinator(project.slug.clone())),
+                .target(Target::NewThread(project.slug.clone())),
         );
         lines
     }
@@ -2159,6 +2160,15 @@ impl<'a> App<'a> {
 
     fn render(&mut self, width: usize, height: usize) -> Frame {
         let mut frame = Frame::new(width, height);
+        let (min_w, min_h) = match self.mode {
+            Mode::Popup => (40, 12),
+            Mode::Dock { .. } => (16, 6),
+        };
+        if width < min_w || height < min_h {
+            frame.put(0, 0, "Too small; make this larger", DIM);
+            self.rows.clear();
+            return frame;
+        }
         let base = self.stack.iter().rposition(|v| !v.overlay()).unwrap_or(0);
         let view = self.stack[base].clone();
         match &view {
@@ -2467,7 +2477,6 @@ impl<'a> App<'a> {
             }
             return;
         }
-        let in_dock = matches!(self.stack.last(), Some(View::Dock { .. }));
         match target {
             Target::NeedsYou(slug, id) => self.open_detail(&slug, &id),
             Target::Project(slug) => self.open_tree(&slug, None),
@@ -2479,7 +2488,7 @@ impl<'a> App<'a> {
                     self.go(&slug, &id);
                 }
             }
-            Target::NewCoordinator(slug) if in_dock => self.dock_new_thread(&slug),
+            Target::NewThread(slug) => self.dock_new_thread(&slug),
             Target::NewCoordinator(slug) => self.new_form(Kind::Coordinator, &slug, ROOT_ID),
             Target::NewProject => self.new_form(Kind::Project, "", ""),
             Target::Adopt => self.adopt_current(),
@@ -3342,6 +3351,48 @@ mod tests {
             );
             // Printable keys type into the field instead of running commands.
             assert!(matches!(app.stack.last(), Some(View::Form(_))));
+        });
+    }
+
+    #[test]
+    fn every_screen_renders_at_small_and_odd_sizes() {
+        with_app(|app| {
+            let views = [
+                View::Launcher { sel: 0 },
+                View::Tree {
+                    slug: "awam".into(),
+                    sel: 3,
+                    folded: BTreeSet::new(),
+                },
+                View::Board {
+                    slug: "awam".into(),
+                    col: 2,
+                    row: 0,
+                    filter: 1,
+                },
+                View::Detail {
+                    slug: "awam".into(),
+                    id: "t-0004".into(),
+                    sel: 0,
+                    output: vec!["$ ok".into()],
+                },
+                View::Settings {
+                    sel: 2,
+                    capture: false,
+                },
+                View::Dock { sel: 0 },
+            ];
+            for view in views {
+                app.stack = vec![view.clone()];
+                for (w, h) in [(0, 0), (1, 1), (39, 11), (40, 12), (61, 17), (200, 60)] {
+                    let frame = app.render(w, h);
+                    assert_eq!((frame.width, frame.height), (w, h), "{view:?}");
+                }
+            }
+            app.stack = vec![View::Form(app.form(Kind::Thread, "awam", "t-0001"))];
+            for (w, h) in [(40, 12), (92, 31)] {
+                app.render(w, h);
+            }
         });
     }
 
