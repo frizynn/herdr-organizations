@@ -4110,4 +4110,65 @@ mod tests {
             assert!(app.message.contains("no projects yet"), "{}", app.message);
         });
     }
+
+    /// Herdr keeps a popup modal until its process exits. A popup that opens
+    /// a coordinator or restarts a node before closing takes every key for as
+    /// long as the agent takes to start, after focus has already moved away.
+    fn closes_before_any_herdr_call(act: impl FnOnce(&crate::scenarios::World, &mut App)) {
+        let mut world = crate::scenarios::World::new();
+        world.project("acme", "sock");
+        let socket = world.home.path().join("sock");
+        world.env = crate::paths::Env::for_test(
+            world.home.path(),
+            &[("HERDR_SOCKET_PATH", socket.to_str().unwrap())],
+        );
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        app.stack.push(View::Launcher { sel: 0 });
+        world.runner.calls.borrow_mut().clear();
+        act(&world, &mut app);
+        assert!(app.close, "{}", app.message);
+        let calls: Vec<String> = world
+            .runner
+            .calls
+            .borrow()
+            .iter()
+            .map(|c| c.display())
+            .collect();
+        assert!(calls.is_empty(), "the popup ran {calls:?} before closing");
+    }
+
+    #[test]
+    fn go_to_agent_closes_the_popup_before_any_herdr_call() {
+        closes_before_any_herdr_call(|_, app| {
+            app.open_tree("acme", Some("t-0001"));
+            press(app, crossterm::event::KeyCode::Char('g'));
+        });
+    }
+
+    #[test]
+    fn picking_a_project_to_open_closes_the_popup_before_any_herdr_call() {
+        closes_before_any_herdr_call(|_, app| {
+            app.pick = "open".into();
+            let row = targets(&app.launcher_lines())
+                .iter()
+                .position(|t| *t == Target::Project("acme".into()))
+                .unwrap();
+            app.set_sel(row);
+            press(app, crossterm::event::KeyCode::Enter);
+        });
+    }
+
+    #[test]
+    fn a_new_project_closes_the_popup_before_its_coordinator_starts() {
+        closes_before_any_herdr_call(|world, app| {
+            app.new_form(Kind::Project, "", "");
+            for c in "Pricing".chars() {
+                press(app, crossterm::event::KeyCode::Char(c));
+            }
+            press(app, crossterm::event::KeyCode::Enter);
+            assert!(world.root.join("pricing").is_dir());
+        });
+    }
 }
