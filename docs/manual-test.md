@@ -78,8 +78,8 @@ Open **Herdr Organizations: launcher** (or the bound key) in a disposable sessio
 ## Native sidebar tokens and headers
 
 1. Run `herdr-organizations sidebar install --config <disposable config>` and reload the config. Confirm a coordinator workspace shows a second row with its counts and agent rows show `$org_task` and "needs you".
-2. With tokens reported, click every header: `new` creates a workspace, `menu` opens the menu, the sort word right of `agents` cycles the sort, and `spaces` and `agents` behave as they do with Herdr's default layout. Click a workspace row and an agent row and confirm focus moves.
-3. Run **focus sidebar on this project** and confirm the `agents` header stays visible next to the short project label. `unfocus` clears it.
+2. With tokens reported, click every header: `new` creates a workspace, `menu` opens the menu, right of `agents` the header shows `projects` (the agent view `configure` sets, as upstream does; Herdr's own sort word such as `priority` appears only when no view is set), and `spaces` and `agents` behave as they do with Herdr's default layout. Click a workspace row and an agent row and confirm focus moves.
+3. Run **focus sidebar on this project** and confirm the `agents` header stays visible next to the short project label. `unfocus` puts `projects` back.
 
 ## Dock
 

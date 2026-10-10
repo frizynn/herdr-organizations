@@ -283,7 +283,7 @@ impl Live {
         self.workspaces
             .iter()
             .find(|w| w.workspace_id == id)
-            .map(|w| w.label.clone())
+            .map(|w| crate::grouping::plain(&w.label))
             .unwrap_or_default()
     }
 
@@ -291,7 +291,7 @@ impl Live {
         self.tabs
             .iter()
             .find(|t| t.tab_id == id)
-            .map(|t| t.label.clone())
+            .map(|t| crate::grouping::plain(&t.label))
             .unwrap_or_default()
     }
 }
@@ -390,7 +390,7 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         .flat_map(|live| {
             live.workspaces.iter().map(|w| Workspace {
                 id: w.workspace_id.clone(),
-                label: w.label.clone(),
+                label: crate::grouping::plain(&w.label),
                 agent_status: w.agent_status.clone(),
                 tabs: w.tab_count,
                 focused: w.focused,
@@ -718,6 +718,25 @@ mod tests {
         assert_eq!(root.counts.total(), 3);
         assert_eq!(view.counts.total(), 3);
         assert_eq!(view.counts.need, 1);
+    }
+
+    #[test]
+    fn herdr_labels_lose_the_invisible_head_marks() {
+        let live = Live {
+            workspaces: vec![WorkspaceInfo {
+                workspace_id: "w1".into(),
+                label: format!("Demo{}", crate::grouping::HOME_MARK),
+                ..WorkspaceInfo::default()
+            }],
+            tabs: vec![TabInfo {
+                tab_id: "w1:t1".into(),
+                workspace_id: "w1".into(),
+                label: format!("Area lead{}", crate::grouping::HEAD_MARK),
+            }],
+            ..Live::default()
+        };
+        assert_eq!(live.workspace_label("w1"), "Demo");
+        assert_eq!(live.tab_label("w1:t1"), "Area lead");
     }
 
     #[test]

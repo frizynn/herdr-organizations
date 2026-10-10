@@ -344,8 +344,6 @@ pub mod fake {
         pub calls: RefCell<Vec<Cmd>>,
         /// (socket, request line) of every socket request.
         pub socket_requests: RefCell<Vec<(PathBuf, String)>>,
-        /// (needle in the request line, reply line), first match wins.
-        socket_rules: RefCell<Vec<(String, String)>>,
     }
 
     impl FakeRunner {
@@ -371,14 +369,6 @@ pub mod fake {
             self.rules
                 .borrow_mut()
                 .push((Box::new(matcher), Box::new(answer)));
-            self
-        }
-
-        /// Answer socket requests whose line contains `needle`.
-        pub fn on_socket(&self, needle: &str, reply: &str) -> &Self {
-            self.socket_rules
-                .borrow_mut()
-                .push((needle.to_string(), reply.to_string()));
             self
         }
 
@@ -429,10 +419,6 @@ pub mod fake {
             self.socket_requests
                 .borrow_mut()
                 .push((socket.to_path_buf(), line.to_string()));
-            let rules = self.socket_rules.borrow();
-            if let Some((_, reply)) = rules.iter().find(|(needle, _)| line.contains(needle)) {
-                return Ok(reply.clone());
-            }
             Ok(r#"{"id":"hp","result":{"type":"agent_view","active":true}}"#.to_string())
         }
 

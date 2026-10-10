@@ -196,6 +196,44 @@ The binary continues to read projects from `~/.herdr-projects/`, settings from `
 
 For operational details and agent permission guidance, see [Operations](operations.md). Use the [manual test guide](manual-test.md) for the keyboard, mouse and live-pane checks that require a Herdr client.
 
+### Moving from Herdr Projects 0.2.34
+
+Two things change for scripts: `thread list --json` and `thread show --json` print the versioned document in [json.md](json.md) instead of a bare record, and the `overview` header separates a project's goal with a colon.
+
+Link a checkout that stays put, not a worktree you will delete or switch: every path that `configure` and `doctor --fix` write (agent hooks, the tab bar, each coordinator's `AGENTS.md`, the `~/.local/bin` links) points into the linked folder. Wait until no coordinator or thread is mid-task, then:
+
+```bash
+# 1. Back up projects and settings without the thread worktrees
+#    (Herdr Projects drops the organization fields when it saves a record)
+cd ~ && find .herdr-projects .config/herdr-projects -path '*/threads/t-*' -type d -prune -o -type f -print \
+  | tar czf ~/herdr-projects-backup-$(date +%Y%m%d).tgz -T -
+herdr-projects ticker stop
+herdr plugin uninstall herdr-projects
+
+# 2. Install from a stable checkout
+git clone --branch <branch> <repository> ~/Developer/herdr/organizations-live
+cd ~/Developer/herdr/organizations-live && sh scripts/install.sh && herdr plugin link .
+herdr-organizations configure
+herdr-organizations doctor --fix     # rewrites the old binary path in each AGENTS.md and links ~/.local/bin
+herdr-organizations ticker status
+```
+
+Reload the config in Herdr, then reopen each coordinator (`herdr-organizations open <slug>`) and restart any agent that should keep reporting progress: running agents keep the hooks and paths they loaded at start. For the first minutes, watch `tail -f ~/.herdr-projects/.ticker.log` and check that open threads get no second brief.
+
+### Going back to Herdr Projects
+
+Herdr Projects 0.2.34 rewrites a thread record without `parent_id`, `role`, `can_spawn` and the node's model, effort, profile and agent arguments whenever it saves one, so coordinators become workers below `root`. To get the tree back when you return to Herdr Organizations, restore the thread records from the backup while no ticker runs. Its `configure` does not recognize this plugin's hooks, so remove them first:
+
+```bash
+herdr-organizations unconfigure
+herdr-organizations ticker stop
+herdr plugin unlink herdr-projects
+rm ~/.local/bin/herdr-projects ~/.local/bin/herdr-organizations   # links into the checkout are never replaced
+herdr plugin install eliasstravik/herdr-projects
+herdr-projects configure
+herdr-projects doctor --fix
+```
+
 ## Check your setup
 
 ```bash
@@ -211,7 +249,7 @@ herdr-projects ticker status
 
 ## Updating
 
-`herdr-organizations update` (or `herdr-projects update`) reads the `vX.Y.Z` release tags of the plugin's `origin`. This fork publishes none yet, so `update` says so and changes nothing. To update, reinstall from the repository, or in a linked checkout pull and rebuild:
+`herdr-organizations update` (or `herdr-projects update`) reads the `vX.Y.Z` release tags of the plugin's `origin`, and in a linked checkout it also requires the `main` branch. This fork publishes no tags yet, so `update` and `update --check` print that and exit with status 1 without changing anything. To update, reinstall from the repository, or in a linked checkout pull and rebuild:
 
 ```bash
 herdr-projects ticker stop
@@ -229,5 +267,7 @@ herdr-projects unconfigure
 herdr-projects ticker stop
 herdr plugin uninstall herdr-projects      # or: herdr plugin unlink herdr-projects
 ```
+
+A linked checkout's `~/.local/bin` links stay until you remove them (`rm ~/.local/bin/herdr-projects ~/.local/bin/herdr-organizations`); no later install replaces a link that points outside Herdr's plugin folder.
 
 Your projects stay in `~/.herdr-projects/`; delete them yourself if you no longer want them.

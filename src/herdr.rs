@@ -815,12 +815,12 @@ pub struct TabInfo {
     pub label: String,
 }
 
-/// One metadata patch for a pane: tokens (`None` clears one), state labels
-/// and a TTL. Sent as a single socket request instead of a CLI fork.
+/// One metadata patch for a pane: tokens (`None` clears one) and a TTL. Sent
+/// as a single socket request instead of a CLI fork. It carries no display
+/// name or state labels, so it leaves those as `sidebar::report_pane` set them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PaneMetadata {
     pub tokens: Vec<(String, Option<String>)>,
-    pub state_labels: Vec<(String, String)>,
     pub ttl: Option<Duration>,
 }
 
@@ -930,14 +930,6 @@ impl<'a> Herdr<'a> {
     ) -> Result<(), HerdrError> {
         let mut params = serde_json::json!({ "pane_id": pane, "source": SOURCE });
         params["tokens"] = metadata_tokens(&metadata.tokens);
-        if !metadata.state_labels.is_empty() {
-            params["state_labels"] = metadata
-                .state_labels
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect::<serde_json::Map<_, _>>()
-                .into();
-        }
         if let Some(ttl) = metadata.ttl {
             params["ttl_ms"] = (ttl.as_millis() as u64).into();
         }

@@ -1,6 +1,8 @@
 //! What Herdr's own sidebar shows for organizations: per agent pane the
-//! hierarchy tokens, `$org_task` and a "needs you" label for `blocked`; per
-//! coordinator workspace `$org_need`, `$org_work` and `$org_review`.
+//! hierarchy tokens and `$org_task`; per coordinator workspace `$org_need`,
+//! `$org_work` and `$org_review`. The "needs you" label for `blocked` goes
+//! with the row's display name (`sidebar::report_pane`): Herdr replaces both
+//! together, so a token report here carries neither.
 //!
 //! Computed from the state snapshot and sent over the socket only when a
 //! value changed or half its TTL passed, so a quiet project costs nothing.
@@ -27,8 +29,7 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wanted {
     pub target: Target,
-    pub tokens: Vec<(String, Option<String>)>,
-    pub state_labels: Vec<(String, String)>,
+    pub tokens: Tokens,
 }
 
 /// `$org_task`: what the row is about in a few words.
@@ -116,7 +117,6 @@ pub fn wanted(project: &ProjectView) -> Vec<Wanted> {
         out.push(Wanted {
             target: Target::Pane(node.pane_id.clone()),
             tokens: pane_tokens(project, node),
-            state_labels: vec![("blocked".into(), NEEDS_YOU.into())],
         });
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -130,25 +130,18 @@ pub fn wanted(project: &ProjectView) -> Vec<Wanted> {
             out.push(Wanted {
                 target: Target::Workspace(c.workspace_id.clone()),
                 tokens: workspace_tokens(&c.counts),
-                state_labels: Vec::new(),
             });
         }
     }
     out
 }
 
-type Sent = (
-    Vec<(String, Option<String>)>,
-    Vec<(String, String)>,
-    Instant,
-);
+type Tokens = Vec<(String, Option<String>)>;
 
 /// Last report per `(socket, target)`.
 #[derive(Default)]
 pub struct Cache {
-    sent: BTreeMap<String, Sent>,
-    /// Set once a server refused `state_labels`; tokens are still sent.
-    no_labels: bool,
+    sent: BTreeMap<String, (Tokens, Instant)>,
 }
 
 impl Cache {
@@ -171,48 +164,26 @@ impl Cache {
         let mut sent = 0;
         for want in wanted {
             let key = Self::key(socket, &want.target);
-            let fresh = self.sent.get(&key).is_some_and(|(tokens, labels, at)| {
-                *tokens == want.tokens
-                    && *labels == want.state_labels
-                    && now.duration_since(*at) < REFRESH
+            let fresh = self.sent.get(&key).is_some_and(|(tokens, at)| {
+                *tokens == want.tokens && now.duration_since(*at) < REFRESH
             });
             if fresh {
                 continue;
             }
             let result = match &want.target {
-                Target::Pane(pane) => {
-                    let mut metadata = PaneMetadata {
+                Target::Pane(pane) => herdr.pane_report_metadata_rpc(
+                    pane,
+                    &PaneMetadata {
                         tokens: want.tokens.clone(),
-                        state_labels: if self.no_labels {
-                            Vec::new()
-                        } else {
-                            want.state_labels.clone()
-                        },
                         ttl: Some(TTL),
-                    };
-                    let first = herdr.pane_report_metadata_rpc(pane, &metadata);
-                    // An older server that does not know state labels must
-                    // still get the tokens.
-                    match first {
-                        Err(error)
-                            if error.code.starts_with("invalid")
-                                && !metadata.state_labels.is_empty() =>
-                        {
-                            metadata.state_labels.clear();
-                            let retry = herdr.pane_report_metadata_rpc(pane, &metadata);
-                            self.no_labels = retry.is_ok();
-                            retry
-                        }
-                        other => other,
-                    }
-                }
+                    },
+                ),
                 Target::Workspace(ws) => {
                     herdr.workspace_report_metadata_rpc(ws, &want.tokens, Some(TTL))
                 }
             };
             if result.is_ok() {
-                self.sent
-                    .insert(key, (want.tokens.clone(), want.state_labels.clone(), now));
+                self.sent.insert(key, (want.tokens.clone(), now));
                 sent += 1;
             }
         }
@@ -330,10 +301,6 @@ mod tests {
         );
         assert_eq!(token(pane("w2:p2"), "org_task"), Some("mobile redesign"));
         assert_eq!(token(pane("w2:p3"), "org_task"), Some("review #1342"));
-        assert_eq!(
-            pane("w2:p2").state_labels,
-            [("blocked".into(), NEEDS_YOU.into())]
-        );
         let ws = |id: &str| {
             wanted
                 .iter()
@@ -375,31 +342,17 @@ mod tests {
     }
 
     #[test]
-    fn a_server_without_state_labels_still_gets_the_tokens() {
+    fn token_reports_leave_the_display_name_and_state_labels_alone() {
+        // Herdr replaces a source's display name and state labels together
+        // when a report carries either; `sidebar::report_pane` owns both.
         let runner = FakeRunner::new();
-        runner.on_socket(
-            "state_labels",
-            r#"{"id":"x","error":{"code":"invalid_request","message":"unknown field `state_labels`"}}"#,
-        );
         let herdr = Herdr::new("herdr", "s.sock", &runner);
-        let p = project();
-        let wanted = wanted(&p);
-        let mut cache = Cache::default();
-        assert_eq!(
-            cache.report(&herdr, "s.sock", &wanted, Instant::now()),
-            wanted.len()
-        );
+        Cache::default().report(&herdr, "s.sock", &wanted(&project()), Instant::now());
         let requests = runner.socket_requests.borrow();
-        let panes = requests
-            .iter()
-            .filter(|(_, l)| l.contains("pane.report_metadata"))
-            .count();
-        let labelled = requests
-            .iter()
-            .filter(|(_, l)| l.contains("state_labels"))
-            .count();
-        assert_eq!(labelled, 1, "asked once, then never again");
-        assert!(panes > labelled);
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|(_, line)| {
+            !line.contains("state_labels") && !line.contains("display_agent")
+        }));
     }
 
     #[test]

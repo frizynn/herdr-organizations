@@ -226,7 +226,6 @@ pub fn report_identity(ctx: &Ctx) {
                 (TOKEN_PROJECT.into(), Some(slug)),
                 (TOKEN_WORKSPACE.into(), Some(workspace)),
             ],
-            state_labels: Vec::new(),
             ttl: None,
         },
     );

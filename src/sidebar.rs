@@ -1,5 +1,5 @@
 //! What the Herdr sidebar shows for projects: per agent row a name
-//! (`--display-agent`); the project grouping of `grouping` (order and a bold
+//! (`--display-agent`) and "needs you" for `blocked`; the project grouping of `grouping` (order and a bold
 //! head row) in the agents and the Spaces list; a tab-bar count; the default
 //! agent view, grouped by project.
 //! Also the `config.toml` edit `configure` makes to render them.
@@ -99,12 +99,19 @@ pub fn coordinator_display(project: &Project) -> String {
     format!("{name}{}", crate::grouping::HEAD_MARK)
 }
 
-/// Reports one pane's row: display name, project and rank, with a TTL so the
-/// row falls back to Herdr's own when the ticker stops. Never `--seq`: token
-/// patches are per key and the grouping tokens come from `grouping`.
+/// Reports one pane's row: display name, the "needs you" state label, project
+/// and rank, with a TTL so the row falls back to Herdr's own when the ticker
+/// stops. Never `--seq`: token patches are per key and the grouping tokens
+/// come from `grouping`.
+///
+/// Herdr replaces a source's display name and state labels together whenever
+/// a report carries either, so this is the only report that sets them; the
+/// organization tokens (`tokens`) are sent without them. A server that
+/// rejects `--state-label` still gets the name and tokens.
 pub fn report_pane(herdr: &Herdr, pane: &str, display: &str, slug: &str, group: Group) {
     let ttl = TOKEN_TTL_MS.to_string();
     let rank = group.rank().to_string();
+    let label = format!("blocked={}", crate::tokens::NEEDS_YOU);
     let tokens = [format!("hp_project={slug}"), format!("hp_rank={rank}")];
     let mut args = vec![
         "pane",
@@ -125,10 +132,24 @@ pub fn report_pane(herdr: &Herdr, pane: &str, display: &str, slug: &str, group: 
         args.push("--clear-token");
         args.push(old);
     }
-    let _ = herdr.call(&args, CALL_TIMEOUT);
+    call_with_labels(herdr, args, &["--state-label", &label]);
 }
 
-/// Clears every token and the display name this plugin set on a pane.
+/// Sends a metadata report with its state-label arguments; when Herdr refuses
+/// it (a server without state labels), sends it again without them.
+fn call_with_labels(herdr: &Herdr, args: Vec<&str>, labels: &[&str]) {
+    let mut labelled = args.clone();
+    labelled.extend_from_slice(labels);
+    if let Err(error) = herdr.call(&labelled, CALL_TIMEOUT)
+        && error.code != "unreachable"
+        && error.code != "timeout"
+    {
+        let _ = herdr.call(&args, CALL_TIMEOUT);
+    }
+}
+
+/// Clears every token, the display name and the state labels this plugin set
+/// on a pane.
 pub fn clear_pane(herdr: &Herdr, pane: &str) {
     if pane.is_empty() {
         return;
@@ -149,7 +170,7 @@ pub fn clear_pane(herdr: &Herdr, pane: &str) {
         args.push("--clear-token");
         args.push(name);
     }
-    let _ = herdr.call(&args, CALL_TIMEOUT);
+    call_with_labels(herdr, args, &["--clear-state-labels"]);
     crate::grouping::clear(herdr, "pane", pane);
 }
 
@@ -707,7 +728,39 @@ pub fn check_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::fake::{FakeRunner, fail, ok};
     use crate::thread::Status;
+
+    #[test]
+    fn one_pane_report_carries_the_display_name_and_the_needs_you_label() {
+        // Herdr replaces a source's display name and state labels together,
+        // so both travel in the same report or one wipes the other.
+        let runner = FakeRunner::new();
+        runner.on("report-metadata", ok(""));
+        let herdr = Herdr::new("herdr", "s.sock", &runner);
+        report_pane(&herdr, "w1:p2", "t-0002 · Worker", "demo", Group::Working);
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        let line = calls[0].display();
+        assert!(line.contains("--display-agent"), "{line}");
+        assert!(line.contains("--state-label blocked=needs you"), "{line}");
+    }
+
+    #[test]
+    fn a_server_without_state_labels_still_gets_the_name() {
+        let runner = FakeRunner::new();
+        runner.on(
+            "--state-label",
+            fail(2, "error: unexpected argument '--state-label'"),
+        );
+        runner.on("report-metadata", ok(""));
+        let herdr = Herdr::new("herdr", "s.sock", &runner);
+        report_pane(&herdr, "w1:p2", "t-0002 · Worker", "demo", Group::Working);
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].display().contains("--display-agent"));
+        assert!(!calls[1].display().contains("--state-label"));
+    }
 
     fn spec() -> Spec {
         Spec {

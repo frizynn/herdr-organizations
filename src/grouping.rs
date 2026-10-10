@@ -23,6 +23,12 @@ pub const HOME_MARK: char = '\u{2800}';
 /// Ends every coordinator's display name; the agent rows make a name that
 /// contains it the project's bold head. Zero-width, so it takes no cell.
 pub const HEAD_MARK: char = '\u{200B}';
+
+/// A Herdr label as a person reads it: without the head marks this module
+/// adds, which would otherwise print as a blank cell outside the sidebar.
+pub fn plain(label: &str) -> String {
+    label.replace([HOME_MARK, HEAD_MARK], "")
+}
 /// The group key of whatever belongs to no project: sorts after every slug.
 const OTHER: &str = "~";
 
