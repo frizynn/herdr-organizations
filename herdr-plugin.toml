@@ -12,8 +12,15 @@ command = ["cargo", "build", "--release", "--locked"]
 command = ["target/release/herdr-organizations", "ticker", "start"]
 
 [[actions]]
+id = "organizations"
+title = "Herdr Organizations: launcher"
+description = "Needs-you across every coordinator, projects with their coordinators, board and settings in one popup."
+contexts = ["global", "workspace"]
+command = ["target/release/herdr-organizations", "action", "organizations"]
+
+[[actions]]
 id = "new"
-title = "Herdr Organizations: new project"
+title = "Herdr Organizations: new project, coordinator, thread or workspace"
 contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "new"]
 
@@ -25,20 +32,14 @@ command = ["target/release/herdr-organizations", "action", "open"]
 
 [[actions]]
 id = "overview"
-title = "Herdr Organizations: overview"
+title = "Herdr Organizations: project tree"
 contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "overview"]
 
 [[actions]]
-id = "organizations"
-title = "Herdr Organizations: organization tree"
-contexts = ["workspace"]
-command = ["target/release/herdr-organizations", "action", "organizations"]
-
-[[actions]]
 id = "organization-sidebar"
-title = "Herdr Organizations: toggle project hierarchy sidebar"
-description = "Toggle the recursive split sidebar for the current Herdr Organizations project."
+title = "Herdr Organizations: toggle dock"
+description = "Toggle the optional dock split for this workspace's coordinator. It reads the ticker's state file and never polls Herdr."
 contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "organization-sidebar"]
 
@@ -79,39 +80,9 @@ contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "doctor"]
 
 [[panes]]
-id = "overview"
-title = "Project overview"
+id = "ui"
+title = "Organizations"
 placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "overview"]
-
-[[panes]]
-id = "new"
-title = "New project"
-placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "new"]
-
-[[panes]]
-id = "pick"
-title = "Pick a project"
-placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "pick"]
-
-[[panes]]
-id = "adopt"
-title = "Continue as a project"
-placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "adopt"]
-
-[[panes]]
-id = "organizations"
-title = "Herdr Organizations"
-placement = "popup"
-command = ["target/release/herdr-organizations", "pane", "organizations"]
-
-[[events]]
-on = "tab.focused"
-command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]
-
-[[events]]
-on = "workspace.created"
-command = ["target/release/herdr-organizations", "action", "organization-sidebar-auto-open"]
+width = 92
+height = 31
+command = ["target/release/herdr-organizations", "pane", "ui"]

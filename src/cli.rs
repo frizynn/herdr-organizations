@@ -177,6 +177,25 @@ enum Command {
         #[command(subcommand)]
         command: TickerCommand,
     },
+    /// Herdr's own sidebar layout for the organization tokens
+    Sidebar {
+        #[command(subcommand)]
+        command: SidebarCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SidebarCommand {
+    /// Append the rows that show `$org_need`, `$org_work`, `$org_review` and
+    /// `$org_task` to Herdr's config.toml (a dated backup is kept)
+    Install {
+        /// Herdr config file (default: $HERDR_CONFIG_PATH, then ~/.config/herdr/config.toml)
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Print the edited file instead of writing it
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -932,6 +951,13 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
+        Command::Sidebar { command } => match command {
+            SidebarCommand::Install { config, dry_run } => {
+                let path = config.unwrap_or_else(|| crate::sidebar_config::default_path(&env));
+                println!("{}", crate::sidebar_config::install(&path, dry_run)?);
+                Ok(())
+            }
+        },
         Command::Ticker { command } => match command {
             TickerCommand::Start => ticker::start(&ctx),
             TickerCommand::Run => ticker::run(&ctx),

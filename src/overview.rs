@@ -249,8 +249,12 @@ pub fn focus(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
     let view = threads::session_view(ctx, &project).ok_or_else(|| {
         anyhow::anyhow!("the herdr session of `{slug}` is not reachable; run `open {slug}` first")
     })?;
+    let name = project
+        .read_project_md()
+        .map(|(settings, _)| project::display_name(&settings.name, &slug))
+        .unwrap_or_else(|_| slug.clone());
     view.herdr
-        .agent_view_set_project(&slug)
+        .agent_view_set_project(&slug, &name)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
         "sidebar focused on `{slug}`; `unfocus` clears it (this replaced any view another tool had set)"

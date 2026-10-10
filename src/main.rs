@@ -3,13 +3,13 @@ mod adopt;
 mod agent_profile;
 mod cli;
 mod coordinator;
+mod dock;
 mod doctor;
+mod events;
 mod herdr;
 mod inbox;
 mod lifecycle;
-mod organization_sidebar;
 mod organizations;
-mod organizations_ui;
 mod overview;
 mod paths;
 mod pr;
@@ -19,10 +19,18 @@ mod routine;
 mod runner;
 #[cfg(test)]
 mod scenarios;
+mod sidebar_config;
+mod state;
 mod steps;
+mod term;
 mod thread;
 mod threads;
 mod ticker;
+mod tokens;
+mod tui_config;
+mod ui;
+mod ui_ops;
+mod watch;
 
 /// Crate version plus a build identifier (short git hash and build time), so a
 /// rebuilt binary always differs from the one a running ticker was started from.

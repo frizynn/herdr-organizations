@@ -1,46 +1,31 @@
-//! What herdr's action menu and popup panes run. An action that needs
-//! to ask the user something opens its popup with `herdr plugin pane open`,
-//! passing what it already knows through a small file in the plugin state dir.
+//! What herdr's action menu runs. Every interactive screen is the one
+//! Organizations popup (`ui`); an action that already knows something (the
+//! workspace to adopt, the command to pick a project for) hands it over in a
+//! small file the popup reads once.
 
-use std::io::{BufRead, Write as _};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 
-use crate::adopt::{self, AdoptWorkspace};
+use crate::adopt;
 use crate::coordinator::{self, OpenOptions};
 use crate::herdr::{CALL_TIMEOUT, Herdr};
 use crate::paths::{Ctx, SessionFlags};
-use crate::project::{self, Status};
-use crate::{doctor, lifecycle, organization_sidebar, organizations_ui, overview};
+use crate::project::Status;
+use crate::ui::{self, Handoff};
+use crate::{dock, doctor, lifecycle, overview};
 
 const PLUGIN_ID: &str = "herdr-projects";
+pub const POPUP: &str = "ui";
 
-/// What an action hands to the popup it opens.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(default)]
-pub struct Handoff {
-    /// The subcommand the `pick` pane should run: `open`, `pause` or `resume`.
-    pub command: String,
-    pub slug: String,
-    /// Captured by the action, before any popup opens.
-    pub pane_id: String,
-    pub workspace_label: String,
-    pub workspace_cwd: String,
-    pub socket: String,
-}
-
-/// The originating pane and workspace, from the action's own environment or
-/// from `HERDR_PLUGIN_CONTEXT_JSON`.
-#[derive(Debug, Default, Deserialize)]
+/// The originating pane and workspace, from `HERDR_PLUGIN_CONTEXT_JSON`.
+#[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct ActionContext {
     workspace_id: String,
     workspace_label: String,
     workspace_cwd: String,
     focused_pane_id: String,
-    correlation_id: String,
 }
 
 fn action_context(ctx: &Ctx) -> ActionContext {
@@ -50,23 +35,6 @@ fn action_context(ctx: &Ctx) -> ActionContext {
         .unwrap_or_default()
 }
 
-fn state_file(ctx: &Ctx) -> Result<PathBuf> {
-    let dir = ctx.env.var("HERDR_PLUGIN_STATE_DIR").context("HERDR_PLUGIN_STATE_DIR is not set: this command is meant to be run by herdr as a plugin action or pane")?;
-    let context = action_context(ctx);
-    let file_name = if !context.correlation_id.is_empty()
-        && context.correlation_id.len() <= 128
-        && context
-            .correlation_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        format!("handoff-{}.json", context.correlation_id)
-    } else {
-        "handoff.json".into()
-    };
-    Ok(PathBuf::from(dir).join(file_name))
-}
-
 fn socket(ctx: &Ctx) -> Result<String> {
     ctx.env
         .var("HERDR_SOCKET_PATH")
@@ -74,14 +42,7 @@ fn socket(ctx: &Ctx) -> Result<String> {
         .context("HERDR_SOCKET_PATH is not set: this command is meant to be run by herdr")
 }
 
-fn open_pane(ctx: &Ctx, entrypoint: &str, handoff: Option<&Handoff>) -> Result<()> {
-    if let Some(handoff) = handoff {
-        let file = state_file(ctx)?;
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        project::write_json(&file, handoff)?;
-    }
+pub fn open_popup(ctx: &Ctx) -> Result<()> {
     let herdr = Herdr::new(ctx.env.herdr_bin(), socket(ctx)?, ctx.runner);
     herdr
         .call(
@@ -92,7 +53,7 @@ fn open_pane(ctx: &Ctx, entrypoint: &str, handoff: Option<&Handoff>) -> Result<(
                 "--plugin",
                 PLUGIN_ID,
                 "--entrypoint",
-                entrypoint,
+                POPUP,
             ],
             CALL_TIMEOUT,
         )
@@ -100,26 +61,9 @@ fn open_pane(ctx: &Ctx, entrypoint: &str, handoff: Option<&Handoff>) -> Result<(
     Ok(())
 }
 
-fn read_handoff(ctx: &Ctx) -> Handoff {
-    state_file(ctx)
-        .ok()
-        .and_then(|file| project::read_json(&file))
-        .unwrap_or_default()
-}
-
-/// The project of the workspace the action was invoked from, if any.
-fn current_slug(ctx: &Ctx) -> Option<String> {
-    let context = action_context(ctx);
-    let workspace = ctx
-        .env
-        .var("HERDR_WORKSPACE_ID")
-        .map(str::to_string)
-        .unwrap_or(context.workspace_id);
-    overview::project_for_workspace(
-        ctx,
-        &workspace,
-        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
-    )
+fn open_with(ctx: &Ctx, handoff: Handoff) -> Result<()> {
+    ui::write_handoff(ctx, &handoff)?;
+    open_popup(ctx)
 }
 
 fn current_workspace(ctx: &Ctx, context: &ActionContext) -> String {
@@ -136,51 +80,52 @@ fn current_pane(ctx: &Ctx, context: &ActionContext) -> String {
         .to_string()
 }
 
+/// The project of the workspace the action was invoked from, if any.
+fn current_slug(ctx: &Ctx) -> Option<String> {
+    let context = action_context(ctx);
+    overview::project_for_workspace(
+        ctx,
+        &current_workspace(ctx, &context),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+    )
+}
+
 pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
     let context = action_context(ctx);
-    let base = Handoff {
-        socket: socket(ctx).unwrap_or_default(),
-        ..Handoff::default()
-    };
     match id {
-        "new" => open_pane(ctx, "new", None),
-        "organizations" => open_pane(ctx, "organizations", None),
-        organization_sidebar::ACTION_ID => {
+        "organizations" => open_popup(ctx),
+        "new" => open_with(
+            ctx,
+            Handoff {
+                screen: "new".into(),
+                ..Handoff::default()
+            },
+        ),
+        "overview" => open_with(
+            ctx,
+            Handoff {
+                screen: "tree".into(),
+                slug: current_slug(ctx).unwrap_or_default(),
+                ..Handoff::default()
+            },
+        ),
+        dock::ACTION_ID => {
             let slug = current_slug(ctx).context(
-                "this action needs a Herdr Organizations project workspace; use `organizations` to browse all projects",
+                "the dock needs a Herdr Organizations project workspace; use the launcher to browse all projects",
             )?;
             let workspace = current_workspace(ctx, &context);
             let pane = current_pane(ctx, &context);
-            organization_sidebar::toggle(ctx, &slug, &workspace, &pane).map(|_| ())
+            dock::toggle(ctx, &slug, &workspace, &pane).map(|_| ())
         }
-        organization_sidebar::AUTO_OPEN_ACTION_ID => {
-            let workspace = current_workspace(ctx, &context);
-            let pane = current_pane(ctx, &context);
-            organization_sidebar::ensure_auto_open(
-                ctx,
-                current_slug(ctx).as_deref(),
-                &workspace,
-                &pane,
-            )
-            .map(|_| ())
-        }
-        "overview" => open_pane(
-            ctx,
-            "overview",
-            Some(&Handoff {
-                slug: current_slug(ctx).unwrap_or_default(),
-                ..base
-            }),
-        ),
         "open" | "pause" | "resume" => match current_slug(ctx) {
             Some(slug) => run_on_slug(ctx, id, &slug),
-            None => open_pane(
+            None => open_with(
                 ctx,
-                "pick",
-                Some(&Handoff {
+                Handoff {
+                    screen: "pick".into(),
                     command: id.to_string(),
-                    ..base
-                }),
+                    ..Handoff::default()
+                },
             ),
         },
         "focus" => match current_slug(ctx) {
@@ -192,25 +137,21 @@ pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
         "unfocus" => overview::unfocus(ctx, &SessionFlags::default()),
         "adopt-workspace" => {
             // The originating pane is captured here, before any popup opens.
-            let pane = ctx
-                .env
-                .var("HERDR_PANE_ID")
-                .map(str::to_string)
-                .unwrap_or(context.focused_pane_id);
+            let pane = current_pane(ctx, &context);
             if pane.is_empty() {
                 bail!("herdr did not say which pane this action was invoked from");
             }
             let herdr = Herdr::new(ctx.env.herdr_bin(), socket(ctx)?, ctx.runner);
             adopt::adoptable_agent(ctx, &herdr, &socket(ctx)?, &pane)?;
-            open_pane(
+            open_with(
                 ctx,
-                "adopt",
-                Some(&Handoff {
+                Handoff {
+                    screen: "adopt".into(),
                     pane_id: pane,
                     workspace_label: context.workspace_label,
                     workspace_cwd: context.workspace_cwd,
-                    ..base
-                }),
+                    ..Handoff::default()
+                },
             )
         }
         "doctor" => {
@@ -228,7 +169,7 @@ pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
     }
 }
 
-fn run_on_slug(ctx: &Ctx, command: &str, slug: &str) -> Result<()> {
+pub fn run_on_slug(ctx: &Ctx, command: &str, slug: &str) -> Result<()> {
     match command {
         "open" => coordinator::open(
             ctx,
@@ -248,100 +189,16 @@ fn run_on_slug(ctx: &Ctx, command: &str, slug: &str) -> Result<()> {
     }
 }
 
-fn ask(question: &str, default: &str) -> Result<String> {
-    if default.is_empty() {
-        print!("{question}: ");
-    } else {
-        print!("{question} [{default}]: ");
-    }
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    let answer = line.trim();
-    Ok(if answer.is_empty() {
-        default.to_string()
-    } else {
-        answer.to_string()
-    })
-}
-
-fn hold_open() {
-    let _ = ask("\nPress Enter to close", "");
-}
-
-/// A static plugin pane's body. Modal panes show failures long enough to read;
-/// the contextual sidebar handles and displays its own interactive errors.
+/// A plugin pane's process: the popup, or the dock in its split.
 pub fn run_pane(ctx: &Ctx, id: &str) -> Result<()> {
-    if id == "organization-sidebar" {
-        return match organization_sidebar::run(ctx) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                println!("\nerror: {error:#}");
-                hold_open();
-                Err(error)
-            }
-        };
-    }
-    if id == "organizations" {
-        return organizations_ui::run(ctx);
-    }
-    if id == "overview" {
-        let handoff = read_handoff(ctx);
-        return overview::run(
-            ctx,
-            Some(handoff.slug.as_str()).filter(|slug| !slug.is_empty()),
-            true,
-        );
-    }
-    let handoff = if id == "new" {
-        Handoff::default()
-    } else {
-        read_handoff(ctx)
-    };
-    let result = match id {
-        "new" => (|| {
-            println!("New project\n");
-            let name = ask("Name", "")?;
-            if name.is_empty() {
-                bail!("no name given");
-            }
-            let goal = ask("Goal (one line, optional)", "")?;
-            let project = project::create(&ctx.root, &name, &goal, Vec::new())?;
-            println!("created `{}` at {}", project.slug, project.dir().display());
-            run_on_slug(ctx, "open", &project.slug)
-        })(),
-        "pick" => (|| {
-            println!("Which project should `{}` act on?\n", handoff.command);
-            let slug = overview::pick(ctx)?;
-            run_on_slug(ctx, &handoff.command, &slug)
-        })(),
-        "adopt" => (|| {
-            println!("Continue this workspace as a project\n");
-            let name = ask("Project name", &handoff.workspace_label)?;
-            if name.is_empty() {
-                bail!("no name given");
-            }
-            adopt::adopt_workspace(
-                ctx,
-                &AdoptWorkspace {
-                    name,
-                    goal: String::new(),
-                    pane: handoff.pane_id.clone(),
-                    workspace_cwd: handoff.workspace_cwd.clone(),
-                    session: SessionFlags {
-                        session: None,
-                        socket: Some(PathBuf::from(socket(ctx)?)),
-                    },
-                },
-            )
-        })(),
+    match id {
+        POPUP => ui::run_popup(ctx),
+        "dock" => {
+            let (slug, workspace) = dock::context(ctx)?;
+            ui::run_dock(ctx, slug, workspace)
+        }
         other => bail!("unknown pane `{other}`"),
-    };
-    if let Err(error) = &result {
-        println!("\nerror: {error:#}");
     }
-    hold_open();
-    result
 }
 
 #[cfg(test)]
@@ -351,95 +208,63 @@ mod tests {
     use crate::runner::fake::ok;
     use crate::scenarios::World;
 
-    #[test]
-    fn plugin_manifest_registers_the_organizations_action_and_pane() {
-        let manifest: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
-        assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
-        assert_eq!(manifest["name"].as_str(), Some("Herdr Organizations"));
-        let organization_action = manifest["actions"]
+    fn manifest() -> toml::Value {
+        toml::from_str(include_str!("../herdr-plugin.toml")).unwrap()
+    }
+
+    fn command(entry: &toml::Value) -> Vec<&str> {
+        entry["command"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["id"].as_str() == Some("organizations"))
-            .unwrap();
-        assert_eq!(
-            organization_action["title"].as_str(),
-            Some("Herdr Organizations: organization tree")
-        );
-        assert_eq!(
-            organization_action["command"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|argument| argument.as_str().unwrap())
-                .collect::<Vec<_>>(),
-            [
-                "target/release/herdr-organizations",
-                "action",
-                "organizations"
-            ]
-        );
-        let organization_pane = manifest["panes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["id"].as_str() == Some("organizations"))
-            .unwrap();
-        assert_eq!(
-            organization_pane["title"].as_str(),
-            Some("Herdr Organizations")
-        );
-        assert_eq!(
-            organization_pane["command"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|argument| argument.as_str().unwrap())
-                .collect::<Vec<_>>(),
-            [
-                "target/release/herdr-organizations",
-                "pane",
-                "organizations"
-            ]
-        );
+            .map(|argument| argument.as_str().unwrap())
+            .collect()
     }
 
     #[test]
-    fn plugin_manifest_keeps_the_global_picker_and_adds_a_contextual_sidebar_action() {
-        let manifest: toml::Value = toml::from_str(include_str!("../herdr-plugin.toml")).unwrap();
+    fn manifest_declares_one_popup_for_every_interactive_screen() {
+        let manifest = manifest();
+        assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
+        assert_eq!(manifest["name"].as_str(), Some("Herdr Organizations"));
+        let panes = manifest["panes"].as_array().unwrap();
+        assert_eq!(
+            panes.len(),
+            1,
+            "launcher, new, tree, board, detail and settings share one popup"
+        );
+        assert_eq!(panes[0]["id"].as_str(), Some(POPUP));
+        assert_eq!(panes[0]["placement"].as_str(), Some("popup"));
+        assert_eq!(
+            command(&panes[0]),
+            ["target/release/herdr-organizations", "pane", POPUP]
+        );
         let actions = manifest["actions"].as_array().unwrap();
-        let global = actions
+        let launcher = actions
             .iter()
             .find(|entry| entry["id"].as_str() == Some("organizations"))
             .unwrap();
-        let sidebar = actions
-            .iter()
-            .find(|entry| entry["id"].as_str() == Some("organization-sidebar"))
-            .unwrap();
         assert_eq!(
-            global["title"].as_str(),
-            Some("Herdr Organizations: organization tree")
-        );
-        assert_eq!(
-            sidebar["command"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|argument| argument.as_str().unwrap())
-                .collect::<Vec<_>>(),
+            command(launcher),
             [
                 "target/release/herdr-organizations",
                 "action",
-                "organization-sidebar"
+                "organizations"
             ]
         );
-        assert!(manifest["events"].as_array().unwrap().iter().any(|event| {
-            event["command"].as_array().is_some_and(|command| {
-                command
-                    .iter()
-                    .any(|argument| argument.as_str() == Some("organization-sidebar-auto-open"))
-            })
-        }));
+        let dock = actions
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(dock::ACTION_ID))
+            .unwrap();
+        assert_eq!(
+            command(dock),
+            [
+                "target/release/herdr-organizations",
+                "action",
+                dock::ACTION_ID
+            ]
+        );
+        // No event hook spawns a process on every tab focus any more.
+        assert!(manifest.get("events").is_none());
     }
 
     fn plugin_env(world: &World, extra: &[(&str, &str)]) -> Env {
@@ -457,8 +282,23 @@ mod tests {
         Env::for_test(world.home.path(), &refs)
     }
 
+    fn opened_popup(world: &World) -> bool {
+        world.runner.calls.borrow().iter().any(|call| {
+            call.args
+                == [
+                    "plugin",
+                    "pane",
+                    "open",
+                    "--plugin",
+                    "herdr-projects",
+                    "--entrypoint",
+                    POPUP,
+                ]
+        })
+    }
+
     #[test]
-    fn an_action_without_a_project_opens_the_picker_with_the_requested_command() {
+    fn an_action_without_a_project_opens_the_launcher_as_a_picker() {
         let world = World::new();
         world.project("demo", "a.sock");
         world
@@ -470,101 +310,43 @@ mod tests {
             ..world.ctx()
         };
         run_action(&ctx, "pause").unwrap();
-        let calls = world.runner.calls.borrow();
-        let opened = calls
-            .iter()
-            .find(|c| c.display().contains("plugin pane open"))
-            .unwrap();
-        assert!(
-            opened
-                .display()
-                .contains("--plugin herdr-projects --entrypoint pick")
+        assert!(opened_popup(&world));
+        let handoff = ui::take_handoff(&ctx);
+        assert_eq!(
+            (handoff.screen.as_str(), handoff.command.as_str()),
+            ("pick", "pause")
         );
-        drop(calls);
-        assert_eq!(read_handoff(&ctx).command, "pause");
     }
 
     #[test]
-    fn organizations_action_opens_without_reading_or_writing_a_handoff() {
+    fn launcher_and_new_open_the_same_popup() {
         let world = World::new();
         world
             .runner
             .on("plugin pane open", ok(r#"{"result":{"type":"ok"}}"#));
         let env = plugin_env(&world, &[]);
-        let state_dir = world.home.path().join("state");
         let ctx = Ctx {
             env: &env,
             ..world.ctx()
         };
-
         run_action(&ctx, "organizations").unwrap();
-
-        assert!(!state_dir.exists());
-        let call = world
-            .runner
-            .calls
-            .borrow()
-            .iter()
-            .find(|call| {
-                call.args
-                    .starts_with(&["plugin".into(), "pane".into(), "open".into()])
-            })
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            call.args,
-            [
-                "plugin",
-                "pane",
-                "open",
-                "--plugin",
-                "herdr-projects",
-                "--entrypoint",
-                "organizations"
-            ]
-        );
+        assert!(opened_popup(&world));
+        assert_eq!(ui::take_handoff(&ctx), Handoff::default());
+        run_action(&ctx, "new").unwrap();
+        assert_eq!(ui::take_handoff(&ctx).screen, "new");
     }
 
     #[test]
-    fn contextual_sidebar_action_refuses_to_open_from_a_non_project_workspace() {
+    fn dock_action_refuses_outside_a_project_workspace() {
         let world = World::new();
         let env = plugin_env(&world, &[]);
         let ctx = Ctx {
             env: &env,
             ..world.ctx()
         };
-
-        let error = run_action(&ctx, "organization-sidebar").unwrap_err();
-
+        let error = run_action(&ctx, dock::ACTION_ID).unwrap_err();
         assert!(error.to_string().contains("project workspace"));
         assert_eq!(world.runner.count("pane split"), 0);
-        assert_eq!(world.runner.count("plugin pane open"), 0);
-    }
-
-    #[test]
-    fn new_action_opens_without_a_handoff_file() {
-        let world = World::new();
-        world
-            .runner
-            .on("plugin pane open", ok(r#"{"result":{"type":"ok"}}"#));
-        let env = plugin_env(&world, &[]);
-        let state_dir = world.home.path().join("state");
-        let ctx = Ctx {
-            env: &env,
-            ..world.ctx()
-        };
-
-        run_action(&ctx, "new").unwrap();
-
-        assert!(!state_dir.exists());
-        assert!(
-            world
-                .runner
-                .calls
-                .borrow()
-                .iter()
-                .any(|call| { call.args.ends_with(&["--entrypoint".into(), "new".into()]) })
-        );
     }
 
     #[test]
@@ -573,24 +355,32 @@ mod tests {
         world
             .runner
             .on("plugin pane open", ok(r#"{"result":{"type":"ok"}}"#));
-        let first_context = r#"{"workspace_id":"w41","correlation_id":"invocation-one"}"#;
-        let second_context = r#"{"workspace_id":"w42","correlation_id":"invocation-two"}"#;
-        let first_env = plugin_env(&world, &[("HERDR_PLUGIN_CONTEXT_JSON", first_context)]);
-        let second_env = plugin_env(&world, &[("HERDR_PLUGIN_CONTEXT_JSON", second_context)]);
+        let first = plugin_env(
+            &world,
+            &[(
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                r#"{"workspace_id":"w41","correlation_id":"invocation-one"}"#,
+            )],
+        );
+        let second = plugin_env(
+            &world,
+            &[(
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                r#"{"workspace_id":"w42","correlation_id":"invocation-two"}"#,
+            )],
+        );
         let first_ctx = Ctx {
-            env: &first_env,
+            env: &first,
             ..world.ctx()
         };
         let second_ctx = Ctx {
-            env: &second_env,
+            env: &second,
             ..world.ctx()
         };
-
         run_action(&first_ctx, "pause").unwrap();
         run_action(&second_ctx, "resume").unwrap();
-
-        assert_eq!(read_handoff(&first_ctx).command, "pause");
-        assert_eq!(read_handoff(&second_ctx).command, "resume");
+        assert_eq!(ui::take_handoff(&first_ctx).command, "pause");
+        assert_eq!(ui::take_handoff(&second_ctx).command, "resume");
     }
 
     #[test]
@@ -630,14 +420,15 @@ mod tests {
             crate::scenarios::agent_json("w5", "w5:t1", "w5:p1", "/work", "", "idle")
         );
         run_action(&ctx, "adopt-workspace").unwrap();
-        let handoff = read_handoff(&ctx);
+        let handoff = ui::take_handoff(&ctx);
         assert_eq!(
             (
+                handoff.screen.as_str(),
                 handoff.pane_id.as_str(),
                 handoff.workspace_label.as_str(),
                 handoff.workspace_cwd.as_str()
             ),
-            ("w5:p1", "My Repo", "/work")
+            ("adopt", "w5:p1", "My Repo", "/work")
         );
     }
 }

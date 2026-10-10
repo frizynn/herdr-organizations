@@ -58,7 +58,7 @@ impl Env {
         self.var("HERDR_BIN_PATH").unwrap_or("herdr").to_string()
     }
 
-    fn expand_tilde(&self, path: &str) -> PathBuf {
+    pub fn expand_tilde(&self, path: &str) -> PathBuf {
         match path.strip_prefix("~/") {
             Some(rest) => self.home.join(rest),
             None if path == "~" => self.home.clone(),

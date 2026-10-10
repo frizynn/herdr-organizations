@@ -338,6 +338,19 @@ impl Project {
         Ok(record)
     }
 
+    /// Rewrites the front matter's agent kinds, keeping the instructions body.
+    pub fn set_agents(&self, coordinator: &str, thread: &str) -> Result<()> {
+        let _lock = self.lock()?;
+        let (mut settings, body) = self.read_project_md()?;
+        settings.coordinator_agent = coordinator.to_string();
+        settings.thread_agent = thread.to_string();
+        let front = toml::to_string(&settings)?;
+        write_atomic(
+            &self.project_md(),
+            format!("+++\n{front}+++\n\n{body}").as_bytes(),
+        )
+    }
+
     pub fn safety(&self, config_dir: &Path) -> Result<Safety> {
         load_safety(config_dir, &self.canonical_dir())
     }
@@ -507,6 +520,19 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_agents_keeps_the_body_and_other_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let project = create(root.path(), "Billing", "ship it", Vec::new()).unwrap();
+        let (_, body_before) = project.read_project_md().unwrap();
+        project.set_agents("codex", "claude").unwrap();
+        let (settings, body) = project.read_project_md().unwrap();
+        assert_eq!(settings.coordinator_agent, "codex");
+        assert_eq!(settings.thread_agent, "claude");
+        assert_eq!(settings.goal, "ship it");
+        assert_eq!(body, body_before);
+    }
 
     #[test]
     fn only_folders_with_project_md_count() {

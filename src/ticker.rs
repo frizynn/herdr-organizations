@@ -20,6 +20,11 @@ use crate::steps::{self, Memory, Transition};
 use crate::{inbox, thread, threads};
 
 pub const TICK: Duration = Duration::from_secs(15);
+/// Without events (or with a missed one) state is still re-read this often.
+const RECONCILE: Duration = Duration::from_secs(60);
+/// A burst of events (a tab with three panes closing) becomes one pass.
+const DEBOUNCE: Duration = Duration::from_millis(250);
+const STOP_POLL: Duration = Duration::from_millis(500);
 const STOP_WAIT: Duration = Duration::from_secs(60);
 const IDLE_EXIT: Duration = Duration::from_secs(300);
 const LOG_CAP: u64 = 1_000_000;
@@ -237,6 +242,10 @@ impl Log {
 
 /// The loop. Exits when another ticker holds the lock, when the stop file
 /// appears, or when no project has had a reachable session for five minutes.
+///
+/// It waits on Herdr events instead of a fixed interval: one subscription per
+/// project socket wakes it, and it reconciles every minute (every 15 s while a
+/// launch or prompt is pending) in case an event was missed.
 pub fn run(ctx: &Ctx) -> Result<()> {
     let root = &ctx.root;
     if project::list_slugs(root).is_empty() {
@@ -280,27 +289,231 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         "ticker {} started (pid {})",
         info.version, info.pid
     ));
+    let started = Instant::now();
     let mut last_reachable = Instant::now();
     let mut memory = Memory::new(ctx);
+    let mut publisher = Publisher::new(&info);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut listening = std::collections::BTreeSet::new();
     loop {
         if stop_path(root).exists() {
             log.line("stop file found; exiting");
             return Ok(());
         }
+        for socket in publisher.sockets(ctx) {
+            if listening.insert(socket.clone()) {
+                spawn_listener(ctx, socket, tx.clone());
+            }
+        }
+        // Remote polls and failure back-off count in 15-second units.
+        memory.tick = (started.elapsed().as_secs() / TICK.as_secs()).max(memory.tick);
         if tick(ctx, &log, &mut memory) {
             last_reachable = Instant::now();
         } else if last_reachable.elapsed() > IDLE_EXIT {
             log.line("no project has had a reachable session for five minutes; exiting");
             return Ok(());
         }
-        // Sleep in short slices so a stop request is honoured promptly.
-        let wake = Instant::now() + TICK;
-        while Instant::now() < wake {
-            if stop_path(root).exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
+        let pending = publisher.publish(ctx, &log);
+        let wait = if pending { TICK } else { RECONCILE };
+        if !wait_for_wake(root, &rx, wait, &mut publisher) {
+            log.line("stop file found; exiting");
+            return Ok(());
         }
+    }
+}
+
+/// Waits until an event arrives (then lets a burst settle), the deadline
+/// passes, or the stop file appears (returns false).
+fn wait_for_wake(
+    root: &Path,
+    rx: &std::sync::mpsc::Receiver<crate::events::Wake>,
+    wait: Duration,
+    publisher: &mut Publisher,
+) -> bool {
+    use crate::events::Wake;
+    let deadline = Instant::now() + wait;
+    let mut woken: Option<Instant> = None;
+    loop {
+        if stop_path(root).exists() {
+            return false;
+        }
+        let now = Instant::now();
+        let until = match woken {
+            Some(at) => at + DEBOUNCE,
+            None => deadline,
+        };
+        if now >= until {
+            return true;
+        }
+        // Short slices so a stop request is honoured promptly.
+        match rx.recv_timeout((until - now).min(STOP_POLL)) {
+            Ok(Wake::Event(name)) => {
+                publisher.status.last_event = name;
+                publisher.status.last_event_at = project::now();
+                woken.get_or_insert(Instant::now());
+            }
+            Ok(Wake::Up(socket)) => {
+                publisher.down.remove(&socket);
+                publisher.status.events = publisher.down.is_empty();
+            }
+            Ok(Wake::Down(socket)) => {
+                publisher.down.insert(socket);
+                publisher.status.events = false;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+static REAL_RUNNER: crate::runner::RealRunner = crate::runner::RealRunner;
+
+fn spawn_listener(ctx: &Ctx, socket: PathBuf, tx: std::sync::mpsc::Sender<crate::events::Wake>) {
+    let bin = ctx.env.herdr_bin();
+    std::thread::spawn(move || {
+        let herdr_socket = socket.clone();
+        crate::events::listen(
+            socket,
+            move || {
+                Herdr::new(bin.clone(), &herdr_socket, &REAL_RUNNER)
+                    .agent_list_rpc()
+                    .ok()
+                    .map(|agents| agents.into_iter().map(|a| a.pane_id).collect())
+            },
+            tx,
+        );
+    });
+}
+
+/// Writes the state file and the sidebar tokens after each pass.
+struct Publisher {
+    status: crate::state::Ticker,
+    tokens: crate::tokens::Cache,
+    down: std::collections::BTreeSet<PathBuf>,
+    groups: std::collections::BTreeMap<(String, String), crate::state::Status>,
+}
+
+impl Publisher {
+    fn new(info: &Info) -> Publisher {
+        Publisher {
+            status: crate::state::Ticker {
+                pid: info.pid,
+                version: info.version.clone(),
+                ..Default::default()
+            },
+            tokens: Default::default(),
+            down: Default::default(),
+            groups: Default::default(),
+        }
+    }
+
+    /// The local sockets of active projects that exist right now.
+    fn sockets(&self, ctx: &Ctx) -> Vec<PathBuf> {
+        let mut sockets: Vec<PathBuf> = project::list_slugs(&ctx.root)
+            .iter()
+            .filter_map(|slug| Project::load(&ctx.root, slug).ok())
+            .filter(|p| p.status() == Status::Active)
+            .filter_map(|p| p.coordinator())
+            .map(|c| PathBuf::from(c.socket))
+            .filter(|s| !s.as_os_str().is_empty() && s.exists())
+            .collect();
+        sockets.sort();
+        sockets.dedup();
+        sockets
+    }
+
+    /// Returns whether any project has a launch or prompt pending.
+    fn publish(&mut self, ctx: &Ctx, log: &Log) -> bool {
+        let now = Instant::now();
+        let mut lives = Vec::new();
+        for socket in self.sockets(ctx) {
+            let herdr = Herdr::new(ctx.env.herdr_bin(), &socket, ctx.runner);
+            let (Ok(agents), Ok(panes)) = (herdr.agent_list_rpc(), herdr.pane_list_rpc()) else {
+                continue;
+            };
+            if self.status.herdr.is_empty()
+                && let Ok((version, protocol)) = herdr.ping()
+            {
+                self.status.herdr = format!("{version} · protocol {protocol}");
+            }
+            lives.push(crate::state::Live {
+                socket: socket.to_string_lossy().into_owned(),
+                agents,
+                panes,
+                workspaces: herdr.workspace_list_rpc().unwrap_or_default(),
+                tabs: herdr.tab_list_rpc().unwrap_or_default(),
+            });
+        }
+        let mut snapshot = crate::state::build(ctx, &lives);
+        self.status.peak_rss_kb = peak_rss_kb();
+        snapshot.ticker = Some(self.status.clone());
+        for live in &lives {
+            let herdr = Herdr::new(ctx.env.herdr_bin(), &live.socket, ctx.runner);
+            let wanted: Vec<_> = snapshot
+                .projects
+                .iter()
+                .filter(|p| p.socket == live.socket && p.status == "active")
+                .flat_map(crate::tokens::wanted)
+                .collect();
+            self.tokens.report(&herdr, &live.socket, &wanted, now);
+            self.tokens.retain(&live.socket, &wanted);
+            self.notify(ctx, &herdr, &snapshot, &live.socket);
+        }
+        if let Err(error) = crate::state::write_if_changed(&ctx.root, &snapshot) {
+            log.line(&format!("state file: {error:#}"));
+        }
+        snapshot.projects.iter().any(|p| p.pending)
+    }
+
+    /// One toast per transition into "needs you" or "review", as the
+    /// Settings screen chose. The first pass only records.
+    fn notify(
+        &mut self,
+        ctx: &Ctx,
+        herdr: &Herdr,
+        snapshot: &crate::state::Snapshot,
+        socket: &str,
+    ) {
+        use crate::state::Status as S;
+        use crate::tui_config::Notify;
+        let notify = crate::tui_config::load(&ctx.config_dir)
+            .map(|c| c.view.notify)
+            .unwrap_or_default();
+        let first = self.groups.is_empty();
+        for project in snapshot.projects.iter().filter(|p| p.socket == socket) {
+            for node in &project.threads {
+                let key = (project.slug.clone(), node.id.clone());
+                let before = self.groups.insert(key, node.status);
+                if first || before == Some(node.status) {
+                    continue;
+                }
+                let wanted = match notify {
+                    Notify::NeedsYouAndReview => matches!(node.status, S::Need | S::Review),
+                    Notify::NeedsYou => node.status == S::Need,
+                    Notify::Off => false,
+                };
+                if wanted {
+                    let title = format!("{} {}", node.title, node.status.word());
+                    let _ = herdr.notification_show(&title, &node.text);
+                }
+            }
+        }
+    }
+}
+
+/// The process's peak resident size, for the Settings status block.
+fn peak_rss_kb() -> u64 {
+    // SAFETY: getrusage fills the struct it is given.
+    let usage = unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_SELF, &mut usage);
+        usage
+    };
+    let max = usage.ru_maxrss as u64;
+    // macOS reports bytes, Linux kilobytes.
+    if cfg!(target_os = "macos") {
+        max / 1024
+    } else {
+        max
     }
 }
 
@@ -482,7 +695,9 @@ fn thread_pass(
                 t.last_group = group.token().to_string();
             })?;
         }
-        if live.pane_exists {
+        // Local rows are reported from the state snapshot (`tokens`); a remote
+        // pane only exists on its own machine's server.
+        if live.pane_exists && t.is_remote() {
             threads::report_thread_tokens_in_tree(herdr, t, slug, group, &tree);
         }
     }
@@ -591,23 +806,23 @@ fn tick_cheap(ctx: &Ctx, project: &Project) -> Result<Option<Seen>> {
     let slug = &project.slug;
     let mut first_error = None;
 
-    // The coordinator: deliver a pending priming prompt, refresh its tokens.
+    // The coordinator: deliver a pending priming prompt. Its tokens are
+    // reported with everything else from the state snapshot.
     let agent = agents
         .iter()
         .find(|a| coordinator::agent_matches(&record, a));
-    if let Some(agent) = agent {
-        if record.prime_pending && agent.ready() {
-            let prefix = coordinator::current_prefix(&ctx.root)?;
-            match herdr
-                .agent_prompt_start(&record.pane_id, &coordinator::priming_prompt(&prefix, slug))
-            {
-                Ok(()) => {
-                    project.update_coordinator(|c| c.prime_pending = false)?;
-                }
-                Err(error) => first_error = Some(anyhow::anyhow!("priming prompt: {error}")),
+    if let Some(agent) = agent
+        && record.prime_pending
+        && agent.ready()
+    {
+        let prefix = coordinator::current_prefix(&ctx.root)?;
+        match herdr.agent_prompt_start(&record.pane_id, &coordinator::priming_prompt(&prefix, slug))
+        {
+            Ok(()) => {
+                project.update_coordinator(|c| c.prime_pending = false)?;
             }
+            Err(error) => first_error = Some(anyhow::anyhow!("priming prompt: {error}")),
         }
-        coordinator::report_tokens(&herdr, slug, &record.pane_id);
     }
 
     let pass = thread_pass(
@@ -926,6 +1141,36 @@ mod tests {
         start(&ctx).unwrap();
         run(&ctx).unwrap();
         assert_eq!(std::fs::read_dir(&missing).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn publish_writes_the_state_file_without_forking_herdr() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        project.update_coordinator(|c| c.prime_pending = true).unwrap();
+        let ctx = world.ctx();
+        let log = Log {
+            path: world.home.path().join("log"),
+        };
+        let mut publisher = Publisher::new(&Info::default());
+        assert!(publisher.publish(&ctx, &log), "a priming prompt is pending");
+        let snapshot = crate::state::read(&ctx.root).unwrap();
+        assert_eq!(snapshot.projects[0].slug, "demo");
+        assert!(snapshot.ticker.is_some());
+        assert!(world.runner.calls.borrow().is_empty(), "socket reads only");
+        let written = std::fs::metadata(crate::state::path(&ctx.root))
+            .unwrap()
+            .modified()
+            .unwrap();
+        project.update_coordinator(|c| c.prime_pending = false).unwrap();
+        assert!(!publisher.publish(&ctx, &log));
+        assert!(
+            std::fs::metadata(crate::state::path(&ctx.root))
+                .unwrap()
+                .modified()
+                .unwrap()
+                >= written
+        );
     }
 
     #[test]

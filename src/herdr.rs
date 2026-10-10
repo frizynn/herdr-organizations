@@ -169,6 +169,9 @@ pub struct Agent {
     pub agent_status: String,
     #[serde(default)]
     pub cwd: String,
+    /// The agent's own terminal title without its spinner (herdr 0.9.3+).
+    #[serde(default)]
+    pub terminal_title_stripped: String,
 }
 
 impl Agent {
@@ -330,19 +333,6 @@ impl<'a> Herdr<'a> {
             CALL_TIMEOUT,
         )
         .map(|_| ())
-    }
-
-    pub fn pane_focus_direction(&self, pane: &str, direction: &str) -> Result<(), HerdrError> {
-        self.call(
-            &["pane", "focus", "--direction", direction, "--pane", pane],
-            CALL_TIMEOUT,
-        )
-        .map(|_| ())
-    }
-
-    pub fn plugin_pane_focus(&self, pane: &str) -> Result<(), HerdrError> {
-        self.call(&["plugin", "pane", "focus", pane], CALL_TIMEOUT)
-            .map(|_| ())
     }
 
     pub fn pane_close(&self, pane: &str) -> Result<(), HerdrError> {
@@ -702,6 +692,36 @@ impl<'a> Herdr<'a> {
 
 pub const SOURCE: &str = "herdr-projects";
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct WorkspaceInfo {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub agent_status: String,
+    #[serde(default)]
+    pub tab_count: usize,
+    #[serde(default)]
+    pub focused: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// One metadata patch for a pane: tokens (`None` clears one), state labels
+/// and a TTL. Sent as a single socket request instead of a CLI fork.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PaneMetadata {
+    pub tokens: Vec<(String, Option<String>)>,
+    pub state_labels: Vec<(String, String)>,
+    pub ttl: Option<Duration>,
+}
+
 impl<'a> Herdr<'a> {
     fn request(
         &self,
@@ -735,17 +755,107 @@ impl<'a> Herdr<'a> {
     /// Filters the sidebar's agents to one project and sorts them by attention:
     /// the coordinator (rank 0) first, then by the group's display-order digit.
     /// herdr holds one transient view, so this replaces any other tool's view.
-    pub fn agent_view_set_project(&self, slug: &str) -> Result<(), HerdrError> {
+    /// The label replaces the sort word right of "agents", so it is kept
+    /// short enough that the "agents" header stays visible.
+    pub fn agent_view_set_project(&self, slug: &str, name: &str) -> Result<(), HerdrError> {
         self.request(
             "agent.view.set",
             serde_json::json!({
                 "source": SOURCE,
-                "label": format!("project: {slug}"),
+                "label": view_label(name),
                 "filter": { "op": "eq", "field": { "token": "project" }, "value": slug },
                 "sort": [{ "field": { "token": "rank" }, "order": "asc" }],
             }),
         )
         .map(|_| ())
+    }
+
+    pub fn agent_list_rpc(&self) -> Result<Vec<Agent>, HerdrError> {
+        let result = self.request("agent.list", serde_json::json!({}))?;
+        serde_json::from_value(result["agents"].clone()).map_err(|e| HerdrError {
+            code: "failed".into(),
+            message: format!("agent.list reply changed: {e}"),
+        })
+    }
+
+    pub fn pane_list_rpc(&self) -> Result<Vec<Pane>, HerdrError> {
+        let result = self.request("pane.list", serde_json::json!({}))?;
+        serde_json::from_value(result["panes"].clone()).map_err(|e| HerdrError {
+            code: "failed".into(),
+            message: format!("pane.list reply changed: {e}"),
+        })
+    }
+
+    /// The visible text of a pane. A passive read: unlike a `recent` read it
+    /// never scrolls the agent's view.
+    pub fn pane_read_visible(&self, pane: &str) -> Result<String, HerdrError> {
+        let result = self.request(
+            "pane.read",
+            serde_json::json!({ "pane_id": pane, "source": "visible", "format": "text" }),
+        )?;
+        Ok(result["read"]["text"]
+            .as_str()
+            .or_else(|| result["text"].as_str())
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    pub fn workspace_list_rpc(&self) -> Result<Vec<WorkspaceInfo>, HerdrError> {
+        let result = self.request("workspace.list", serde_json::json!({}))?;
+        Ok(serde_json::from_value(result["workspaces"].clone()).unwrap_or_default())
+    }
+
+    pub fn tab_list_rpc(&self) -> Result<Vec<TabInfo>, HerdrError> {
+        let result = self.request("tab.list", serde_json::json!({}))?;
+        Ok(serde_json::from_value(result["tabs"].clone()).unwrap_or_default())
+    }
+
+    /// `(version, protocol)` of the server, from `ping`.
+    pub fn ping(&self) -> Result<(String, u64), HerdrError> {
+        let result = self.request("ping", serde_json::json!({}))?;
+        Ok((
+            result["version"].as_str().unwrap_or_default().to_string(),
+            result["protocol"].as_u64().unwrap_or(0),
+        ))
+    }
+
+    pub fn pane_report_metadata_rpc(
+        &self,
+        pane: &str,
+        metadata: &PaneMetadata,
+    ) -> Result<(), HerdrError> {
+        let mut params = serde_json::json!({ "pane_id": pane, "source": SOURCE });
+        params["tokens"] = metadata_tokens(&metadata.tokens);
+        if !metadata.state_labels.is_empty() {
+            params["state_labels"] = metadata
+                .state_labels
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        if let Some(ttl) = metadata.ttl {
+            params["ttl_ms"] = (ttl.as_millis() as u64).into();
+        }
+        self.request("pane.report_metadata", params).map(|_| ())
+    }
+
+    pub fn workspace_report_metadata_rpc(
+        &self,
+        workspace: &str,
+        tokens: &[(String, Option<String>)],
+        ttl: Option<Duration>,
+    ) -> Result<(), HerdrError> {
+        let mut params = serde_json::json!({
+            "workspace_id": workspace,
+            "source": SOURCE,
+            "tokens": metadata_tokens(tokens),
+        });
+        if let Some(ttl) = ttl {
+            params["ttl_ms"] = (ttl.as_millis() as u64).into();
+        }
+        self.request("workspace.report_metadata", params)
+            .map(|_| ())
     }
 
     pub fn agent_view_clear(&self) -> Result<(), HerdrError> {
@@ -754,9 +864,100 @@ impl<'a> Herdr<'a> {
     }
 }
 
+/// At most 14 columns: the default 26-column sidebar keeps " agents" plus a
+/// gap on the same row.
+pub fn view_label(name: &str) -> String {
+    let count = name.chars().count();
+    if count <= 14 {
+        name.to_string()
+    } else {
+        format!("{}…", name.chars().take(13).collect::<String>())
+    }
+}
+
+fn metadata_tokens(tokens: &[(String, Option<String>)]) -> serde_json::Value {
+    tokens
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// A long-lived `events.subscribe` connection. Events are only wake-up
+/// signals: callers re-read state, so a lost event costs one reconcile.
+pub struct EventStream {
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+}
+
+impl EventStream {
+    /// Connects and waits for `subscription_started`. Any herdr error (an
+    /// unknown event type, a pane that closed meanwhile) is returned so the
+    /// caller can rebuild the list and retry.
+    pub fn open(socket: &Path, subscriptions: &[serde_json::Value]) -> Result<EventStream> {
+        use std::io::{BufRead, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)
+            .with_context(|| format!("could not connect to {}", socket.display()))?;
+        stream.set_write_timeout(Some(CALL_TIMEOUT))?;
+        stream.set_read_timeout(Some(CALL_TIMEOUT))?;
+        let line = serde_json::json!({
+            "id": "herdr-projects-events",
+            "method": "events.subscribe",
+            "params": { "subscriptions": subscriptions },
+        });
+        stream.write_all(format!("{line}\n").as_bytes())?;
+        let mut reader = std::io::BufReader::new(stream);
+        let mut ack = String::new();
+        reader.read_line(&mut ack)?;
+        let reply: serde_json::Value =
+            serde_json::from_str(ack.trim()).context("events.subscribe reply did not parse")?;
+        if let Some(error) = reply.get("error") {
+            bail!(
+                "events.subscribe: {} ({})",
+                error["message"].as_str().unwrap_or(""),
+                error["code"].as_str().unwrap_or("failed")
+            );
+        }
+        reader.get_ref().set_read_timeout(None)?;
+        Ok(EventStream { reader })
+    }
+
+    /// Blocks until the next event and returns its name. An error line
+    /// (`events_lost`) or a closed connection ends the stream.
+    pub fn next_event(&mut self) -> Result<String> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            bail!("herdr closed the event stream");
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line.trim()).context("event did not parse")?;
+        if let Some(error) = value.get("error") {
+            bail!(
+                "event stream ended: {}",
+                error["code"].as_str().unwrap_or("failed")
+            );
+        }
+        Ok(value["event"].as_str().unwrap_or_default().to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_labels_leave_room_for_the_agents_header() {
+        assert_eq!(view_label("producto"), "producto");
+        assert_eq!(view_label("AWAM Comercio SaaS"), "AWAM Comercio…");
+        assert_eq!(view_label("AWAM Comercio SaaS").chars().count(), 14);
+    }
 
     #[test]
     fn parses_versions() {
