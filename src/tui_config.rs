@@ -179,7 +179,7 @@ impl Action {
             Action::Search => "search",
             Action::Adopt => "adopt workspace",
             Action::Fold => "fold coordinator",
-            Action::GoToPane => "go to pane",
+            Action::GoToPane => "go to agent",
             Action::Reply => "reply",
             Action::OpenPr => "open PR",
             Action::Done => "inbox item done",

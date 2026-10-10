@@ -119,7 +119,8 @@ enum Target {
     NewThread(String),
     NewProject,
     Adopt,
-    Resolved(String, String),
+    /// A project's History row, which opens and closes in place.
+    History(String),
     Setting(usize),
     Key(Action),
     Inbox(String),
@@ -549,26 +550,79 @@ fn profile(node: &Node) -> String {
     parts.join(" · ")
 }
 
-fn visible_threads<'p>(
-    project: &'p ProjectView,
-    coordinator: &str,
-    resolved: Resolved,
-) -> (Vec<&'p Node>, usize) {
-    let all: Vec<&Node> = project
-        .threads
+/// Counts of what is still open: resolved work lives in History.
+fn without_done(counts: &Counts) -> Counts {
+    Counts {
+        done: 0,
+        ..counts.clone()
+    }
+}
+
+/// How soon a node wants a look: the order open nodes are listed in.
+fn urgency(status: Status) -> u8 {
+    match status {
+        Status::Need => 0,
+        Status::Review => 1,
+        Status::Work => 2,
+        Status::Idle => 3,
+        Status::Done => 4,
+    }
+}
+
+/// The open nodes right under coordinator `parent`, coordinators first and
+/// the most urgent first. Resolved nodes are never here: they are History.
+fn open_children<'p>(project: &'p ProjectView, parent: &str) -> Vec<&'p Node> {
+    let mut nodes: Vec<&Node> = project
+        .coordinators
         .iter()
-        .filter(|t| t.coordinator == coordinator)
+        .chain(&project.threads)
+        .filter(|n| n.id != ROOT_ID && n.coordinator == parent && n.status != Status::Done)
         .collect();
-    let done = all.iter().filter(|t| t.status == Status::Done).count();
-    if resolved == Resolved::Count && done > 1 {
-        (
-            all.into_iter()
-                .filter(|t| t.status != Status::Done)
-                .collect(),
-            done,
-        )
-    } else {
-        (all, 0)
+    nodes.sort_by_key(|n| (n.role != "coordinator", urgency(n.status)));
+    nodes
+}
+
+/// Every open node below the root, depth first, with its depth (1 = under the root).
+fn open_tree(project: &ProjectView) -> Vec<(usize, &Node)> {
+    fn walk<'p>(
+        project: &'p ProjectView,
+        parent: &str,
+        depth: usize,
+        out: &mut Vec<(usize, &'p Node)>,
+    ) {
+        for node in open_children(project, parent) {
+            out.push((depth, node));
+            if node.role == "coordinator" {
+                walk(project, &node.id, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(project, ROOT_ID, 1, &mut out);
+    out
+}
+
+/// Resolved coordinators and threads, newest first.
+fn history(project: &ProjectView) -> Vec<&Node> {
+    let mut nodes: Vec<&Node> = project
+        .coordinators
+        .iter()
+        .chain(&project.threads)
+        .filter(|n| n.id != ROOT_ID && n.status == Status::Done)
+        .collect();
+    nodes.sort_by(|a, b| b.since.cmp(&a.since));
+    nodes
+}
+
+/// `8 coordinators, 75 threads` for a History row.
+fn history_count(nodes: &[&Node]) -> String {
+    let coordinators = nodes.iter().filter(|n| n.role == "coordinator").count();
+    let threads = nodes.len() - coordinators;
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+    match (coordinators, threads) {
+        (0, t) => plural(t, "thread"),
+        (c, 0) => plural(c, "coordinator"),
+        (c, t) => format!("{}, {}", plural(c, "coordinator"), plural(t, "thread")),
     }
 }
 
@@ -631,6 +685,50 @@ impl<'a> App<'a> {
             || node.workspace.to_lowercase().contains(&needle)
     }
 
+    /// A project's History row and, while it is open, its resolved nodes in
+    /// grey, newest first. Selecting one opens its details.
+    fn history_lines(&self, project: &ProjectView, indent: isize, lines: &mut Vec<Line>) {
+        let done = history(project);
+        if done.is_empty() {
+            return;
+        }
+        let open = self.config.view.resolved == Resolved::List;
+        let (arrow, verb) = if open {
+            ("▾", "↵ hide")
+        } else {
+            ("▸", "↵ show")
+        };
+        lines.push(
+            Line::new()
+                .at(indent, arrow, GREY)
+                .at(
+                    indent + 2,
+                    format!("History · {}", history_count(&done)),
+                    GREY,
+                )
+                .at(-2, verb, DIM)
+                .target(Target::History(project.slug.clone())),
+        );
+        if !open {
+            return;
+        }
+        for node in done {
+            let kind = if node.role == "coordinator" {
+                "coordinator"
+            } else {
+                "thread"
+            };
+            lines.push(
+                Line::new()
+                    .at(indent + 2, "✓", GREY)
+                    .at(indent + 4, term::fit(&node.title, 40), GREY)
+                    .at(-18, kind, GREY)
+                    .at(-2, state::age(&node.since), GREY)
+                    .target(Target::Node(project.slug.clone(), node.id.clone())),
+            );
+        }
+    }
+
     fn launcher_lines(&self) -> Vec<Line> {
         let mut lines = Vec::new();
         let needs = self.needs_you();
@@ -673,26 +771,25 @@ impl<'a> App<'a> {
         lines.push(Line::new().at(1, "PROJECTS", HEAD).at(
             -2,
             format!(
-                "{} project{} · {coordinators} coordinators · {threads} threads",
+                "{} project{} · {coordinators} coordinator{} · {threads} thread{}",
                 self.snap.projects.len(),
                 if self.snap.projects.len() == 1 {
                     ""
                 } else {
                     "s"
-                }
+                },
+                if coordinators == 1 { "" } else { "s" },
+                if threads == 1 { "" } else { "s" },
             ),
             DIM,
         ));
-        // Resolved coordinators leave the tree for the project's history,
-        // except while searching, which looks through everything.
-        let history_apart = self.search.is_empty();
-        let history_open = self.config.view.resolved == Resolved::List;
         for p in &self.snap.projects {
-            let (resolved, coords): (Vec<&Node>, Vec<&Node>) = p
-                .coordinators
-                .iter()
-                .filter(|c| self.matches(p, c) || self.search.is_empty())
-                .partition(|c| history_apart && c.id != ROOT_ID && c.status == Status::Done);
+            // Open coordinators at every depth; threads show as counts.
+            let coords: Vec<(usize, &Node)> = open_tree(p)
+                .into_iter()
+                .filter(|(_, n)| n.role == "coordinator")
+                .filter(|(_, n)| self.search.is_empty() || self.matches(p, n))
+                .collect();
             if !self.search.is_empty()
                 && coords.is_empty()
                 && !p.name.to_lowercase().contains(&self.search.to_lowercase())
@@ -707,62 +804,42 @@ impl<'a> App<'a> {
             if p.status != "active" {
                 head = head.at(-2, p.status.clone(), DIM);
             } else {
-                head = counts_spans(head, -22, &p.counts);
+                head = counts_spans(head, -22, &without_done(&p.counts));
             }
             lines.push(head.target(Target::Project(p.slug.clone())));
-            for (i, c) in coords.iter().enumerate() {
+            let root = &p.coordinators[0];
+            if self.search.is_empty() {
+                let (glyph, style) = dot(root.status);
+                lines.push(
+                    Line::new()
+                        .at(5, glyph, style)
+                        .at(7, "Coordinator", Style::PLAIN)
+                        .at(27, term::fit(&profile(root), 30), DIM)
+                        .at(-22, root.status.word(), status_style(root.status))
+                        .target(Target::Node(p.slug.clone(), ROOT_ID.into())),
+                );
+            }
+            for (depth, c) in coords {
+                let x = 5 + 2 * depth as isize;
                 let (glyph, style) = dot(c.status);
-                let branch = if i + 1 == coords.len() { "└" } else { "├" };
-                let title = if c.id == ROOT_ID {
-                    "Coordinator".to_string()
-                } else {
-                    c.title.clone()
-                };
-                let detail = if c.id == ROOT_ID {
-                    profile(c)
-                } else {
-                    c.workspace.clone()
-                };
                 let mut line = Line::new()
-                    .at(4, branch, GREY)
-                    .at(6, glyph, style)
-                    .at(8, term::fit(&title, 18), Style::PLAIN)
-                    .at(27, term::fit(&detail, 30), DIM);
-                // The project row already carries the root's numbers.
-                line = if c.counts.total() > 0 && c.id != ROOT_ID {
-                    counts_spans(line, -22, &c.counts)
+                    .at(x, glyph, style)
+                    .at(
+                        x + 2,
+                        term::fit(&c.title, 24usize.saturating_sub(2 * depth)),
+                        Style::PLAIN,
+                    )
+                    .at(27, term::fit(&c.workspace, 30), DIM);
+                let open = c.counts.total() - c.counts.get(Status::Done);
+                line = if open > 0 {
+                    counts_spans(line, -22, &without_done(&c.counts))
                 } else {
                     line.at(-22, c.status.word(), status_style(c.status))
                 };
                 lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
             }
-            if !resolved.is_empty() {
-                let (arrow, verb) = if history_open {
-                    ("▾", "↵ hide")
-                } else {
-                    ("▸", "↵ show")
-                };
-                lines.push(
-                    Line::new()
-                        .at(4, arrow, GREY)
-                        .at(6, "History", GREY)
-                        .at(14, format!("{} resolved", resolved.len()), GREY)
-                        .at(-2, verb, DIM)
-                        .target(Target::Resolved(p.slug.clone(), ROOT_ID.into())),
-                );
-                if history_open {
-                    for c in &resolved {
-                        let mut line =
-                            Line::new()
-                                .at(6, "✓", GREY)
-                                .at(8, term::fit(&c.title, 44), GREY);
-                        let done = c.counts.get(Status::Done);
-                        if done > 0 {
-                            line = line.at(-22, format!("{done} threads"), GREY);
-                        }
-                        lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
-                    }
-                }
+            if self.search.is_empty() {
+                self.history_lines(p, 5, &mut lines);
             }
         }
         let outside: Vec<&state::Workspace> = self
@@ -830,7 +907,7 @@ impl<'a> App<'a> {
     fn create_parent(&self) -> Option<(String, String)> {
         let (slug, id) = match self.selected_target() {
             Some(Target::Project(slug)) => (slug, ROOT_ID.to_string()),
-            Some(Target::Resolved(slug, coordinator)) => (slug, coordinator),
+            Some(Target::History(slug)) => (slug, ROOT_ID.to_string()),
             _ => self
                 .focused_node()
                 .unwrap_or_else(|| (self.current_slug(), ROOT_ID.into())),
@@ -965,68 +1042,55 @@ impl<'a> App<'a> {
 
     // -------------------------------------------------------------- tree
 
+    /// The project screen: the coordinator, every open node under it at its
+    /// depth, and the History row. Resolved nodes only ever appear in History.
     fn tree_lines(&self, project: &ProjectView, folded: &BTreeSet<String>) -> Vec<Line> {
-        let resolved = self.config.view.resolved;
         let mut lines = Vec::new();
-        for c in &project.coordinators {
-            let root = c.id == ROOT_ID;
-            if root {
-                let (glyph, style) = dot(c.status);
-                lines.push(
-                    Line::new()
-                        .at(3, glyph, style)
-                        .at(5, "Coordinator", BOLD)
-                        .at(26, c.status.word(), style)
-                        .at(37, term::fit(&c.text, 40), Style::PLAIN)
-                        .target(Target::Node(project.slug.clone(), c.id.clone())),
-                );
-            } else {
-                let indent = (c.depth.saturating_sub(1) * 2) as isize;
-                let fold = if folded.contains(&c.id) { "▸" } else { "▾" };
-                let (glyph, style) = dot(c.status);
-                let line = Line::new()
-                    .at(1 + indent, fold, DIM)
-                    .at(3 + indent, glyph, style)
-                    .at(5 + indent, term::fit(&c.title, 20), BOLD)
-                    .at(
-                        26,
-                        term::fit(&format!("coordinator · {}", c.workspace), 30),
-                        DIM,
-                    );
-                lines.push(
-                    counts_spans(line, -24, &c.counts)
-                        .target(Target::Node(project.slug.clone(), c.id.clone())),
-                );
-                if folded.contains(&c.id) {
-                    continue;
+        let root = &project.coordinators[0];
+        let (glyph, style) = dot(root.status);
+        lines.push(
+            Line::new()
+                .at(3, glyph, style)
+                .at(5, "Coordinator", BOLD)
+                .at(30, root.status.word(), style)
+                .at(41, term::fit(&root.text, 40), Style::PLAIN)
+                .target(Target::Node(project.slug.clone(), ROOT_ID.into())),
+        );
+        let open = open_tree(project);
+        if open.is_empty() {
+            lines.push(Line::new().at(5, "nothing open under it", GREY));
+        }
+        let mut hidden_below: Option<usize> = None;
+        for (depth, node) in open {
+            if hidden_below.is_some_and(|d| depth > d) {
+                continue;
+            }
+            hidden_below = None;
+            let x = 3 + 2 * depth as isize;
+            let (glyph, style) = dot(node.status);
+            let coordinator = node.role == "coordinator";
+            let mut line = Line::new();
+            if coordinator && !open_children(project, &node.id).is_empty() {
+                let shut = folded.contains(&node.id);
+                line = line.at(x - 2, if shut { "▸" } else { "▾" }, DIM);
+                if shut {
+                    hidden_below = Some(depth);
                 }
             }
-            let (threads, done) = visible_threads(project, &c.id, resolved);
-            let total = threads.len() + usize::from(done > 0);
-            for (i, t) in threads.iter().enumerate() {
-                let (glyph, style) = dot(t.status);
-                let branch = if i + 1 == total { "└─" } else { "├─" };
-                lines.push(
-                    Line::new()
-                        .at(3, branch, GREY)
-                        .at(6, glyph, style)
-                        .at(8, term::fit(&t.title, 17), Style::PLAIN)
-                        .at(26, t.status.word(), style)
-                        .at(37, term::fit(&t.text, 44), Style::PLAIN)
-                        .at(-2, state::age(&t.since), DIM)
-                        .target(Target::Node(project.slug.clone(), t.id.clone())),
-                );
-            }
-            if done > 0 {
-                lines.push(
-                    Line::new()
-                        .at(3, "└─", GREY)
-                        .at(6, "✓", GREEN)
-                        .at(8, format!("{done} resolved"), DIM)
-                        .target(Target::Resolved(project.slug.clone(), c.id.clone())),
-                );
-            }
+            line = line
+                .at(x, glyph, style)
+                .at(
+                    x + 2,
+                    term::fit(&node.title, 26usize.saturating_sub(2 * depth)),
+                    if coordinator { BOLD } else { Style::PLAIN },
+                )
+                .at(30, node.status.word(), style)
+                .at(41, term::fit(&node.text, 40), Style::PLAIN)
+                .at(-2, state::age(&node.since), DIM);
+            lines.push(line.target(Target::Node(project.slug.clone(), node.id.clone())));
         }
+        lines.push(Line::new());
+        self.history_lines(project, 3, &mut lines);
         lines
     }
 
@@ -1036,12 +1100,21 @@ impl<'a> App<'a> {
             return;
         };
         let root = &project.coordinators[0];
-        frame.put(1, 0, &profile(root), DIM);
-        if !project.thread_harness.is_empty() {
-            frame.put(26, 0, &format!("workers {}", project.thread_harness), DIM);
+        let mut about = vec![project.repo.replace(&home(), "~")];
+        let agent = profile(root);
+        if !agent.is_empty() {
+            about.push(format!("coordinator {agent}"));
         }
-        frame.put_right(frame.width - 1, 0, &project.repo.replace(&home(), "~"), DIM);
-        draw_line(frame, 1, &counts_header(&project.counts), false);
+        if !project.thread_harness.is_empty() {
+            about.push(format!("threads {}", project.thread_harness));
+        }
+        frame.put(1, 0, &term::fit(&about.join(" · "), frame.width - 2), DIM);
+        draw_line(
+            frame,
+            1,
+            &counts_header(&without_done(&project.counts)),
+            false,
+        );
         let lines = self.tree_lines(&project, folded);
         let detail = 9;
         let height = frame.height.saturating_sub(3 + detail + 1);
@@ -1049,12 +1122,26 @@ impl<'a> App<'a> {
         let y = frame.height - 1 - detail;
         frame.rule(y);
         let selected = targets(&lines).get(sel).cloned();
-        let actions = match selected {
-            Some(Target::Node(_, id)) => self.draw_node_summary(frame, &project, &id, y + 1),
+        let actions = match &selected {
+            Some(Target::Node(_, id)) => self.draw_node_summary(frame, &project, id, y + 1),
             _ => Vec::new(),
         };
         self.draw_create(frame, frame.height - 3);
-        let mut pairs = self.hint(&[(Action::Open, "go to pane"), (Action::Fold, "fold")]);
+        let mut pairs = match &selected {
+            Some(Target::History(_)) => self.hint(&[(Action::Open, "show or hide")]),
+            Some(Target::Node(_, id)) => {
+                let open = project.node(id).is_some_and(|n| n.status != Status::Done);
+                let mut pairs = self.hint(&[(Action::Open, "details")]);
+                if open {
+                    pairs.extend(self.hint(&[(Action::GoToPane, "go to agent")]));
+                    if id != ROOT_ID {
+                        pairs.extend(self.hint(&[(Action::Close, "close")]));
+                    }
+                }
+                pairs
+            }
+            _ => Vec::new(),
+        };
         pairs.extend(actions);
         pairs.extend(self.hint(&[(Action::Back, "back")]));
         frame.hint(frame.height - 1, &pairs);
@@ -1141,7 +1228,7 @@ impl<'a> App<'a> {
             x = self.button(frame, x, chip_y, Action::OpenPr, "Open PR") + 1;
             pairs.extend(self.hint(&[(Action::Merge, "merge")]));
         }
-        self.button(frame, x, chip_y, Action::GoToPane, "Go to pane");
+        let _ = x;
         pairs
     }
 
@@ -1293,7 +1380,7 @@ impl<'a> App<'a> {
             frame.put(3, y + 5, &term::fit(&t.text, frame.width - 4), Style::PLAIN);
         }
         let mut pairs = vec![("←→↑↓".to_string(), "move")];
-        pairs.extend(self.hint(&[(Action::Open, "open"), (Action::GoToPane, "go to pane")]));
+        pairs.extend(self.hint(&[(Action::Open, "open"), (Action::GoToPane, "go to agent")]));
         pairs.push(("1-9".into(), "question"));
         pairs.extend(self.hint(&[
             (Action::Merge, "merge"),
@@ -1502,7 +1589,9 @@ impl<'a> App<'a> {
         if node.status == Status::Need && self.config.view.answer && !output.is_empty() {
             pairs.push(("1-9".to_string(), "answer"));
         }
-        pairs.extend(self.hint(&[(Action::Reply, "reply"), (Action::GoToPane, "go to pane")]));
+        if node.status != Status::Done {
+            pairs.extend(self.hint(&[(Action::Reply, "reply"), (Action::GoToPane, "go to agent")]));
+        }
         if node.pr.as_ref().is_some_and(|p| !p.merged()) {
             pairs.extend(self.hint(&[(Action::OpenPr, "open PR"), (Action::Merge, "merge")]));
         }
@@ -1534,13 +1623,13 @@ impl<'a> App<'a> {
             ),
             ("Dock width", format!("{}%", v.dock_width), "15-50%"),
             (
-                "Resolved threads",
+                "History",
                 match v.resolved {
-                    Resolved::Count => "count only",
-                    Resolved::List => "list",
+                    Resolved::Count => "closed",
+                    Resolved::List => "open",
                 }
                 .into(),
-                "count · list",
+                "closed · open",
             ),
             (
                 "Notify me on",
@@ -2808,18 +2897,24 @@ impl<'a> App<'a> {
         match target {
             Target::NeedsYou(slug, id) => self.open_detail(&slug, &id),
             Target::Project(slug) => self.open_tree(&slug, None),
+            // Enter opens, never leaves the popup: the launcher opens the
+            // project screen on the node, the project screen its details.
             Target::Node(slug, id) => {
                 let on_launcher = matches!(self.stack.last(), Some(View::Launcher { .. }));
-                if on_launcher {
+                let resolved = self
+                    .project(&slug)
+                    .and_then(|p| p.node(&id))
+                    .is_some_and(|n| n.status == Status::Done);
+                if on_launcher && !resolved {
                     self.open_tree(&slug, Some(&id));
                 } else {
-                    self.go(&slug, &id);
+                    self.open_detail(&slug, &id);
                 }
             }
             Target::NewThread(slug) => self.dock_new_thread(&slug),
             Target::NewProject => self.new_form(Kind::Project, "", ""),
             Target::Adopt => self.adopt_current(),
-            Target::Resolved(_, _) => {
+            Target::History(_) => {
                 self.config.view.resolved = match self.config.view.resolved {
                     Resolved::Count => Resolved::List,
                     Resolved::List => Resolved::Count,
@@ -3625,8 +3720,8 @@ mod tests {
             assert!(lines[5].contains("› ● billing ui"), "{text}");
             assert!(text.contains("Acme Billing Suite"));
             // Coordinators carry no number column.
-            assert!(lines[9].starts_with("    ├ ● Coordinator"), "{text}");
-            assert!(lines[10].starts_with("    └ ● mobile redesign"), "{text}");
+            assert!(lines[9].starts_with("     ● Coordinator"), "{text}");
+            assert!(lines[10].starts_with("       ● mobile redesign"), "{text}");
             assert!(text.contains("WORKSPACES"));
             assert!(
                 lines[23].contains("↵ open · x close node · / search"),
@@ -3725,35 +3820,77 @@ mod tests {
     }
 
     #[test]
-    fn resolved_coordinators_fold_into_one_row_until_asked_for() {
+    fn resolved_work_lives_only_in_history_on_every_screen() {
         with_app(|app| {
             let project = &mut app.snap.projects[0];
-            let c = project
+            for n in project
                 .coordinators
                 .iter_mut()
-                .find(|c| c.title == "mobile redesign")
-                .unwrap();
-            c.status = Status::Done;
-            let text = app.render(84, 24).text();
-            assert!(!text.contains("✓ mobile redesign"), "{text}");
-            assert!(text.contains("▸ History 1 resolved"), "{text}");
-
-            let history = |app: &App| {
-                targets(&app.launcher_lines())
+                .chain(project.threads.iter_mut())
+            {
+                if n.title == "mobile redesign" || n.coordinator == "t-0001" {
+                    n.status = Status::Done;
+                }
+            }
+            let history = |app: &App, lines: Vec<Line>| {
+                let _ = app;
+                targets(&lines)
                     .iter()
-                    .position(|t| matches!(t, Target::Resolved(_, id) if id == ROOT_ID))
+                    .position(|t| matches!(t, Target::History(_)))
                     .unwrap()
             };
-            app.stack = vec![View::Launcher { sel: history(app) }];
-            app.activate();
+
+            // Launcher: the resolved coordinator is gone, History counts it.
             let text = app.render(84, 24).text();
-            assert!(text.contains("▾ History 1 resolved"), "{text}");
+            assert!(!text.contains("mobile redesign"), "{text}");
+            assert!(
+                text.contains("▸ History · 1 coordinator, 3 threads"),
+                "{text}"
+            );
+
+            // Project screen: same rule, nothing resolved in the tree.
+            app.open_tree("acme", None);
+            let text = app.render(84, 30).text();
+            assert!(!text.contains("mobile redesign"), "{text}");
+            assert!(text.contains("nothing open under it"), "{text}");
+            assert!(
+                text.contains("▸ History · 1 coordinator, 3 threads"),
+                "{text}"
+            );
+
+            // History opens in place, in grey, and closes again.
+            let at = history(
+                app,
+                app.tree_lines(&app.snap.projects[0].clone(), &BTreeSet::new()),
+            );
+            app.set_sel(at);
+            app.activate();
+            let text = app.render(84, 30).text();
+            assert!(text.contains("▾ History"), "{text}");
             assert!(text.contains("✓ mobile redesign"), "{text}");
 
-            app.stack = vec![View::Launcher { sel: history(app) }];
+            // A resolved node opens its details; Enter never leaves the popup.
+            app.set_sel(at + 1);
             app.activate();
-            let text = app.render(84, 24).text();
+            assert!(matches!(app.stack.last(), Some(View::Detail { .. })));
+            assert!(!app.close);
+            press(app, crossterm::event::KeyCode::Esc);
+            app.set_sel(at);
+            app.activate();
+            let text = app.render(84, 30).text();
             assert!(!text.contains("✓ mobile redesign"), "{text}");
+        });
+    }
+
+    #[test]
+    fn enter_on_an_open_node_opens_details_and_g_goes_to_the_agent() {
+        with_app(|app| {
+            app.open_tree("acme", Some("t-0003"));
+            press(app, crossterm::event::KeyCode::Enter);
+            assert!(matches!(app.stack.last(), Some(View::Detail { id, .. }) if id == "t-0003"));
+            assert!(!app.close);
+            let text = app.render(84, 30).text();
+            assert!(text.contains("go to"), "{text}");
         });
     }
 
@@ -3793,7 +3930,7 @@ mod tests {
                 press(app, crossterm::event::KeyCode::Char(c));
             }
             let text = app.render(84, 24).text();
-            assert!(text.contains("└ ● mobile redesign"), "{text}");
+            assert!(text.contains("● mobile redesign"), "{text}");
             assert!(!text.contains("● Coordinator"), "{text}");
             assert!(text.contains("/ mobile▏"), "{text}");
         });
