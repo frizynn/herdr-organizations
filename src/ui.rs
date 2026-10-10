@@ -354,6 +354,8 @@ struct App<'a> {
     stack: Vec<View>,
     message: String,
     close: bool,
+    /// What the popup hands to a process of its own as it closes.
+    after_close: Option<ui_ops::Jump>,
     search: String,
     pick: String,
     current_workspace: (String, String),
@@ -2209,7 +2211,12 @@ impl<'a> App<'a> {
                 if new.name.trim().is_empty() {
                     Err(anyhow::anyhow!("give the project a name"))
                 } else {
-                    ui_ops::create_project(self.ctx, &new).map(|slug| format!("opened `{slug}`"))
+                    ui_ops::create_project(self.ctx, &new).and_then(|slug| {
+                        if new.adopt_pane.is_empty() {
+                            self.jump(ui_ops::Jump::Coordinator { slug: slug.clone() })?;
+                        }
+                        Ok(format!("opened `{slug}`"))
+                    })
                 }
             }
             Kind::Coordinator | Kind::Thread => {
@@ -2819,11 +2826,25 @@ impl<'a> App<'a> {
     }
 
     fn go(&mut self, slug: &str, id: &str) {
-        match ui_ops::go_to_pane(self.ctx, slug, id) {
-            Ok(_) if matches!(self.mode, Mode::Popup) => self.close = true,
-            Ok(_) => self.message.clear(),
+        let jump = ui_ops::Jump::Node {
+            slug: slug.into(),
+            id: id.into(),
+        };
+        match self.jump(jump) {
+            Ok(()) => self.message.clear(),
             Err(error) => self.message = format!("{error:#}"),
         }
+    }
+
+    /// The popup closes and hands the jump off (see [`ui_ops::Jump`]); the
+    /// dock is not modal, so it jumps itself.
+    fn jump(&mut self, jump: ui_ops::Jump) -> Result<()> {
+        if matches!(self.mode, Mode::Popup) {
+            self.after_close = Some(jump);
+            self.close = true;
+            return Ok(());
+        }
+        jump.run(self.ctx)
     }
 
     /// The node an action applies to on the current screen.
@@ -3003,7 +3024,11 @@ impl<'a> App<'a> {
         {
             let command = self.pick.clone();
             let slug = slug.clone();
-            let result = term::quiet(|| crate::actions::run_on_slug(self.ctx, &command, &slug));
+            let result = if command == "open" {
+                self.jump(ui_ops::Jump::Coordinator { slug })
+            } else {
+                term::quiet(|| crate::actions::run_on_slug(self.ctx, &command, &slug))
+            };
             match result {
                 Ok(()) => self.close = true,
                 Err(error) => self.message = format!("{error:#}"),
@@ -3646,6 +3671,7 @@ fn new_app<'a>(ctx: &'a Ctx<'a>, mode: Mode) -> App<'a> {
         stack: Vec::new(),
         message: problem,
         close: false,
+        after_close: None,
         search: String::new(),
         pick: String::new(),
         current_workspace: current_workspace(ctx),
@@ -3718,7 +3744,8 @@ pub fn run_popup(ctx: &Ctx) -> Result<()> {
         }
         _ => {}
     }
-    event_loop(&mut app)
+    event_loop(&mut app)?;
+    app.after_close.map_or(Ok(()), |jump| jump.hand_off(ctx))
 }
 
 /// The optional dock: a split pane next to one coordinator's agents.
@@ -4289,6 +4316,81 @@ mod tests {
             press(app, crossterm::event::KeyCode::Tab);
             assert!(matches!(app.stack[..], [View::Launcher { .. }]));
             assert!(app.message.contains("no projects yet"), "{}", app.message);
+        });
+    }
+
+    /// Herdr keeps a popup modal until its process exits. A popup that opens
+    /// a coordinator or restarts a node before closing takes every key for as
+    /// long as the agent takes to start, after focus has already moved away.
+    fn closes_before_any_herdr_call(
+        expected: ui_ops::Jump,
+        act: impl FnOnce(&crate::scenarios::World, &mut App),
+    ) {
+        let mut world = crate::scenarios::World::new();
+        world.project("acme", "sock");
+        let socket = world.home.path().join("sock");
+        world.env = crate::paths::Env::for_test(
+            world.home.path(),
+            &[("HERDR_SOCKET_PATH", socket.to_str().unwrap())],
+        );
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        app.stack.push(View::Launcher { sel: 0 });
+        world.runner.calls.borrow_mut().clear();
+        act(&world, &mut app);
+        assert!(app.close, "{}", app.message);
+        let calls: Vec<String> = world
+            .runner
+            .calls
+            .borrow()
+            .iter()
+            .map(|c| c.display())
+            .collect();
+        assert!(calls.is_empty(), "the popup ran {calls:?} before closing");
+        assert_eq!(app.after_close, Some(expected));
+    }
+
+    #[test]
+    fn go_to_agent_closes_the_popup_before_any_herdr_call() {
+        let jump = ui_ops::Jump::Node {
+            slug: "acme".into(),
+            id: "t-0001".into(),
+        };
+        closes_before_any_herdr_call(jump, |_, app| {
+            app.open_tree("acme", Some("t-0001"));
+            press(app, crossterm::event::KeyCode::Char('g'));
+        });
+    }
+
+    #[test]
+    fn picking_a_project_to_open_closes_the_popup_before_any_herdr_call() {
+        let jump = ui_ops::Jump::Coordinator {
+            slug: "acme".into(),
+        };
+        closes_before_any_herdr_call(jump, |_, app| {
+            app.pick = "open".into();
+            let row = targets(&app.launcher_lines())
+                .iter()
+                .position(|t| *t == Target::Project("acme".into()))
+                .unwrap();
+            app.set_sel(row);
+            press(app, crossterm::event::KeyCode::Enter);
+        });
+    }
+
+    #[test]
+    fn a_new_project_closes_the_popup_before_its_coordinator_starts() {
+        let jump = ui_ops::Jump::Coordinator {
+            slug: "pricing".into(),
+        };
+        closes_before_any_herdr_call(jump, |world, app| {
+            app.new_form(Kind::Project, "", "");
+            for c in "Pricing".chars() {
+                press(app, crossterm::event::KeyCode::Char(c));
+            }
+            press(app, crossterm::event::KeyCode::Enter);
+            assert!(world.root.join("pricing").is_dir());
         });
     }
 }

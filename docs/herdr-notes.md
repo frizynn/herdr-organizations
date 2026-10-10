@@ -190,3 +190,16 @@ Resource use, same fixture (1 project, 3 coordinators, 8 threads, 13 panes), `ps
 | Popup, open and idle | 2.3 MB, wakes 4 times a second | 3.2 MB, 0.00 s CPU over 20 s, no Herdr calls |
 
 The remaining ticker forks are its per-pass `agent list` and `pane list` CLI calls and, in this fixture, a parent nudge that a fake coordinator refuses. Moving those lists to socket requests is the next saving.
+
+## Popup freeze after go to agent (2026-10-10, herdr 0.9.1 server, 0.9.3 client, disposable server)
+
+The user's Herdr froze after `g` in the popup when they returned to the tab the popup was opened from. Their server log showed the same sequence twice: popup opened, `workspace.create` with focus (the coordinator was not running), `agent start` for codex, codex exiting with code 1 and its workspace closing, then `agent.get` polled until the 20 s `agent start` timeout, and only then the popup's pane exiting. The user had opened a new terminal before that.
+
+| Assumption | Result |
+| --- | --- |
+| A popup closes when focus moves to another workspace | **Does not hold.** Focus moves (`workspace create --focus`, `agent focus`) while the popup's process lives. Herdr hides the popup on other tabs and shows it again, with its last frame, on the tab it was opened from. |
+| A popup whose process is busy lets other keys through | **Does not hold.** Back on its tab, typed text did not reach the pane for 5 s and Esc did nothing; the popup's process was in `go_to_pane`, waiting on `agent start --timeout 20000`. Sidebar clicks still switched workspaces. Typing worked again only after the process exited. |
+| The fix holds | **Holds.** The popup hands the step to a detached `jump` process and exits; Herdr's log shows the popup's pane exit 193 ms before the jump's `workspace.create`. Back on the original tab, typed text reached the pane in 0.10 s, for go to agent, the `open` picker and a new project alike. |
+
+Repro: a coordinator record pointing at a closed workspace and an agent command that exits 1 after 1.5 s; `prefix+a`, Enter on the coordinator, `g`, click the original workspace, type.
+

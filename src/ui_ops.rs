@@ -53,6 +53,70 @@ fn project_herdr<'a>(ctx: &'a Ctx, project: &Project) -> Result<Herdr<'a>> {
     Ok(Herdr::new(ctx.env.herdr_bin(), record.socket, ctx.runner))
 }
 
+/// A move to a node or a coordinator that may open the coordinator or restart
+/// the node: it can move focus and then wait for an agent to start (up to
+/// `AGENT_START_TIMEOUT`). Herdr keeps a popup modal until its process exits,
+/// so the popup hands a jump to a process of its own and closes instead of
+/// waiting: a waiting popup takes every key, even after focus has moved away.
+#[derive(Debug, Clone, PartialEq, clap::Subcommand)]
+pub enum Jump {
+    /// Focus a node (`root`: the coordinator), opening or restarting it first
+    Node { slug: String, id: String },
+    /// Open the project's coordinator, as `open` does
+    Coordinator { slug: String },
+}
+
+impl Jump {
+    /// The hidden CLI command that makes this jump.
+    pub fn args(&self) -> Vec<&str> {
+        match self {
+            Jump::Node { slug, id } => vec!["jump", "node", slug, id],
+            Jump::Coordinator { slug } => vec!["jump", "coordinator", slug],
+        }
+    }
+
+    pub fn run(&self, ctx: &Ctx) -> Result<()> {
+        match self {
+            Jump::Node { slug, id } => go_to_pane(ctx, slug, id).map(|_| ()),
+            Jump::Coordinator { slug } => {
+                term::quiet(|| crate::actions::run_on_slug(ctx, "open", slug))
+            }
+        }
+    }
+
+    /// Starts [`Jump::args`] in its own session, so Herdr
+    /// closing the popup does not end it. It waits on a pipe whose write end
+    /// this process holds until it exits: focus moves after the popup closed.
+    pub fn hand_off(&self, ctx: &Ctx) -> Result<()> {
+        let (popup_exited, popup_alive) = std::io::pipe().context("could not hand the jump off")?;
+        let mut command = std::process::Command::new(crate::paths::binary()?);
+        command
+            .arg("--root")
+            .arg(&ctx.root)
+            .args(self.args())
+            .stdin(popup_exited)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::runner::new_session(&mut command);
+        command.spawn().context("could not hand the jump off")?;
+        std::mem::forget(popup_alive);
+        Ok(())
+    }
+
+    /// The process `hand_off` started: once the popup's process has exited,
+    /// jumps, and shows a failure as a Herdr notification, since the popup
+    /// that would have shown it is gone.
+    pub fn after_popup(&self, ctx: &Ctx) {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        if let Err(error) = self.run(ctx)
+            && let Some(socket) = env_socket(ctx)
+        {
+            let _ = Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner)
+                .notification_show("Herdr Organizations", &format!("{error:#}"));
+        }
+    }
+}
+
 /// Focuses a node's live agent, its tab when no agent runs, or reopens it
 /// when its tab is gone. `root` is the project coordinator.
 pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
@@ -258,6 +322,8 @@ pub struct NewProject {
     pub adopt_cwd: String,
 }
 
+/// Creates the project, or adopts the workspace's agent pane as one. A new
+/// project's coordinator is the caller's `Jump::Coordinator`.
 pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
     let socket = env_socket(ctx).context("HERDR_SOCKET_PATH is not set: open this from Herdr")?;
     if !form.adopt_pane.is_empty() {
@@ -271,7 +337,7 @@ pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
                     workspace_cwd: form.adopt_cwd.clone(),
                     session: SessionFlags {
                         session: None,
-                        socket: Some(socket.clone()),
+                        socket: Some(socket),
                     },
                 },
             )
@@ -287,22 +353,6 @@ pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
     let project = project::create(&ctx.root, &form.name, &form.goal, repos)?;
     // A Herdr kind is also the built-in profile of that name.
     crate::profiles::write_project_defaults(&project, &form.thread_agent, &form.coordinator_agent)?;
-    term::quiet(|| {
-        coordinator::open(
-            ctx,
-            &project.slug,
-            &coordinator::OpenOptions {
-                session: SessionFlags {
-                    session: None,
-                    socket: Some(socket),
-                },
-                rebind: false,
-                profile: None,
-                new: false,
-                here: false,
-            },
-        )
-    })?;
     Ok(project.slug)
 }
 

@@ -206,6 +206,13 @@ enum Command {
     /// Run inside a plugin popup or split pane
     #[command(hide = true)]
     Pane { id: String },
+    /// Run by the popup as it closes: waits for the popup's process to exit
+    /// (the end of standard input), then jumps
+    #[command(hide = true)]
+    Jump {
+        #[command(subcommand)]
+        jump: crate::ui_ops::Jump,
+    },
     /// Agent profiles: named launch setups (harness, model, effort, flags) and which ones threads and coordinators may use
     Profile {
         #[command(subcommand)]
@@ -1458,6 +1465,10 @@ pub fn run() -> Result<()> {
         ),
         Command::Action { id } => actions::run_action(&ctx, &id),
         Command::Pane { id } => actions::run_pane(&ctx, &id),
+        Command::Jump { jump } => {
+            jump.after_popup(&ctx);
+            Ok(())
+        }
         Command::Profile { command } => {
             if let ProfileCommand::Resolve { name } = &command {
                 println!("{}", crate::profiles::resolve_json(&ctx, name.as_deref())?);
@@ -1597,5 +1608,30 @@ pub fn run() -> Result<()> {
             TickerCommand::Stop => ticker::stop(&ctx.root),
             TickerCommand::Status => ticker::status(&ctx.root),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_ops::Jump;
+
+    #[test]
+    fn a_handed_off_jump_parses_back_to_itself() {
+        for jump in [
+            Jump::Node {
+                slug: "acme".into(),
+                id: "t-0001".into(),
+            },
+            Jump::Coordinator {
+                slug: "acme".into(),
+            },
+        ] {
+            let args = [vec!["herdr-organizations"], jump.args()].concat();
+            match Cli::try_parse_from(args).unwrap().command {
+                Command::Jump { jump: parsed } => assert_eq!(parsed, jump),
+                _ => panic!("{jump:?} did not parse as a jump"),
+            }
+        }
     }
 }
