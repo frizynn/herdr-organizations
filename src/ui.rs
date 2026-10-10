@@ -2234,11 +2234,14 @@ impl<'a> App<'a> {
                 &Self::form_value(form, "Label"),
             )
             .map(|_| "workspace created".to_string()),
-            Kind::Replace => ui_ops::replace_coordinator(
-                self.ctx,
-                &Self::form_value(form, "Project"),
-                &Self::form_value(form, "New one runs on"),
-            ),
+            Kind::Replace => {
+                let profile = Self::form_value(form, "New one runs on");
+                self.jump(ui_ops::Jump::Replace {
+                    slug: Self::form_value(form, "Project"),
+                    profile: profile.clone(),
+                })
+                .map(|_| format!("replacing the coordinator with {profile}"))
+            }
         };
         match result {
             Ok(message) => {
@@ -4375,6 +4378,18 @@ mod tests {
                 .position(|t| *t == Target::Project("acme".into()))
                 .unwrap();
             app.set_sel(row);
+            press(app, crossterm::event::KeyCode::Enter);
+        });
+    }
+
+    #[test]
+    fn replacing_the_coordinator_closes_the_popup_before_any_herdr_call() {
+        let jump = ui_ops::Jump::Replace {
+            slug: "acme".into(),
+            profile: "codex".into(),
+        };
+        closes_before_any_herdr_call(jump, |_, app| {
+            app.stack = vec![View::Form(app.form(Kind::Replace, "acme", ""))];
             press(app, crossterm::event::KeyCode::Enter);
         });
     }

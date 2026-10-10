@@ -1626,6 +1626,10 @@ mod tests {
             Jump::Coordinator {
                 slug: "acme".into(),
             },
+            Jump::Replace {
+                slug: "acme".into(),
+                profile: "codex".into(),
+            },
         ] {
             let args = [vec!["herdr-organizations"], jump.args()].concat();
             match Cli::try_parse_from(args).unwrap().command {
