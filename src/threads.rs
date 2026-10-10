@@ -1131,6 +1131,11 @@ fn close_thread_view(view: &SessionView<'_>, slug: &str, thread: &Thread) -> Res
         Kind::Tab | Kind::Checkout => herdr.tab_close(&thread.tab_id),
         Kind::Adopted => herdr.pane_close(&thread.pane_id),
     }
+    // A view Herdr no longer has (closed by hand, or lost in a restart) is already closed.
+    .or_else(|error| match error.code.as_str() {
+        "workspace_not_found" | "tab_not_found" | "pane_not_found" => Ok(()),
+        _ => Err(error),
+    })
     .map_err(|error| anyhow::anyhow!(error))
     .with_context(|| {
         format!(
