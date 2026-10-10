@@ -14,6 +14,8 @@ use crate::state::{Counts, Node, ProjectView, Status};
 pub const TTL: Duration = Duration::from_secs(300);
 pub const REFRESH: Duration = Duration::from_secs(150);
 pub const NEEDS_YOU: &str = "needs you";
+/// Every token `pane_tokens` writes, for clearing a pane.
+pub const PANE_TOKENS: [&str; 5] = ["depth", "parent", "role", "tree-order", "org_task"];
 
 /// One resource's wanted metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,21 +29,6 @@ pub struct Wanted {
     pub target: Target,
     pub tokens: Vec<(String, Option<String>)>,
     pub state_labels: Vec<(String, String)>,
-}
-
-/// The agent view's sort key: the finer group's rank, so landing threads sit
-/// between working and idle ones.
-fn rank(node: &Node) -> u8 {
-    if let Some(group) = crate::thread::Group::from_token(&node.group) {
-        return group.rank();
-    }
-    match node.status {
-        Status::Review => 1,
-        Status::Need => 2,
-        Status::Work => 3,
-        Status::Idle => 5,
-        Status::Done => 6,
-    }
 }
 
 /// `$org_task`: what the row is about in a few words.
@@ -83,26 +70,12 @@ pub fn task(project: &ProjectView, node: &Node) -> String {
     }
 }
 
+/// The organization tokens of a pane row. Project, group and rank come from
+/// the sidebar grouping (`hp_project`, `hp_rank`, `hp_group`); the older
+/// `project`, `thread`, `review` and `rank` names are cleared there.
 fn pane_tokens(project: &ProjectView, node: &Node) -> Vec<(String, Option<String>)> {
     let root = node.id == crate::organizations::ROOT_ID;
-    let pairs = [
-        ("project", project.slug.clone()),
-        (
-            "thread",
-            if root {
-                "coordinator".into()
-            } else {
-                node.id.clone()
-            },
-        ),
-        (
-            "rank",
-            if root {
-                "0".into()
-            } else {
-                rank(node).to_string()
-            },
-        ),
+    [
         ("depth", node.depth.to_string()),
         (
             "parent",
@@ -115,15 +88,10 @@ fn pane_tokens(project: &ProjectView, node: &Node) -> Vec<(String, Option<String
         ("role", node.role.clone()),
         ("tree-order", node.tree_order.to_string()),
         ("org_task", task(project, node)),
-    ];
-    let mut tokens: Vec<(String, Option<String>)> = pairs
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), Some(v)))
-        .collect();
-    if !root {
-        tokens.push(("review".into(), Some(node.group.clone())));
-    }
-    tokens
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), Some(v)))
+    .collect()
 }
 
 fn workspace_tokens(counts: &Counts) -> Vec<(String, Option<String>)> {
@@ -384,20 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn landing_threads_rank_between_working_and_idle() {
-        let mut p = project();
-        let rank_of = |p: &ProjectView| {
-            wanted(p)
-                .into_iter()
-                .find(|w| w.target == Target::Pane("w2:p3".into()))
-                .and_then(|w| token(&w, "rank").map(str::to_string))
-        };
-        assert_eq!(rank_of(&p).as_deref(), Some("1"));
-        p.threads[1].group = "landing".into();
-        assert_eq!(rank_of(&p).as_deref(), Some("4"));
-    }
-
-    #[test]
     fn unchanged_metadata_is_not_resent_until_half_the_ttl() {
         let runner = FakeRunner::new();
         let herdr = Herdr::new("herdr", "s.sock", &runner);
@@ -456,8 +410,9 @@ mod tests {
         let mut cache = Cache::default();
         let t0 = Instant::now();
         cache.report(&herdr, "s.sock", &wanted(&p), t0);
-        p.threads[0].status = Status::Work;
-        p.threads[0].group = "working".into();
+        // `$org_task` follows the status: a thread ready for review says so.
+        p.threads[0].status = Status::Review;
+        p.threads[0].group = "ready-for-review".into();
         assert_eq!(cache.report(&herdr, "s.sock", &wanted(&p), t0), 1);
     }
 }

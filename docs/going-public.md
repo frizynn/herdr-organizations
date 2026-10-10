@@ -8,7 +8,7 @@ Use this checklist before publishing Herdr Organizations as a public Herdr plugi
 
   ```sh
   herdr plugin uninstall herdr-projects
-  cargo build --release --locked
+  sh scripts/install.sh
   herdr plugin link .
   ```
 

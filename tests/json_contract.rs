@@ -141,7 +141,7 @@ resolved_reason = "merged"
     fixture
 }
 
-fn checkout_thread() -> Value {
+fn checkout_thread(fixture: &Fixture) -> Value {
     json!({
         "id": "t-0001",
         "title": "Checkout",
@@ -152,7 +152,7 @@ fn checkout_thread() -> Value {
         "kind": "worktree",
         "group": "ready-for-review",
         "group_label": "Ready for review",
-        "rank": 1,
+        "rank": 2,
         "note": "session unreachable",
         "agent": "codex",
         "model": "gpt-5",
@@ -189,11 +189,19 @@ fn checkout_thread() -> Value {
             "draft": false,
             "mergeable": "MERGEABLE",
             "merge_blocker": "1 check(s) have not finished"
-        }
+        },
+        "profile": "",
+        "origin": "git@github.com:owner/app.git",
+        "state_line": "",
+        "activity": "",
+        "percent": null,
+        "next": [],
+        "report": null,
+        "library": format!("{}/library/t-0001", fixture.dir())
     })
 }
 
-fn copy_fix_thread() -> Value {
+fn copy_fix_thread(fixture: &Fixture) -> Value {
     json!({
         "id": "t-0002",
         "title": "Copy fix",
@@ -229,7 +237,15 @@ fn copy_fix_thread() -> Value {
         "resolved_reason": "merged",
         "auto_fix_ci": false,
         "auto_merge": false,
-        "pr": null
+        "pr": null,
+        "profile": "",
+        "origin": "",
+        "state_line": "",
+        "activity": "",
+        "percent": null,
+        "next": [],
+        "report": null,
+        "library": format!("{}/library/t-0002", fixture.dir())
     })
 }
 
@@ -252,7 +268,7 @@ fn thread_list_json_is_the_documented_document() {
         json!({
             "schema_version": 1,
             "project": "demo",
-            "threads": [checkout_thread(), copy_fix_thread()]
+            "threads": [checkout_thread(&fixture), copy_fix_thread(&fixture)]
         })
     );
 }
@@ -260,10 +276,10 @@ fn thread_list_json_is_the_documented_document() {
 #[test]
 fn node_list_json_adds_tree_position() {
     let fixture = fixture();
-    let mut root = checkout_thread();
+    let mut root = checkout_thread(&fixture);
     root["depth"] = json!(1);
     root["tree_order"] = json!(1);
-    let mut child = copy_fix_thread();
+    let mut child = copy_fix_thread(&fixture);
     child["depth"] = json!(2);
     child["tree_order"] = json!(2);
     assert_eq!(
@@ -280,7 +296,7 @@ fn project_list_overview_and_new_share_the_project_shape() {
         json!({"schema_version": 1, "projects": [project(&fixture)]})
     );
     let mut with_threads = project(&fixture);
-    with_threads["threads"] = json!([checkout_thread(), copy_fix_thread()]);
+    with_threads["threads"] = json!([checkout_thread(&fixture), copy_fix_thread(&fixture)]);
     let expected = json!({"schema_version": 1, "projects": [with_threads]});
     assert_eq!(fixture.json(&["overview", "demo", "--json"]), expected);
     // No slug and no Herdr workspace: every project, never a picker.

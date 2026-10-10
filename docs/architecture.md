@@ -30,21 +30,18 @@ Node scopes are treated as regular directories. Symbolic links for a node scope 
 
 ## Agent profiles
 
-Each node stores the effective harness, model, reasoning effort, permission profile and raw argv components inherited from its parent. Raw argv components are inherited only while the harness stays the same. Creation can override any supported value. Repeatable `--raw-agent-arg` values remain separate argv entries. The implementation never turns profile fields into a shell command string.
+A node launches with a named profile from Herdr Projects (`[profiles.<name>]` in `config.toml`, or a Herdr agent kind as a built-in profile): `--profile`, else its parent node's, else the project default for its role, checked against that role's allow-list at creation and at every launch. The profile decides the harness. On top of it each node stores model, reasoning effort, permission profile and raw argv components inherited from its parent; the node's model and effort replace the profile's, and a node with its own permission profile gets no yolo flags. Raw argv components are inherited only while the harness stays the same. Creation can override any supported value. Repeatable `--raw-agent-arg` values remain separate argv entries. The implementation never turns profile fields into a shell command string.
 
-Codex adapter:
+Model and effort use the profile flags' own adapter (`--model`; Codex `-c model_reasoning_effort="<value>"`, Claude Code and Copilot `--effort`, pi and oh-my-pi `--thinking`). Permission adapters:
 
-- `--model <value>` maps to `--model <value>`.
-- Reasoning effort accepts `minimal`, `low`, `medium`, `high`, `xhigh` and `max`, mapped to `--config model_reasoning_effort="<value>"`.
+Codex:
 - `read-only` maps to `--sandbox read-only --ask-for-approval on-request`.
 - `workspace-write` maps to `--sandbox workspace-write --ask-for-approval on-request`.
 - `full-access` maps to `--sandbox danger-full-access --ask-for-approval never`.
 
-Claude Code adapter:
+Claude Code:
 
-- `--model <value>` maps to `--model <value>`.
 - Permission profiles `default`, `plan`, `accept-edits` and `bypass-permissions` map to Claude Code's `--permission-mode` values.
-- The adapter does not map reasoning effort. Supply a harness-specific option as a raw argv component when needed.
 
 Other harness kinds receive raw argv only. Built-in profile fields are rejected for harnesses without an adapter. The `herdr agent start` boundary receives the harness kind and exact argv vector. Project-wide `thread_agent_args` remain appended after profile arguments for compatibility, but conflicting permission, sandbox and approval flags are rejected in raw and project safety args when a permission profile is selected. This checks argv values only. It does not provide OS isolation or restrict an agent's shell access.
 
@@ -67,7 +64,8 @@ Keybindings and view settings live in `~/.config/herdr-projects/tui.toml`. Comma
 ## Compatibility and intentional limits
 
 - `~/.herdr-projects/`, `~/.config/herdr-projects/` and `HERDR_PROJECTS_ROOT` remain unchanged.
-- `herdr-organizations` is the primary binary. Cargo also builds `herdr-projects` as a compatibility name.
+- `herdr-organizations` is the primary binary. Cargo also builds `herdr-projects` as a compatibility name; it is the same program. Paths written into hooks, the tab bar, `AGENTS.md` and the `~/.local/bin` link name `herdr-projects`, so entries written by Herdr Projects keep working and are recognized as this plugin's.
+- Herdr Projects 0.2.34 features are kept as they are: the sidebar grouping (`hp_*` tokens, written by `configure`), the Projects popup (`projects` pane), progress hooks, profiles, tasks, cleanup on resolve, rename, update. Where both changed the same thing the upstream mechanism wins and the organization feature sits on top: brief delivery is upstream's `brief::deliver`, the nudge is upstream's `[hp inbox]` line, notifications are upstream's `Notifier` filtered by the popup's notify setting, and organization tokens no longer use the `project`/`thread`/`review`/`rank` names that upstream clears.
 - `thread start` remains a direct worker-under-root alias. Node lifecycle commands provide the hierarchy-aware names.
 - Existing ticker cadence, inbox format, reports, routines, worktree behavior and SSH transport remain in place.
 - Remote workers remain supported. Remote coordinators with child-spawn permission are refused until a remote CLI bridge exists.

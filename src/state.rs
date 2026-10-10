@@ -440,7 +440,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
     let root_agent = live.and_then(|l| {
         l.agents
             .iter()
-            .find(|a| crate::coordinator::agent_matches(&record, a))
+            .find(|a| a.pane_id == record.pane_id && crate::coordinator::is_coordinator(&record, a))
     });
     let mut root = Node {
         id: ROOT_ID.into(),
@@ -448,7 +448,11 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         role: "coordinator".into(),
         coordinator: ROOT_ID.into(),
         parent: String::new(),
-        harness: settings.coordinator_agent.clone(),
+        harness: if record.agent.is_empty() {
+            settings.coordinator_profile.clone()
+        } else {
+            record.agent.clone()
+        },
         workspace_id: record.workspace_id.clone(),
         tab_id: record.tab_id.clone(),
         pane_id: record.pane_id.clone(),
@@ -470,13 +474,12 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         root.tab = live.tab_label(&root.tab_id);
     }
 
-    let pending = record.prime_pending
-        || entries.iter().any(|e| {
-            matches!(
-                e.thread.status,
-                thread::Status::Open | thread::Status::Starting
-            ) && (e.thread.prompt_pending || e.thread.status == thread::Status::Starting)
-        });
+    let pending = entries.iter().any(|e| {
+        matches!(
+            e.thread.status,
+            thread::Status::Open | thread::Status::Starting
+        ) && (e.thread.prompt_pending || e.thread.status == thread::Status::Starting)
+    });
     let mut coordinators = vec![root];
     let mut workers = Vec::new();
     let mut recheck_in: Option<u64> = None;
@@ -596,7 +599,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
             .unwrap_or_default(),
         status: project.status().to_string(),
         socket: record.socket.clone(),
-        thread_harness: settings.thread_agent.clone(),
+        thread_harness: settings.thread_profile.clone(),
         coordinators,
         threads: workers,
         counts,

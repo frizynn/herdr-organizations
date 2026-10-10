@@ -302,6 +302,13 @@ pub fn validate_machine_spawn(role: NodeRole, can_spawn: bool, machine: &str) ->
     Ok(())
 }
 
+/// A coordinator may spawn unless told otherwise; a worker never may.
+pub fn requested_can_spawn(request: &NodeRequest) -> bool {
+    request
+        .can_spawn
+        .unwrap_or(request.role == NodeRole::Coordinator)
+}
+
 fn prepare_node_from(
     project: &Project,
     records: &[Thread],
@@ -313,9 +320,7 @@ fn prepare_node_from(
         &request.parent_id
     };
     validate_parent(records, parent_id)?;
-    let can_spawn = request
-        .can_spawn
-        .unwrap_or(request.role == NodeRole::Coordinator);
+    let can_spawn = requested_can_spawn(request);
     if request.role == NodeRole::Worker && can_spawn {
         bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
     }
@@ -356,15 +361,31 @@ fn validate_parent(records: &[Thread], parent_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The project default for a direct child of root. The harness of a node
+/// started through `thread start` or `node start` is its resolved profile's
+/// (`NodeRequest::profile.harness`); this is only the fallback, a profile name
+/// that is also a Herdr kind.
 fn root_profile(project: &Project, role: NodeRole) -> Result<AgentProfile> {
     let (settings, _) = project.read_project_md()?;
     Ok(AgentProfile {
         harness: match role {
-            NodeRole::Worker => settings.thread_agent,
-            NodeRole::Coordinator => settings.coordinator_agent,
+            NodeRole::Worker => settings.thread_profile,
+            NodeRole::Coordinator => settings.coordinator_profile,
         },
         ..AgentProfile::default()
     })
+}
+
+/// The profile a child of `parent_id` inherits: the parent node's profile
+/// (its harness for a node started before profiles), `None` under root.
+pub fn parent_profile(project: &Project, parent_id: &str) -> Option<String> {
+    if parent_id.is_empty() || parent_id == ROOT_ID {
+        return None;
+    }
+    let parent = thread::load(project, parent_id).ok()?;
+    [parent.profile, parent.agent]
+        .into_iter()
+        .find(|name| !name.is_empty())
 }
 
 fn profile_for_record(
@@ -830,7 +851,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
     } else if record.role == NodeRole::Coordinator && record.can_spawn {
         text.push_str(&format!(
-            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. Optional profile flags are `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. Omitted profile fields inherit the parent profile at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
+            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. `--profile <name>` picks one of the profiles the project allows; without it the child gets your profile. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags; omitted ones inherit yours at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
             record.id, record.id
         ));
     } else if record.role == NodeRole::Coordinator {

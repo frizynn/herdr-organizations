@@ -67,6 +67,29 @@ impl Env {
     }
 }
 
+/// This binary's own path with symbolic links resolved, so a path written into
+/// hooks, AGENTS.md or the tab bar survives `~/.local/bin` links changing.
+///
+/// `herdr-organizations` and `herdr-projects` are the same program. Run as
+/// `herdr-projects` next to a built `herdr-organizations`, this names the
+/// primary one, so hooks, the tab bar and AGENTS.md get one path whichever
+/// name ran `configure`, `open` or `doctor`.
+pub fn binary() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("could not find this binary's own path")?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let primary = exe.with_file_name(crate::command_link::PRIMARY);
+    if exe.file_name() == Some(std::ffi::OsStr::new(crate::command_link::NAME)) && primary.is_file()
+    {
+        return Ok(std::fs::canonicalize(&primary).unwrap_or(primary));
+    }
+    Ok(exe)
+}
+
+/// Whether a command line runs this plugin's binary under either name.
+pub fn names_our_binary(command: &str) -> bool {
+    command.contains(crate::command_link::NAME) || command.contains(crate::command_link::PRIMARY)
+}
+
 /// What every subcommand works from: the environment, the resolved root and
 /// config directory, and the runner all external commands go through.
 pub struct Ctx<'a> {

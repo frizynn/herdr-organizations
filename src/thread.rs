@@ -35,6 +35,9 @@ pub enum Kind {
     #[default]
     Worktree,
     Tab,
+    /// A tab in the project workspace whose working directory is the repo's
+    /// main checkout, asked for explicitly with `thread start --kind checkout`.
+    Checkout,
     Adopted,
 }
 
@@ -55,8 +58,28 @@ impl NodeRole {
     }
 }
 
+/// The allow-list a node's profile is checked against: a coordinator node's
+/// is the coordinators' list, a worker's the threads'.
+pub fn profile_role(role: NodeRole) -> crate::profiles::Role {
+    match role {
+        NodeRole::Worker => crate::profiles::Role::Thread,
+        NodeRole::Coordinator => crate::profiles::Role::Coordinator,
+    }
+}
+
 fn default_parent_id() -> String {
     "root".into()
+}
+
+impl Kind {
+    pub fn parse(text: &str) -> Result<Kind> {
+        match text {
+            "worktree" => Ok(Kind::Worktree),
+            "tab" => Ok(Kind::Tab),
+            "checkout" => Ok(Kind::Checkout),
+            other => bail!("`{other}` is not a thread kind (worktree, tab or checkout)"),
+        }
+    }
 }
 
 /// `threads/<id>.toml`. An empty string means "not set". Paths are stored as
@@ -75,6 +98,21 @@ pub struct Thread {
     pub error: String,
     pub prompt_pending: bool,
     pub launch_attempts: u32,
+    /// When the ticker last ran `agent start` for this thread.
+    pub launched_at: String,
+    /// Times the brief was typed or its line submitted with Enter. Above zero,
+    /// a copy may sit in the input box, so the screen is read before any retry.
+    pub brief_attempts: u32,
+    /// A sender is at work on the brief since this time (a lease: a sender
+    /// that died leaves it to expire).
+    pub brief_claimed: String,
+    /// The agent's state sequence and screen when first seen ready, and when:
+    /// the brief waits until both stayed the same for a moment.
+    pub brief_seen: String,
+    pub brief_seen_at: String,
+    /// The brief did not get through after its tries: the ticker stopped and
+    /// an inbox item says so; `thread brief` still sends it.
+    pub brief_stuck: bool,
     pub kind: Kind,
     pub repo: String,
     pub origin: String,
@@ -84,13 +122,30 @@ pub struct Thread {
     pub worktree_path: String,
     pub thread_dir: String,
     pub workspace_id: String,
+    /// The repository's primary Space herdr grouped this worktree under
+    /// (made or reused by `worktree create`); closed once nothing uses it.
+    pub repo_workspace: String,
     pub tab_id: String,
     pub pane_id: String,
+    /// The Herdr agent kind: the profile's harness.
     pub agent: String,
     pub model: String,
     pub reasoning_effort: String,
     pub permission_profile: String,
     pub raw_agent_args: Vec<String>,
+    /// The profile the ticker launches the agent with, checked against the
+    /// project's allow-list again at every launch. Empty on a thread started
+    /// before profiles: it launches as the built-in `agent` plus `agent_args`.
+    pub profile: String,
+    /// Before profiles: a model flag for the agent CLI (checked again by the
+    /// ticker). New threads leave it empty.
+    pub agent_args: Vec<String>,
+    /// A remote thread's profile as its own machine defines it: looked up
+    /// there at start or restart (`profile resolve`), launched with
+    /// `agent` plus these arguments. The name is still checked against this
+    /// project's allow-list at every launch.
+    pub remote_profile: bool,
+    pub profile_args: Vec<String>,
     pub agent_name: String,
     pub cwd: String,
     pub created: String,
@@ -112,6 +167,13 @@ pub struct Thread {
     /// Opt-in: the ticker merges the pull request once it passes the same
     /// guard as `thread merge`. Set with `thread set`; nothing sets it on its own.
     pub auto_merge: bool,
+    /// The sidebar's line 3 as the ticker last computed it (`needs you · ~55%`).
+    pub state_line: String,
+    /// Resolved with `--keep-worktree`: `sweep` leaves the worktree alone.
+    pub kept_worktree: bool,
+    /// The agent's own last activity and percent (local threads).
+    pub activity: String,
+    pub percent: Option<u8>,
 }
 
 impl Thread {
@@ -239,7 +301,77 @@ pub fn branch_name(slug: &str, id: &str, title: &str) -> String {
 }
 
 pub fn agent_name(slug: &str, id: &str) -> String {
-    format!("hp-{slug}-{id}")
+    crate::names::thread(slug, id)
+}
+
+/// Appends a forwarded prompt to `threads/<id>.task.md` under `## Follow-ups`
+/// with a timestamp, so a restarted thread re-reads it with its task.
+pub fn append_follow_up(project: &Project, id: &str, text: &str) -> Result<()> {
+    let _lock = project.lock()?;
+    let path = task_path(project, id);
+    let mut task = std::fs::read_to_string(&path).unwrap_or_default();
+    if !task.ends_with('\n') && !task.is_empty() {
+        task.push('\n');
+    }
+    if !task.lines().any(|l| l.trim() == "## Follow-ups") {
+        task.push_str("\n## Follow-ups\n");
+    }
+    task.push_str(&format!("\n### {}\n\n{}\n", project::now(), text.trim()));
+    write_atomic(&path, task.as_bytes())
+}
+
+/// The lines of a report's `## Next` section: one recommended action per
+/// line, list markers removed, empty lines dropped.
+pub fn next_lines(report: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for line in report.lines() {
+        if line.starts_with("## ") {
+            inside = line.trim() == "## Next";
+            continue;
+        }
+        if !inside || line.starts_with('#') {
+            if line.starts_with('#') {
+                inside = false;
+            }
+            continue;
+        }
+        let text = line.trim();
+        let text = text
+            .strip_prefix("- ")
+            .or_else(|| text.strip_prefix("* "))
+            .or_else(|| {
+                text.split_once(". ")
+                    .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
+                    .map(|(_, rest)| rest)
+            })
+            .unwrap_or(text)
+            .trim();
+        if !text.is_empty() {
+            lines.push(text.to_string());
+        }
+    }
+    lines
+}
+
+/// Lines the coordinator added to a thread's Next list (`threads/<id>.next.md`).
+pub fn extra_next_path(project: &Project, id: &str) -> PathBuf {
+    threads_dir(project).join(format!("{id}.next.md"))
+}
+
+/// The thread's Next list: the report's `## Next` lines, then the coordinator's.
+pub fn all_next(project: &Project, id: &str) -> Vec<String> {
+    let report = std::fs::read_to_string(home_report_path(project, id)).unwrap_or_default();
+    let mut lines = next_lines(&report);
+    let extra = std::fs::read_to_string(extra_next_path(project, id)).unwrap_or_default();
+    lines.extend(
+        extra
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| l.trim_start_matches("- ").to_string()),
+    );
+    lines
 }
 
 /// `<agent working directory>/.herdr-project/<slug>-<id>`, for every kind.
@@ -256,6 +388,13 @@ pub fn launch_prompt(slug: &str, id: &str) -> String {
 // ---------------------------------------------------------------- briefs
 
 pub struct BriefInput<'a> {
+    pub project_name: &'a str,
+    pub slug: &'a str,
+    pub goal: &'a str,
+    pub repos: &'a [project::Repo],
+    /// The project's `uploads/` folder on the home machine.
+    pub uploads_path: &'a str,
+    pub remote: bool,
     pub instructions: &'a str,
     pub memory_index: &'a str,
     pub node_protocol: &'a str,
@@ -265,10 +404,61 @@ pub struct BriefInput<'a> {
     pub restart: bool,
     pub report_path: &'a str,
     pub library_path: &'a str,
+    /// `<binary> --root <root>` for `report`; empty for a remote thread,
+    /// whose machine has its own binary (or none).
+    pub report_prefix: &'a str,
+}
+
+/// The header block every brief opens with: what the worker acts on, never
+/// the coordinator's or the ticker's settings.
+fn brief_header(input: &BriefInput) -> String {
+    let mut out = String::from("# Project\n\n");
+    out.push_str(&format!(
+        "- Project: {} (`{}`)\n",
+        input.project_name, input.slug
+    ));
+    out.push_str(&format!(
+        "- Goal: {}\n",
+        if input.goal.trim().is_empty() {
+            "(none set)"
+        } else {
+            input.goal.trim()
+        }
+    ));
+    if input.repos.is_empty() {
+        out.push_str("- Repos: (none)\n");
+    } else {
+        out.push_str("- Repos:\n");
+        for repo in input.repos {
+            match &repo.machine {
+                Some(machine) => {
+                    out.push_str(&format!("  - {} on machine `{machine}`\n", repo.path))
+                }
+                None => out.push_str(&format!("  - {} (local)\n", repo.path)),
+            }
+        }
+    }
+    let uploads_note = if input.remote {
+        " (on the home machine; not copied to yours)"
+    } else {
+        ""
+    };
+    out.push_str(&format!(
+        "- Uploads, files from the user: `{}`{uploads_note}\n",
+        input.uploads_path
+    ));
+    out.push_str(&format!(
+        "- Library, files for the user: `{}`\n",
+        input.library_path
+    ));
+    out.push_str(&format!("- Report: `{}`\n", input.report_path));
+    out
 }
 
 pub fn compose_brief(input: &BriefInput) -> String {
-    let mut brief = String::from(include_str!("../skill/THREAD.md").trim_end());
+    let mut brief = brief_header(input);
+    brief.push('\n');
+    brief.push_str(include_str!("../skill/THREAD.md").trim_end());
     brief.push_str("\n\n");
     if input.restart {
         brief.push_str(
@@ -308,11 +498,18 @@ pub fn compose_brief(input: &BriefInput) -> String {
     brief.push_str(input.node_protocol.trim());
     brief.push('\n');
 
+    brief.push_str("\n# Progress\n\n");
+    if input.report_prefix.is_empty() {
+        brief.push_str("Report progress with `herdr-projects report --percent N --activity '...'` if that command exists on this machine (use `--activity 'Waiting for you'` before asking the user something, and `--percent 100` when done); otherwise skip it.\n");
+    } else {
+        brief.push_str(&crate::progress::guidance(input.report_prefix, None));
+        brief.push('\n');
+    }
     brief.push_str("\n# Task\n\n");
     brief.push_str(input.task.trim());
     brief.push_str(&format!(
-        "\n\n# Paths\n\n- Report: `{}`\n- Library folder for files meant for the user: `{}`\n",
-        input.report_path, input.library_path
+        "\n\n# Paths\n\n- Report: `{}`\n- Library folder for files meant for the user: `{}`\n- Uploads from the user: `{}`\n",
+        input.report_path, input.library_path, input.uploads_path
     ));
     brief
 }
@@ -330,9 +527,24 @@ pub fn brief_for_with_prefix(
     restart: bool,
     command_prefix: &str,
 ) -> Result<String> {
+    let (settings, _) = project.read_project_md()?;
+    let project_name = project::display_name(&settings.name, &project.slug);
+    let uploads = project.dir().join("uploads").to_string_lossy().into_owned();
+    // A remote thread's machine has its own binary (or none) for `report`.
+    let report_prefix = if thread.is_remote() {
+        ""
+    } else {
+        command_prefix
+    };
     let context = organizations::scoped_context(project, thread)?;
     let protocol = organizations::node_protocol(thread, command_prefix, &project.slug);
     Ok(compose_brief(&BriefInput {
+        project_name: &project_name,
+        slug: &project.slug,
+        goal: &settings.goal,
+        repos: &settings.repos,
+        uploads_path: &uploads,
+        remote: thread.is_remote(),
         instructions: &context.instructions,
         memory_index: &context.memory_index,
         node_protocol: &protocol,
@@ -341,6 +553,7 @@ pub fn brief_for_with_prefix(
         restart,
         report_path: &thread.report_path(),
         library_path: &thread.library_path(),
+        report_prefix,
     }))
 }
 
@@ -361,10 +574,10 @@ impl Group {
     /// separate from the precedence in `group()`.
     pub fn rank(self) -> u8 {
         match self {
-            Group::ReadyForReview => 1,
-            Group::WaitingOnYou => 2,
-            Group::Working => 3,
-            Group::Landing => 4,
+            Group::WaitingOnYou => 1,
+            Group::ReadyForReview => 2,
+            Group::Landing => 3,
+            Group::Working => 4,
             Group::Idle => 5,
             Group::Resolved => 6,
         }
@@ -406,11 +619,12 @@ impl Group {
         .find(|g| g.token() == token)
     }
 
+    /// Needs-you first: the sidebar sort, the popup and the overview agree.
     pub const DISPLAY_ORDER: [Group; 6] = [
-        Group::ReadyForReview,
         Group::WaitingOnYou,
-        Group::Working,
+        Group::ReadyForReview,
         Group::Landing,
+        Group::Working,
         Group::Idle,
         Group::Resolved,
     ];
@@ -424,6 +638,26 @@ pub struct Live {
     pub agent_state: Option<String>,
     /// How long the agent has been in that state.
     pub state_secs: i64,
+    /// The agent's own report (built-in progress), for local panes only.
+    pub self_report: Option<crate::progress::Record>,
+    /// Seconds since that report (0 without one).
+    pub report_age_secs: i64,
+}
+
+impl Live {
+    /// The agent said it is waiting for the user and has not started working since.
+    pub fn self_waiting(&self) -> bool {
+        self.self_report.as_ref().is_some_and(|r| r.waiting())
+            && self.agent_state.as_deref() != Some("working")
+    }
+
+    /// The agent reported progress under 100% within the activity TTL.
+    pub fn self_working(&self) -> bool {
+        self.self_report
+            .as_ref()
+            .is_some_and(|r| !r.done() && !r.waiting())
+            && self.report_age_secs < (crate::progress::ACTIVITY_TTL_MS / 1000) as i64
+    }
 }
 
 pub fn seconds_since(timestamp: &str, now: jiff::Timestamp) -> i64 {
@@ -450,27 +684,38 @@ pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
             Group::WaitingOnYou
         };
     }
-    // 3
+    // 3: a failed start, a dead pane, or a launch stuck on a dialog.
     let stuck_launch = thread.prompt_pending
-        && state.is_some_and(|s| !ready_state(s))
-        && live.state_secs >= NOT_READY_SECS;
-    let pane_gone_without_report = !live.pane_exists && !has_report;
-    let blocked_long = state == Some("blocked") && live.state_secs >= BLOCKED_DEBOUNCE_SECS;
-    if thread.status == Status::Failed || stuck_launch || pane_gone_without_report || blocked_long {
+        && (thread.brief_stuck
+            || (state.is_some_and(|s| !ready_state(s)) && live.state_secs >= NOT_READY_SECS));
+    // A pane closed after the thread wrote its report is finished work, not
+    // a thread that needs the user.
+    if thread.status == Status::Failed || (!live.pane_exists && !has_report) || stuck_launch {
         return Group::WaitingOnYou;
     }
-    // 4
-    if matches!(state, Some("working") | Some("blocked")) || thread.prompt_pending {
-        return Group::Working;
+    // 4: the harness shows a question or permission prompt, or the agent
+    // said it is waiting for the user.
+    let blocked_long = state == Some("blocked") && live.state_secs >= BLOCKED_DEBOUNCE_SECS;
+    if blocked_long || live.self_waiting() {
+        return Group::WaitingOnYou;
     }
-    // 5
+    // 5: pull request and report facts. The harness showing `working` still
+    // wins over an unread report: a report written mid-run is not a result.
     let pr_open = thread.pr_state.eq_ignore_ascii_case("open");
     if pr_open && thread.pr_review.eq_ignore_ascii_case("approved") {
         return Group::Landing;
     }
-    // 6
-    if has_report && (pr_open || thread.report_hash != thread.acked_report_hash) {
+    let new_report = has_report && thread.report_hash != thread.acked_report_hash;
+    if (new_report || (has_report && pr_open)) && !thread.prompt_pending && state != Some("working")
+    {
         return Group::ReadyForReview;
+    }
+    // 6: working by the harness or by its own report.
+    if matches!(state, Some("working") | Some("blocked"))
+        || thread.prompt_pending
+        || live.self_working()
+    {
+        return Group::Working;
     }
     // 7
     Group::Idle
@@ -480,22 +725,34 @@ pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
 /// match the record, and (for threads the binary started) the agent name.
 /// Ids are compared only among panes listed through the project's own socket.
 pub fn pane_matches(thread: &Thread, pane: &Pane) -> bool {
-    pane.pane_id == thread.pane_id
-        && pane.workspace_id == thread.workspace_id
-        && pane.tab_id == thread.tab_id
-        && pane.cwd == thread.cwd
+    pane.pane_id == thread.pane_id && pane.cwd == thread.cwd
 }
 
+/// A thread's agent: same pane id and working directory, and (for threads the
+/// binary started) the same agent kind, and either our name or no name.
+/// Herdr's native resume after a server restart starts the agent again in the
+/// restored pane without a name; that is still ours and gets renamed. A pane
+/// with our ids holding another kind, or another name, is someone else's.
 pub fn agent_matches(thread: &Thread, agent: &Agent) -> bool {
-    let ids = agent.pane_id == thread.pane_id
-        && agent.workspace_id == thread.workspace_id
-        && agent.tab_id == thread.tab_id
-        && agent.cwd == thread.cwd;
+    let ids = agent.pane_id == thread.pane_id && agent.cwd == thread.cwd;
     match thread.kind {
-        // Not started by the binary: whatever name herdr reported at adoption.
+        // Not started by the binary: whatever herdr reported at adoption.
         Kind::Adopted => ids,
-        _ => ids && agent.name == thread.agent_name,
+        _ => {
+            ids && (thread.agent.is_empty()
+                || agent.agent.is_empty()
+                || agent.agent == thread.agent)
+                && (agent.name.is_empty() || agent.name == thread.agent_name)
+        }
     }
+}
+
+/// Our agent, found by `agent_matches`, running without a name: re-apply it.
+pub fn needs_rename(thread: &Thread, agent: &Agent) -> bool {
+    thread.kind != Kind::Adopted
+        && !thread.agent_name.is_empty()
+        && agent.name.is_empty()
+        && agent_matches(thread, agent)
 }
 
 /// Live state from one `agent list` and one `pane list`. `recorded` supplies
@@ -517,7 +774,42 @@ pub fn live_state(thread: &Thread, agents: &[Agent], panes: &[Pane], now: jiff::
         pane_exists: pane_exists && !foreign,
         agent_state,
         state_secs,
+        self_report: None,
+        report_age_secs: 0,
     }
+}
+
+/// `live_state` plus the agent's own report from `<root>/.progress/`, matched
+/// by pane id and terminal id. Remote threads have none (the record is written
+/// on the machine where the agent runs).
+pub fn live_with_report(
+    thread: &Thread,
+    agents: &[Agent],
+    panes: &[Pane],
+    now: jiff::Timestamp,
+    root: &Path,
+    socket: &str,
+) -> Live {
+    let mut live = live_state(thread, agents, panes, now);
+    if thread.is_remote() || !live.pane_exists {
+        return live;
+    }
+    let terminal = agents
+        .iter()
+        .find(|a| agent_matches(thread, a))
+        .map(|a| a.terminal_id.clone())
+        .or_else(|| {
+            panes
+                .iter()
+                .find(|p| pane_matches(thread, p))
+                .map(|p| p.terminal_id.clone())
+        })
+        .unwrap_or_default();
+    if let Some(record) = crate::progress::self_report(root, socket, &thread.pane_id, &terminal) {
+        live.report_age_secs = now.as_second() - record.reported_at;
+        live.self_report = Some(record);
+    }
+    live
 }
 
 // ---------------------------------------------------------------- copy home
@@ -874,6 +1166,7 @@ mod tests {
             pane_exists: true,
             agent_state: state.map(str::to_string),
             state_secs: secs,
+            ..Live::default()
         }
     }
 
@@ -934,6 +1227,7 @@ mod tests {
             pane_exists: false,
             agent_state: None,
             state_secs: 0,
+            ..Live::default()
         };
         assert_eq!(group(&open_thread(), &gone, now()), Group::WaitingOnYou);
 
@@ -1040,11 +1334,10 @@ mod tests {
     }
 
     #[test]
-    fn pane_gone_with_a_report_keeps_its_place() {
+    fn a_closed_pane_needs_you_only_without_a_report() {
         let gone = Live {
             pane_exists: false,
-            agent_state: None,
-            state_secs: 0,
+            ..Live::default()
         };
         let t = Thread {
             report_hash: "h".into(),
@@ -1056,6 +1349,78 @@ mod tests {
             ..t
         };
         assert_eq!(group(&acked, &gone, now()), Group::Idle);
+        assert_eq!(group(&open_thread(), &gone, now()), Group::WaitingOnYou);
+    }
+
+    fn reported(activity: &str, percent: Option<u8>, age: i64, state: &str) -> Live {
+        let record = crate::progress::Record {
+            activity: activity.into(),
+            percent,
+            reported_at: 1,
+            ..Default::default()
+        };
+        Live {
+            report_age_secs: age,
+            self_report: Some(record),
+            ..live(Some(state), 0)
+        }
+    }
+
+    #[test]
+    fn self_reports_feed_the_group() {
+        // Asked a question but the harness reads idle: needs you.
+        assert_eq!(
+            group(
+                &open_thread(),
+                &reported("Waiting for you", Some(40), 5, "idle"),
+                now()
+            ),
+            Group::WaitingOnYou
+        );
+        // Waiting beats a new report, but not a harness that is working again.
+        let t = Thread {
+            report_hash: "h".into(),
+            ..open_thread()
+        };
+        assert_eq!(
+            group(&t, &reported("Waiting for you", None, 5, "idle"), now()),
+            Group::WaitingOnYou
+        );
+        assert_eq!(
+            group(&t, &reported("Waiting for you", None, 5, "working"), now()),
+            Group::Working
+        );
+        // Under 100% and fresh: working, even between tool calls.
+        assert_eq!(
+            group(
+                &open_thread(),
+                &reported("Testing changes", Some(55), 30, "idle"),
+                now()
+            ),
+            Group::Working
+        );
+        // Stale after five minutes, and 100% is done.
+        assert_eq!(
+            group(
+                &open_thread(),
+                &reported("Testing changes", Some(55), 400, "idle"),
+                now()
+            ),
+            Group::Idle
+        );
+        assert_eq!(
+            group(
+                &open_thread(),
+                &reported("Done", Some(100), 5, "idle"),
+                now()
+            ),
+            Group::Idle
+        );
+        // A new report beats self-reported progress.
+        assert_eq!(
+            group(&t, &reported("Polishing", Some(90), 5, "idle"), now()),
+            Group::ReadyForReview
+        );
     }
 
     #[test]
@@ -1086,6 +1451,7 @@ mod tests {
             tab_id: "w2:t1".into(),
             workspace_id: "w2".into(),
             agent_name: "hp-demo-t-0001".into(),
+            agent: "claude".into(),
             cwd: "/wt".into(),
             last_state: "idle".into(),
             last_state_change: ago(45),
@@ -1103,6 +1469,29 @@ mod tests {
         let state = live_state(&t, &[agent("other", "/wt")], &[], now());
         assert!(!state.pane_exists);
         assert_eq!(state.agent_state, None);
+        // Another kind in our pane is not ours either.
+        let codex = Agent {
+            agent: "codex".into(),
+            ..agent("", "/wt")
+        };
+        assert!(!agent_matches(&t, &codex));
+    }
+
+    #[test]
+    fn a_natively_resumed_unnamed_agent_is_ours_and_gets_renamed() {
+        // After a server restart the pane id and cwd are the same, the tab may
+        // have moved, and the resumed agent has no name.
+        let t = placed_thread(Kind::Worktree);
+        let resumed = Agent {
+            tab_id: "w2:t9".into(),
+            workspace_id: "w2".into(),
+            agent: "claude".into(),
+            ..agent("", "/wt")
+        };
+        assert!(agent_matches(&t, &resumed));
+        assert!(needs_rename(&t, &resumed));
+        assert!(live_state(&t, &[resumed], &[], now()).pane_exists);
+        assert!(!needs_rename(&t, &agent("hp-demo-t-0001", "/wt")));
     }
 
     #[test]
@@ -1192,7 +1581,23 @@ mod tests {
             ("b.md".to_string(), "x".repeat(MEMORY_CAP_CHARS)),
             ("c.md".to_string(), "gamma fact".to_string()),
         ];
-        let brief = compose_brief(&BriefInput {
+        let repos = vec![
+            project::Repo {
+                path: "/srv/app".into(),
+                machine: Some("box".into()),
+            },
+            project::Repo {
+                path: "/home/me/lib".into(),
+                machine: None,
+            },
+        ];
+        let input = BriefInput {
+            project_name: "Demo",
+            slug: "demo",
+            goal: "Ship it",
+            repos: &repos,
+            uploads_path: "/root/demo/uploads",
+            remote: false,
             instructions: "Always run the tests.",
             memory_index: "# Memory\n- a\n- b\n- c",
             node_protocol: "Node `t-0001`, worker.",
@@ -1201,18 +1606,25 @@ mod tests {
             restart: true,
             report_path: "/wt/.herdr-project/demo-t-0001/report.md",
             library_path: "/wt/.herdr-project/demo-t-0001/library",
-        });
+            report_prefix: "/bin/hp --root /r",
+        };
+        let brief = compose_brief(&input);
         let pos = |needle: &str| {
             brief
                 .find(needle)
                 .unwrap_or_else(|| panic!("missing {needle}"))
         };
+        // The header comes first: name, goal, repos with machines, uploads, library, report.
+        assert!(brief.starts_with("# Project\n\n- Project: Demo (`demo`)\n- Goal: Ship it\n"));
+        assert!(pos("/srv/app on machine `box`") < pos("/home/me/lib (local)"));
+        assert!(pos("Uploads, files from the user: `/root/demo/uploads`") < pos("# Thread brief"));
         assert!(pos("# Thread brief") < pos("previous attempt"));
         assert!(pos("previous attempt") < pos("Always run the tests."));
         assert!(pos("Always run the tests.") < pos("# Memory"));
         assert!(pos("# Memory") < pos("alpha fact"));
-        assert!(pos("alpha fact") < pos("Do the thing."));
-        assert!(pos("Do the thing.") < pos("/wt/.herdr-project/demo-t-0001/report.md"));
+        assert!(pos("alpha fact") < pos("# Progress"));
+        assert!(pos("/bin/hp --root /r report --percent 25") < pos("Do the thing."));
+        assert!(pos("Do the thing.") < pos("# Paths"));
         assert!(brief.contains("gamma fact"));
         assert!(
             brief.contains(
@@ -1220,8 +1632,21 @@ mod tests {
             )
         );
         assert!(!brief.contains(&"x".repeat(100)));
+        // No operational settings reach a thread.
+        for word in [
+            "max_parallel_threads",
+            "auto_resolve_days",
+            "nudge",
+            "coordinator_agent",
+            "thread_agent",
+        ] {
+            assert!(!brief.contains(word), "{word}");
+        }
 
         let fresh = compose_brief(&BriefInput {
+            goal: "",
+            repos: &[],
+            remote: true,
             instructions: "",
             memory_index: "",
             node_protocol: "node",
@@ -1230,8 +1655,57 @@ mod tests {
             restart: false,
             report_path: "r",
             library_path: "l",
+            report_prefix: "",
+            ..input
         });
         assert!(!fresh.contains("previous attempt"));
+        assert!(fresh.contains("- Goal: (none set)\n- Repos: (none)\n"));
+        assert!(fresh.contains("on the home machine; not copied"));
+    }
+
+    #[test]
+    fn next_lines_come_from_the_next_section_only() {
+        let report = "PR: https://github.com/o/r/pull/1\n## Report\n- not this\n## Next\n- Merge the PR\n* Fix CI\n3. Confirm assumption X\n\n## Remember\n- nor this\n";
+        assert_eq!(
+            next_lines(report),
+            ["Merge the PR", "Fix CI", "Confirm assumption X"]
+        );
+        assert!(next_lines("## Report\nnothing\n").is_empty());
+        assert!(next_lines("## Next\n").is_empty());
+    }
+
+    #[test]
+    fn follow_ups_are_appended_to_the_task_file_with_a_timestamp() {
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let t = allocate(&project, |_| {}).unwrap();
+        std::fs::write(task_path(&project, &t.id), "The task.").unwrap();
+        append_follow_up(&project, &t.id, "Also do Y.\n").unwrap();
+        append_follow_up(&project, &t.id, "And Z.").unwrap();
+        let text = std::fs::read_to_string(task_path(&project, &t.id)).unwrap();
+        assert!(
+            text.starts_with("The task.\n\n## Follow-ups\n\n### 20"),
+            "{text}"
+        );
+        assert_eq!(text.matches("## Follow-ups").count(), 1);
+        assert_eq!(text.matches("\n### ").count(), 2);
+        assert!(text.ends_with("And Z.\n"));
+
+        // The coordinator's extra Next lines come after the report's.
+        std::fs::write(
+            home_report_path(&project, &t.id),
+            "## Next\n- From the report\n",
+        )
+        .unwrap();
+        std::fs::write(
+            extra_next_path(&project, &t.id),
+            "- Added by the coordinator\n",
+        )
+        .unwrap();
+        assert_eq!(
+            all_next(&project, &t.id),
+            ["From the report", "Added by the coordinator"]
+        );
     }
 
     #[test]
@@ -1244,6 +1718,12 @@ mod tests {
             ),
         ];
         let brief = compose_brief(&BriefInput {
+            project_name: "Demo",
+            slug: "demo",
+            goal: "",
+            repos: &[],
+            uploads_path: "uploads",
+            remote: false,
             instructions: "",
             memory_index: "",
             node_protocol: "node",
@@ -1252,6 +1732,7 @@ mod tests {
             restart: false,
             report_path: "report",
             library_path: "library",
+            report_prefix: "",
         });
         assert!(brief.contains("## memory/root.md"));
         assert!(brief.contains("## nodes/t-0001/memory/area.md"));

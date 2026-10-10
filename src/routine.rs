@@ -90,12 +90,81 @@ pub fn is_due(schedule: &Schedule, last_run: jiff::Timestamp, now: &jiff::Zoned)
     }
 }
 
+/// When a routine is next due: the interval after its last run, or the first
+/// `HH:MM` after it. With no last run yet, the ticker's first look only
+/// records one, so the next run is a schedule from now.
+pub fn next_run(
+    schedule: &Schedule,
+    last_run: Option<jiff::Timestamp>,
+    now: &jiff::Zoned,
+) -> Option<jiff::Timestamp> {
+    let last = last_run.unwrap_or(now.timestamp());
+    match schedule {
+        Schedule::Every(seconds) => last
+            .checked_add(jiff::SignedDuration::from_secs(*seconds))
+            .ok(),
+        Schedule::Daily(hour, minute) => {
+            let at = last
+                .to_zoned(now.time_zone().clone())
+                .with()
+                .hour(*hour)
+                .minute(*minute)
+                .second(0)
+                .subsec_nanosecond(0)
+                .build()
+                .ok()?;
+            let at = if at.timestamp() > last {
+                at
+            } else {
+                at.tomorrow().ok()?
+            };
+            Some(at.timestamp())
+        }
+    }
+}
+
+/// `last <time> · next <time>` for a scheduled routine, in local time.
+pub fn when_text(routine: &Routine, state: Option<&State>, now: &jiff::Zoned) -> String {
+    let Trigger::Schedule(schedule) = &routine.trigger else {
+        return String::new();
+    };
+    let local = |t: jiff::Timestamp| {
+        t.to_zoned(now.time_zone().clone())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string()
+    };
+    let last = state.and_then(|s| s.last_run.parse::<jiff::Timestamp>().ok());
+    let next = match next_run(schedule, last, now) {
+        _ if !routine.enabled => "- (disabled)".to_string(),
+        Some(t) if t <= now.timestamp() => "due now".to_string(),
+        Some(t) => local(t),
+        None => "-".to_string(),
+    };
+    let skipped = state
+        .map(|s| s.skipped)
+        .filter(|n| *n > 0)
+        .map(|n| format!(" · {n} run(s) skipped while its item was unhandled"))
+        .unwrap_or_default();
+    let alone = state
+        .map(|s| s.no_coordinator)
+        .filter(|n| *n > 0)
+        .map(|n| format!(" · skipped: no coordinator ({n} run(s))"))
+        .unwrap_or_default();
+    format!(
+        "last {} · next {next}{skipped}{alone}",
+        last.map(local).unwrap_or_else(|| "never".into())
+    )
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 struct Front {
     schedule: String,
     command: String,
     enabled: bool,
+    /// `"pr"`: fired by the ticker's pull request poll instead of a schedule.
+    on: String,
+    events: Vec<String>,
 }
 
 impl Default for Front {
@@ -104,14 +173,27 @@ impl Default for Front {
             schedule: String::new(),
             command: String::new(),
             enabled: true,
+            on: String::new(),
+            events: Vec::new(),
         }
     }
+}
+
+/// The pull request events a `pr` routine can fire on.
+pub const PR_EVENTS: [&str; 4] = ["opened", "checks-failed", "review", "merged"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Trigger {
+    Schedule(Schedule),
+    /// `on = "pr"`, with the events it fires on (all of them when none are named).
+    Pr(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Routine {
     pub name: String,
-    pub schedule: Schedule,
+    pub trigger: Trigger,
+    /// The schedule as written, or `on pr: <events>`.
     pub schedule_text: String,
     /// Empty for a prompt-only routine.
     pub command: String,
@@ -144,10 +226,34 @@ pub fn parse(name: &str, text: &str) -> Result<Routine> {
         .or_else(|| rest.strip_suffix("\n+++").map(|f| (f, "")))
         .context("no closing `+++` line")?;
     let front: Front = toml::from_str(front).context("front matter does not parse")?;
+    let (trigger, schedule_text) = match front.on.as_str() {
+        "" => (
+            Trigger::Schedule(parse_schedule(&front.schedule)?),
+            front.schedule.trim().to_string(),
+        ),
+        "pr" => {
+            if !front.command.trim().is_empty() {
+                bail!("a `pr` routine prompts the thread; it has no `command`");
+            }
+            for event in &front.events {
+                if !PR_EVENTS.contains(&event.as_str()) {
+                    bail!("unknown pr event `{event}`; use {}", PR_EVENTS.join(", "));
+                }
+            }
+            let events = if front.events.is_empty() {
+                PR_EVENTS.iter().map(|e| e.to_string()).collect()
+            } else {
+                front.events.clone()
+            };
+            let text = format!("on pr: {}", events.join(", "));
+            (Trigger::Pr(events), text)
+        }
+        other => bail!("`on = \"{other}\"` is not a trigger; use `on = \"pr\"` or a `schedule`"),
+    };
     Ok(Routine {
         name: name.to_string(),
-        schedule: parse_schedule(&front.schedule)?,
-        schedule_text: front.schedule.trim().to_string(),
+        trigger,
+        schedule_text,
         command: front.command.trim().to_string(),
         enabled: front.enabled,
         prompt: body.trim().to_string(),
@@ -228,6 +334,22 @@ fn store_approval(config_dir: &Path, project: &Project, routine: &Routine) -> Re
     project::write_json(&approvals_path(config_dir), &all)
 }
 
+/// Moves every approval of the project at `old` to `new` (after `rename`),
+/// replacing approvals already stored for `new` under the same routine name.
+pub fn move_approvals(config_dir: &Path, old: &str, new: &str) -> Result<()> {
+    let mut all = approvals(config_dir);
+    let moving: Vec<String> = all
+        .iter()
+        .filter(|a| a.project == old)
+        .map(|a| a.routine.clone())
+        .collect();
+    all.retain(|a| !(a.project == new && moving.contains(&a.routine)));
+    for a in all.iter_mut().filter(|a| a.project == old) {
+        a.project = new.to_string();
+    }
+    project::write_json(&approvals_path(config_dir), &all)
+}
+
 /// `routine approve`: refuses unless a person is at a terminal, and asks them
 /// to type the routine's name. It does not rely on an agent's permission
 /// prompt, because users allow-list this binary for their coordinator.
@@ -277,6 +399,8 @@ pub fn approve(config_dir: &Path, project: &Project, name: &str) -> Result<()> {
 
 pub fn print_list(config_dir: &Path, project: &Project, routine_commands: bool) {
     let (routines, broken) = load_all(project);
+    let states = crate::steps::load_state(project).routines;
+    let now = jiff::Zoned::now();
     if routines.is_empty() && broken.is_empty() {
         println!("no routines");
     }
@@ -290,8 +414,9 @@ pub fn print_list(config_dir: &Path, project: &Project, routine_commands: bool) 
         } else {
             "command: NOT approved (or edited since approval)".to_string()
         };
+        let when = when_text(r, states.get(&r.name), &now);
         println!(
-            "{}\t{}\t{}\t{kind}",
+            "{}\t{}\t{}\t{kind}\t{when}",
             r.name,
             r.schedule_text,
             if r.enabled { "enabled" } else { "disabled" }
@@ -366,6 +491,12 @@ pub struct State {
     pub output_hash: String,
     /// Command hash the last "needs approval" item was written for.
     pub approval_item_for: String,
+    /// Runs of a prompt-only routine that wrote nothing because its last item
+    /// was still unhandled.
+    pub skipped: u32,
+    /// Due runs that did nothing because the project had no live
+    /// coordinator; back to 0 once one runs.
+    pub no_coordinator: u32,
 }
 
 pub type States = BTreeMap<String, State>;
@@ -373,6 +504,63 @@ pub type States = BTreeMap<String, State>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_run_follows_the_schedule_and_says_when_it_is_due() {
+        let now: jiff::Zoned = "2026-09-24T10:00:00+00:00[UTC]".parse().unwrap();
+        let at = |t: &str| t.parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(
+            next_run(
+                &Schedule::Every(300),
+                Some(at("2026-09-24T09:58:00Z")),
+                &now
+            ),
+            Some(at("2026-09-24T10:03:00Z"))
+        );
+        assert_eq!(
+            next_run(&Schedule::Every(300), None, &now),
+            Some(at("2026-09-24T10:05:00Z"))
+        );
+        assert_eq!(
+            next_run(
+                &Schedule::Daily(9, 0),
+                Some(at("2026-09-24T09:00:00Z")),
+                &now
+            ),
+            Some(at("2026-09-25T09:00:00Z"))
+        );
+        assert_eq!(
+            next_run(
+                &Schedule::Daily(9, 0),
+                Some(at("2026-09-23T08:00:00Z")),
+                &now
+            ),
+            Some(at("2026-09-23T09:00:00Z"))
+        );
+        let r = parse("autopilot", "+++\nschedule = \"every 5m\"\n+++\nGo.\n").unwrap();
+        let state = State {
+            last_run: "2026-09-24T09:00:00Z".into(),
+            skipped: 2,
+            ..State::default()
+        };
+        assert_eq!(
+            when_text(&r, Some(&state), &now),
+            "last 2026-09-24 09:00 · next due now · 2 run(s) skipped while its item was unhandled"
+        );
+        assert_eq!(
+            when_text(&r, None, &now),
+            "last never · next 2026-09-24 10:05"
+        );
+        let alone = State {
+            last_run: "2026-09-24T09:58:00Z".into(),
+            no_coordinator: 3,
+            ..State::default()
+        };
+        assert_eq!(
+            when_text(&r, Some(&alone), &now),
+            "last 2026-09-24 09:58 · next 2026-09-24 10:03 · skipped: no coordinator (3 run(s))"
+        );
+    }
 
     fn zoned(text: &str) -> jiff::Zoned {
         text.parse().unwrap()
@@ -455,6 +643,22 @@ mod tests {
 
     #[test]
     fn routine_parsing_and_name_validation() {
+        let pr = parse(
+            "follow",
+            "+++\non = \"pr\"\nevents = [\"checks-failed\", \"review\"]\n+++\nFix it.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pr.trigger,
+            Trigger::Pr(vec!["checks-failed".into(), "review".into()])
+        );
+        assert_eq!(pr.schedule_text, "on pr: checks-failed, review");
+        assert!(
+            matches!(parse("all", "+++\non = \"pr\"\n+++\nx").unwrap().trigger, Trigger::Pr(e) if e.len() == 4)
+        );
+        assert!(parse("bad", "+++\non = \"pr\"\nevents = [\"pushed\"]\n+++\n").is_err());
+        assert!(parse("bad", "+++\non = \"pr\"\ncommand = \"x\"\n+++\n").is_err());
+        assert!(parse("bad", "+++\non = \"slack\"\n+++\n").is_err());
         let r = parse("nightly", "+++\nschedule = \"daily 02:00\"\ncommand = \"./check.sh\"\n+++\n\nLook at the output.\n").unwrap();
         assert_eq!(
             (
@@ -574,7 +778,8 @@ mod tests {
         )
         .unwrap();
         let (routines, broken) = load_all(&project);
-        assert_eq!(routines.len(), 1);
+        // Theirs plus the default pr-followup routine.
+        assert_eq!(routines.len(), 2);
         assert_eq!(broken.len(), 2);
         assert!(broken.iter().all(|b| b.hash.len() == 64));
     }

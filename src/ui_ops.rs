@@ -68,8 +68,10 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
                 .filter(|socket| socket.exists())
                 .or_else(|| env_socket(ctx)),
         },
-        reprime: false,
         rebind: true,
+        profile: None,
+        new: false,
+        here: false,
     };
     coordinator::open_quiet(ctx, slug, &options)
         .context("could not open the project coordinator")?;
@@ -89,7 +91,7 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
         if view
             .agents
             .iter()
-            .any(|a| coordinator::agent_matches(&record, a))
+            .any(|a| a.pane_id == record.pane_id && coordinator::is_coordinator(&record, a))
         {
             return focus(&view.herdr, &record.pane_id);
         }
@@ -127,7 +129,7 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok(node.pane_id);
     }
-    let node = term::quiet(|| threads::restart(ctx, slug, id))
+    let node = term::quiet(|| threads::restart(ctx, slug, id, None))
         .with_context(|| format!("could not reopen {id}"))?;
     view.herdr
         .on_machine(&node.machine)
@@ -228,6 +230,7 @@ pub fn merge(ctx: &Ctx, slug: &str, id: &str, keep_worktree: bool) -> Result<Str
         &project,
         "pr",
         id,
+        "merged",
         &format!(
             "{id} \"{}\": pull request {} was merged from the Organizations popup",
             record.title, record.pr
@@ -242,8 +245,8 @@ pub fn merge(ctx: &Ctx, slug: &str, id: &str, keep_worktree: bool) -> Result<Str
             slug,
             id,
             &threads::ResolveArgs {
+                keep_worktree: !remove,
                 close_view: !remove,
-                remove_worktree: remove,
                 ..threads::ResolveArgs::default()
             },
         )
@@ -294,7 +297,8 @@ pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
         .map(|r| project::parse_repo_arg(r.trim()))
         .collect();
     let project = project::create(&ctx.root, &form.name, &form.goal, repos)?;
-    project.set_agents(&form.coordinator_agent, &form.thread_agent)?;
+    // A Herdr kind is also the built-in profile of that name.
+    crate::profiles::write_project_defaults(&project, &form.thread_agent, &form.coordinator_agent)?;
     term::quiet(|| {
         coordinator::open(
             ctx,
@@ -304,8 +308,10 @@ pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
                     session: None,
                     socket: Some(socket),
                 },
-                reprime: false,
                 rebind: false,
+                profile: None,
+                new: false,
+                here: false,
             },
         )
     })?;
@@ -340,7 +346,8 @@ pub fn create_node(ctx: &Ctx, form: &NewNode) -> Result<Thread> {
                 title: form.title.trim().to_string(),
                 repo: blank(&form.repo),
                 machine: None,
-                agent: None,
+                profile: None,
+                kind: None,
                 base: None,
                 task,
                 node: NodeRequest {
