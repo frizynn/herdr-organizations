@@ -420,6 +420,23 @@ pub fn preview_node(form: &NewNode) -> String {
     line
 }
 
+/// Closes an open node the way Nenu's Close does: the agent stops and its
+/// Herdr view closes, while its worktree, branch and report stay.
+pub fn close(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
+    term::quiet(|| {
+        threads::resolve(
+            ctx,
+            slug,
+            id,
+            &threads::ResolveArgs {
+                keep_worktree: true,
+                close_view: true,
+                ..threads::ResolveArgs::default()
+            },
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

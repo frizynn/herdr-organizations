@@ -278,6 +278,11 @@ enum View {
         slug: String,
         id: String,
     },
+    /// Closing an open node: it stops, its worktree and branch stay.
+    Close {
+        slug: String,
+        id: String,
+    },
     Reply {
         slug: String,
         id: String,
@@ -301,7 +306,7 @@ impl View {
             View::Detail { .. } => Screen::Detail,
             View::Settings { .. } => Screen::Settings,
             View::Form(_) | View::Reply { .. } => Screen::Form,
-            View::Confirm { .. } => Screen::Confirm,
+            View::Confirm { .. } | View::Close { .. } => Screen::Confirm,
             View::Help | View::Dock { .. } => Screen::Dock,
         }
     }
@@ -310,7 +315,11 @@ impl View {
     fn overlay(&self) -> bool {
         matches!(
             self,
-            View::Confirm { .. } | View::Reply { .. } | View::Help | View::Search { .. }
+            View::Confirm { .. }
+                | View::Close { .. }
+                | View::Reply { .. }
+                | View::Help
+                | View::Search { .. }
         )
     }
 
@@ -648,7 +657,12 @@ impl<'a> App<'a> {
             .snap
             .projects
             .iter()
-            .map(|p| p.coordinators.len())
+            .map(|p| {
+                p.coordinators
+                    .iter()
+                    .filter(|c| c.status != Status::Done)
+                    .count()
+            })
             .sum();
         let threads: usize = self
             .snap
@@ -669,12 +683,13 @@ impl<'a> App<'a> {
             ),
             DIM,
         ));
+        let fold = self.config.view.resolved == Resolved::Count && self.search.is_empty();
         for p in &self.snap.projects {
-            let coords: Vec<&Node> = p
+            let (resolved, coords): (Vec<&Node>, Vec<&Node>) = p
                 .coordinators
                 .iter()
                 .filter(|c| self.matches(p, c) || self.search.is_empty())
-                .collect();
+                .partition(|c| fold && c.id != ROOT_ID && c.status == Status::Done);
             if !self.search.is_empty()
                 && coords.is_empty()
                 && !p.name.to_lowercase().contains(&self.search.to_lowercase())
@@ -717,6 +732,16 @@ impl<'a> App<'a> {
                     line.at(-22, c.status.word(), status_style(c.status))
                 };
                 lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
+            }
+            if !resolved.is_empty() {
+                let n = resolved.len();
+                let plural = if n == 1 { "" } else { "s" };
+                lines.push(
+                    Line::new()
+                        .at(6, format!("✓ {n} resolved coordinator{plural}"), DIM)
+                        .at(-2, "↵ show", DIM)
+                        .target(Target::Resolved(p.slug.clone(), ROOT_ID.into())),
+                );
             }
         }
         let outside: Vec<&state::Workspace> = self
@@ -770,6 +795,7 @@ impl<'a> App<'a> {
         self.draw_create(frame, frame.height - 3);
         let pairs = self.hint(&[
             (Action::Open, "open"),
+            (Action::Close, "close node"),
             (Action::Search, "search"),
             (Action::Adopt, "adopt workspace"),
             (Action::Back, "close"),
@@ -1250,6 +1276,7 @@ impl<'a> App<'a> {
         pairs.push(("1-9".into(), "question"));
         pairs.extend(self.hint(&[
             (Action::Merge, "merge"),
+            (Action::Close, "close"),
             (Action::Filter, "filter"),
             (Action::Back, "back"),
         ]));
@@ -1460,6 +1487,9 @@ impl<'a> App<'a> {
         }
         if !items.is_empty() {
             pairs.extend(self.hint(&[(Action::Done, "done")]));
+        }
+        if node.status != Status::Done && node.id != ROOT_ID {
+            pairs.extend(self.hint(&[(Action::Close, "close")]));
         }
         pairs.extend(self.hint(&[(Action::Back, "back")]));
         frame.hint(frame.height - 1, &pairs);
@@ -2144,6 +2174,31 @@ impl<'a> App<'a> {
 
     // -------------------------------------------------------------- dialogs
 
+    fn draw_close(&self, frame: &mut Frame, slug: &str, id: &str) {
+        frame.dim_all();
+        let Some(node) = self.project(slug).and_then(|p| p.node(id)) else {
+            return;
+        };
+        let w = frame.width.saturating_sub(4).min(62);
+        let x0 = (frame.width - w) / 2;
+        let y0 = frame.height.saturating_sub(9) / 2;
+        let (x, y) = frame.boxed(x0, y0, w, 8, "", BLUE);
+        frame.put(x0 + 1, y0, " Close this node? ", BOLD);
+        frame.put(x + 1, y, &term::fit(&node.title, w - 4), BOLD);
+        frame.put(
+            x + 1,
+            y + 2,
+            "Its agent stops and its Herdr view closes.",
+            Style::PLAIN,
+        );
+        frame.put(x + 1, y + 3, "Worktree, branch and report are kept.", DIM);
+        frame.put(x + 1, y + 5, " ↵ close ", PRIMARY);
+        frame.put(x + 11, y + 5, " esc cancel ", term::CHIP);
+        frame.fill(0, frame.height - 1, frame.width, None);
+        let pairs = self.hint(&[(Action::Open, "close"), (Action::Back, "cancel")]);
+        frame.hint(frame.height - 1, &pairs);
+    }
+
     fn draw_confirm(&self, frame: &mut Frame, slug: &str, id: &str) {
         frame.dim_all();
         let Some(project) = self.project(slug) else {
@@ -2365,13 +2420,18 @@ impl<'a> App<'a> {
             View::Settings { sel, capture } => self.draw_settings(&mut frame, *sel, *capture),
             View::Form(form) => self.draw_form(&mut frame, form),
             View::Dock { sel } => self.draw_dock(&mut frame, *sel),
-            View::Search { .. } | View::Confirm { .. } | View::Reply { .. } | View::Help => {}
+            View::Search { .. }
+            | View::Confirm { .. }
+            | View::Close { .. }
+            | View::Reply { .. }
+            | View::Help => {}
         }
         if let Some(top) = self.stack.last().cloned()
             && top.overlay()
         {
             match &top {
                 View::Confirm { slug, id } => self.draw_confirm(&mut frame, slug, id),
+                View::Close { slug, id } => self.draw_close(&mut frame, slug, id),
                 View::Reply { slug, id, text } => self.draw_reply(&mut frame, slug, id, text),
                 View::Help => self.draw_help(&mut frame),
                 _ => {}
@@ -2569,6 +2629,39 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Asks before closing the focused node. The project's own coordinator
+    /// and a coordinator that still has open nodes under it are refused.
+    fn start_close(&mut self) {
+        let Some((slug, id)) = self.focused_node() else {
+            return;
+        };
+        let Some(project) = self.project(&slug) else {
+            return;
+        };
+        let Some(node) = project.node(&id) else {
+            return;
+        };
+        let open_children = project
+            .coordinators
+            .iter()
+            .chain(&project.threads)
+            .filter(|n| n.coordinator == id && n.id != id && n.status != Status::Done)
+            .count();
+        self.message = if id == ROOT_ID {
+            "the project's coordinator stays; pause the project to stop it".into()
+        } else if node.status == Status::Done {
+            format!("{} is already resolved", node.title)
+        } else if open_children > 0 {
+            format!(
+                "{} still has {open_children} open under it; close those first",
+                node.title
+            )
+        } else {
+            self.stack.push(View::Close { slug, id });
+            String::new()
+        };
+    }
+
     fn start_merge(&mut self) {
         let Some((slug, id)) = self.focused_node() else {
             return;
@@ -2707,7 +2800,7 @@ impl<'a> App<'a> {
             Target::Adopt => self.adopt_current(),
             Target::Resolved(_, _) => {
                 self.config.view.resolved = Resolved::List;
-                self.message = "showing resolved threads (Settings keeps the choice)".into();
+                self.message = "showing resolved nodes (Settings keeps the choice)".into();
             }
             Target::Setting(i) => self.change_setting(i, 1),
             Target::Key(_) => {
@@ -2906,7 +2999,9 @@ impl<'a> App<'a> {
     /// question first so no digit lands on a dialog the user has not read.
     fn on_digit(&mut self, digit: char) {
         match self.stack.last() {
-            Some(View::Confirm { .. } | View::Settings { .. } | View::Help) => {}
+            Some(
+                View::Confirm { .. } | View::Close { .. } | View::Settings { .. } | View::Help,
+            ) => {}
             Some(View::Detail { .. }) => self.answer(digit),
             _ => {
                 let Some((slug, id)) = self.focused_node() else {
@@ -2963,7 +3058,7 @@ impl<'a> App<'a> {
 
     fn on_action(&mut self, action: Action, top: &View) {
         match (action, top) {
-            (Action::Back, View::Help | View::Confirm { .. }) => {
+            (Action::Back, View::Help | View::Confirm { .. } | View::Close { .. }) => {
                 self.stack.pop();
             }
             (Action::Back, _) => self.back(),
@@ -2996,6 +3091,15 @@ impl<'a> App<'a> {
                     };
                 self.reload();
             }
+            (Action::Open, View::Close { slug, id }) => {
+                let (slug, id) = (slug.clone(), id.clone());
+                self.stack.pop();
+                self.message = match ui_ops::close(self.ctx, &slug, &id) {
+                    Ok(()) => format!("closed {id}; its worktree and branch are kept"),
+                    Err(error) => format!("{error:#}"),
+                };
+                self.reload();
+            }
             (Action::Open, View::Board { .. }) => {
                 if let Some((slug, id)) = self.focused_node() {
                     self.open_detail(&slug, &id);
@@ -3024,6 +3128,7 @@ impl<'a> App<'a> {
             (Action::NextTab, _) => self.switch_tab(Tab::step(top.tab(), 1)),
             (Action::PrevTab, _) => self.switch_tab(Tab::step(top.tab(), -1)),
             (Action::Merge, _) => self.start_merge(),
+            (Action::Close, _) => self.start_close(),
             (Action::Search, _) => self.stack.push(View::Search {
                 text: self.search.clone(),
             }),
@@ -3500,7 +3605,10 @@ mod tests {
             assert!(lines[9].starts_with("    ├ ● Coordinator"), "{text}");
             assert!(lines[10].starts_with("    └ ● mobile redesign"), "{text}");
             assert!(text.contains("WORKSPACES"));
-            assert!(lines[23].contains("↵ open · / search"), "{text}");
+            assert!(
+                lines[23].contains("↵ open · x close node · / search"),
+                "{text}"
+            );
             assert!(!text.contains("1-9"), "{text}");
         });
     }
@@ -3594,6 +3702,59 @@ mod tests {
     }
 
     #[test]
+    fn resolved_coordinators_fold_into_one_row_until_asked_for() {
+        with_app(|app| {
+            let project = &mut app.snap.projects[0];
+            let c = project
+                .coordinators
+                .iter_mut()
+                .find(|c| c.title == "mobile redesign")
+                .unwrap();
+            c.status = Status::Done;
+            let text = app.render(84, 24).text();
+            assert!(!text.contains("✓ mobile redesign"), "{text}");
+            assert!(text.contains("✓ 1 resolved coordinator"), "{text}");
+
+            let at = targets(&app.launcher_lines())
+                .iter()
+                .position(|t| matches!(t, Target::Resolved(_, id) if id == ROOT_ID))
+                .unwrap();
+            app.stack = vec![View::Launcher { sel: at }];
+            app.activate();
+            let text = app.render(84, 24).text();
+            assert!(text.contains("✓ mobile redesign"), "{text}");
+        });
+    }
+
+    #[test]
+    fn close_asks_first_and_refuses_the_root_and_a_coordinator_with_open_nodes() {
+        with_app(|app| {
+            let select = |app: &mut App, id: &str| {
+                let at = targets(&app.launcher_lines())
+                    .iter()
+                    .position(|t| matches!(t, Target::Node(_, n) if n == id))
+                    .unwrap();
+                app.stack = vec![View::Launcher { sel: at }];
+            };
+            select(app, ROOT_ID);
+            press(app, crossterm::event::KeyCode::Char('x'));
+            assert!(app.message.contains("pause the project"), "{}", app.message);
+
+            select(app, "t-0001");
+            press(app, crossterm::event::KeyCode::Char('x'));
+            assert!(app.message.contains("close those first"), "{}", app.message);
+
+            app.open_detail("acme", "t-0002");
+            press(app, crossterm::event::KeyCode::Char('x'));
+            assert!(matches!(app.stack.last(), Some(View::Close { .. })));
+            let text = app.render(84, 24).text();
+            assert!(text.contains("Close this node?"), "{text}");
+            press(app, crossterm::event::KeyCode::Esc);
+            assert!(matches!(app.stack.last(), Some(View::Detail { .. })));
+        });
+    }
+
+    #[test]
     fn search_filters_the_list_it_is_drawn_over() {
         with_app(|app| {
             press(app, crossterm::event::KeyCode::Char('/'));
@@ -3680,14 +3841,14 @@ mod tests {
                 .unwrap();
             app.set_sel(keys_at);
             press(app, crossterm::event::KeyCode::Enter);
-            press(app, crossterm::event::KeyCode::Char('x'));
-            assert_eq!(app.config.keys.primary(Action::Board), "x");
+            press(app, crossterm::event::KeyCode::Char('z'));
+            assert_eq!(app.config.keys.primary(Action::Board), "z");
             let saved = tui_config::load(&app.ctx.config_dir).unwrap();
-            assert_eq!(saved.keys.primary(Action::Board), "x");
+            assert_eq!(saved.keys.primary(Action::Board), "z");
             // A conflicting key is refused with a message.
             press(app, crossterm::event::KeyCode::Enter);
             press(app, crossterm::event::KeyCode::Char('n'));
-            assert_eq!(app.config.keys.primary(Action::Board), "x");
+            assert_eq!(app.config.keys.primary(Action::Board), "z");
             assert!(app.message.contains("new project"));
         });
     }
