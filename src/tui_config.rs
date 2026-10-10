@@ -46,6 +46,18 @@ pub struct View {
     pub notify: Notify,
     /// Digits 1-9 answer a waiting agent from the thread detail screen.
     pub answer: bool,
+    /// How Herdr's agents list is sorted: by project, or Herdr's own sorts.
+    pub agents: AgentsView,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentsView {
+    /// Grouped by project, the coordinator first, then threads by need.
+    #[default]
+    Projects,
+    /// No Organizations view: Herdr's header cycles its own sorts (priority...).
+    Herdr,
 }
 
 impl Default for View {
@@ -56,6 +68,7 @@ impl Default for View {
             resolved: Resolved::Count,
             notify: Notify::NeedsYouAndReview,
             answer: true,
+            agents: AgentsView::Projects,
         }
     }
 }

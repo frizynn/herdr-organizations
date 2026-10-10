@@ -330,10 +330,11 @@ pub fn focus(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
 pub fn unfocus(ctx: &Ctx, session: &crate::paths::SessionFlags) -> Result<()> {
     let session = crate::paths::resolve_session(session, ctx.env, ctx.runner)?;
     let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), &session.socket, ctx.runner);
-    herdr
-        .agent_view_set(crate::sidebar::default_view())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("sidebar shows every agent, sorted by need");
+    let view = crate::tui_config::load(&ctx.config_dir)
+        .map(|c| c.view.agents)
+        .unwrap_or_default();
+    crate::sidebar::apply_agents_view(&herdr, view).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("sidebar shows every agent again");
     Ok(())
 }
 
@@ -514,6 +515,46 @@ mod tests {
         assert_eq!(
             project_for_workspace(&world.ctx(), "w5", &socket).as_deref(),
             Some("alpha")
+        );
+    }
+
+    #[test]
+    fn unfocus_honours_the_agents_sidebar_choice() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let socket = std::path::PathBuf::from(project.coordinator().unwrap().socket);
+        let session = crate::paths::SessionFlags {
+            session: None,
+            socket: Some(socket),
+        };
+        let methods = |world: &World| -> Vec<(String, String)> {
+            world
+                .runner
+                .socket_requests
+                .borrow()
+                .iter()
+                .map(|(_, body)| {
+                    let r: serde_json::Value = serde_json::from_str(body).unwrap();
+                    (
+                        r["method"].as_str().unwrap().to_string(),
+                        r["params"]["source"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        unfocus(&world.ctx(), &session).unwrap();
+        let mut config = crate::tui_config::load(&world.ctx().config_dir).unwrap();
+        config.view.agents = crate::tui_config::AgentsView::Herdr;
+        crate::tui_config::save(&world.ctx().config_dir, &config).unwrap();
+        unfocus(&world.ctx(), &session).unwrap();
+
+        assert_eq!(
+            methods(&world),
+            vec![
+                ("agent.view.set".to_string(), "herdr-projects".to_string()),
+                ("agent.view.clear".to_string(), "herdr-projects".to_string()),
+            ]
         );
     }
 

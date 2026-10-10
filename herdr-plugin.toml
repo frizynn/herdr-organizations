@@ -71,6 +71,12 @@ contexts = ["workspace"]
 command = ["target/release/herdr-organizations", "action", "unfocus"]
 
 [[actions]]
+id = "agents-view"
+title = "Herdr Organizations: agents sidebar, projects or Herdr's own sorts"
+contexts = ["workspace"]
+command = ["target/release/herdr-organizations", "action", "agents-view"]
+
+[[actions]]
 id = "adopt-workspace"
 title = "Herdr Organizations: continue this workspace as a project"
 contexts = ["workspace"]
