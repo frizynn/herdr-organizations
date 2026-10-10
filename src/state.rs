@@ -296,20 +296,14 @@ impl Live {
     }
 }
 
-fn pr_number(url: &str) -> String {
-    url.rsplit('/')
-        .next()
-        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-        .map(str::to_string)
-        .unwrap_or_default()
-}
-
 fn pr_view(t: &Thread, summary: Option<&pr::Summary>) -> Option<Pr> {
     if t.pr.is_empty() {
         return None;
     }
     let mut view = Pr {
-        number: pr_number(&t.pr),
+        number: crate::sidebar::pr_number(&t.pr)
+            .unwrap_or_default()
+            .to_string(),
         url: t.pr.clone(),
         state: t.pr_state.clone(),
         review: t.pr_review.clone(),

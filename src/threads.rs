@@ -486,8 +486,7 @@ fn write_brief(ctx: &Ctx, project: &Project, placed: &Thread, restart: bool) -> 
         ..placed.clone()
     };
     let task = std::fs::read_to_string(thread::task_path(project, &placed.id)).unwrap_or_default();
-    let prefix = coordinator::current_prefix(&ctx.root)?;
-    let brief = thread::brief_for_with_prefix(project, &with_dir, &task, restart, &prefix)?;
+    let brief = thread::brief_for(project, &with_dir, &task, restart)?;
     let target = remote::ssh_target(
         ctx.runner,
         &ctx.env.herdr_bin(),
@@ -569,8 +568,7 @@ fn write_brief_local(ctx: &Ctx, project: &Project, placed: &Thread, restart: boo
         ..placed.clone()
     };
     let task = std::fs::read_to_string(thread::task_path(project, &placed.id)).unwrap_or_default();
-    let prefix = coordinator::current_prefix(&ctx.root)?;
-    let brief = thread::brief_for_with_prefix(project, &with_dir, &task, restart, &prefix)?;
+    let brief = thread::brief_for(project, &with_dir, &task, restart)?;
 
     std::fs::create_dir_all(Path::new(&dir).join("library"))
         .with_context(|| format!("could not create {dir}"))?;

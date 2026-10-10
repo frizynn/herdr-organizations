@@ -265,7 +265,8 @@ fn fetch_and_build(ctx: &Ctx, herdr: &Herdr, install: &Install, latest: Version)
                     tail(&format!("{}\n{}", out.stdout, out.stderr))
                 );
             }
-            // Its own lines say whether it downloaded or fell back to a build.
+            // What it built and linked, in its own words (link-command.sh keeps
+            // the upstream prefix).
             for line in out.stderr.lines().filter(|l| {
                 l.starts_with("herdr-projects install:")
                     || l.starts_with("herdr-organizations install:")

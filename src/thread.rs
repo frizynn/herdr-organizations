@@ -41,7 +41,7 @@ pub enum Kind {
     Adopted,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeRole {
     #[default]
@@ -398,7 +398,7 @@ pub struct BriefInput<'a> {
     pub instructions: &'a str,
     pub memory_index: &'a str,
     pub node_protocol: &'a str,
-    /// (file name, contents), in the order they should be inlined.
+    /// (path in the project folder, contents), in the order they should be inlined.
     pub memory_files: &'a [(String, String)],
     pub task: &'a str,
     pub restart: bool,
@@ -473,18 +473,13 @@ pub fn compose_brief(input: &BriefInput) -> String {
 
     let mut used = input.memory_index.chars().count();
     let mut left_out = Vec::new();
-    for (name, text) in input.memory_files {
-        let label = if name.starts_with("memory/") || name.starts_with("nodes/") {
-            name.clone()
-        } else {
-            format!("memory/{name}")
-        };
+    for (path, text) in input.memory_files {
         let size = text.chars().count();
         if used + size <= MEMORY_CAP_CHARS {
             used += size;
-            brief.push_str(&format!("\n## {label}\n\n{}\n", text.trim()));
+            brief.push_str(&format!("\n## {path}\n\n{}\n", text.trim()));
         } else {
-            left_out.push(label);
+            left_out.push(path.clone());
         }
     }
     if !left_out.is_empty() {
@@ -516,17 +511,7 @@ pub fn compose_brief(input: &BriefInput) -> String {
 
 /// Reads the project's instructions and memory and composes the brief.
 pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) -> Result<String> {
-    let prefix = crate::coordinator::current_prefix(&project.root)?;
-    brief_for_with_prefix(project, thread, task, restart, &prefix)
-}
-
-pub fn brief_for_with_prefix(
-    project: &Project,
-    thread: &Thread,
-    task: &str,
-    restart: bool,
-    command_prefix: &str,
-) -> Result<String> {
+    let command_prefix = crate::coordinator::current_prefix(&project.root)?;
     let (settings, _) = project.read_project_md()?;
     let project_name = project::display_name(&settings.name, &project.slug);
     let uploads = project.dir().join("uploads").to_string_lossy().into_owned();
@@ -534,10 +519,10 @@ pub fn brief_for_with_prefix(
     let report_prefix = if thread.is_remote() {
         ""
     } else {
-        command_prefix
+        &command_prefix
     };
     let context = organizations::scoped_context(project, thread)?;
-    let protocol = organizations::node_protocol(thread, command_prefix, &project.slug);
+    let protocol = organizations::node_protocol(thread, &command_prefix, &project.slug);
     Ok(compose_brief(&BriefInput {
         project_name: &project_name,
         slug: &project.slug,
@@ -1577,9 +1562,9 @@ mod tests {
     #[test]
     fn brief_order_and_memory_cap() {
         let files = vec![
-            ("a.md".to_string(), "alpha fact".to_string()),
-            ("b.md".to_string(), "x".repeat(MEMORY_CAP_CHARS)),
-            ("c.md".to_string(), "gamma fact".to_string()),
+            ("memory/a.md".to_string(), "alpha fact".to_string()),
+            ("memory/b.md".to_string(), "x".repeat(MEMORY_CAP_CHARS)),
+            ("memory/c.md".to_string(), "gamma fact".to_string()),
         ];
         let repos = vec![
             project::Repo {
@@ -1706,37 +1691,6 @@ mod tests {
             all_next(&project, &t.id),
             ["From the report", "Added by the coordinator"]
         );
-    }
-
-    #[test]
-    fn scoped_memory_paths_render_without_duplicate_prefixes() {
-        let files = vec![
-            ("memory/root.md".to_string(), "root fact".to_string()),
-            (
-                "nodes/t-0001/memory/area.md".to_string(),
-                "ancestor fact".to_string(),
-            ),
-        ];
-        let brief = compose_brief(&BriefInput {
-            project_name: "Demo",
-            slug: "demo",
-            goal: "",
-            repos: &[],
-            uploads_path: "uploads",
-            remote: false,
-            instructions: "",
-            memory_index: "",
-            node_protocol: "node",
-            memory_files: &files,
-            task: "task",
-            restart: false,
-            report_path: "report",
-            library_path: "library",
-            report_prefix: "",
-        });
-        assert!(brief.contains("## memory/root.md"));
-        assert!(brief.contains("## nodes/t-0001/memory/area.md"));
-        assert!(!brief.contains("memory/memory/root.md"));
     }
 
     fn local_thread(project: &Project, dir: &Path) -> Thread {

@@ -306,38 +306,6 @@ impl<'a> Herdr<'a> {
         })
     }
 
-    /// Runs a Herdr command whose successful CLI form may intentionally emit
-    /// no JSON, while preserving structured errors when Herdr returns one.
-    fn call_status(&self, args: &[&str], timeout: Duration) -> Result<(), HerdrError> {
-        let cmd = self.cmd(timeout).args(args.iter().copied());
-        let out = self.runner.run(&cmd).map_err(|error| HerdrError {
-            code: "unreachable".into(),
-            message: format!("{error:#}"),
-        })?;
-        if out.timed_out {
-            return Err(HerdrError {
-                code: "timeout".into(),
-                message: format!("`herdr {}` timed out", args.join(" ")),
-            });
-        }
-        if out.success() {
-            return Ok(());
-        }
-        let reply = [&out.stdout, &out.stderr]
-            .into_iter()
-            .find_map(|text| serde_json::from_str::<serde_json::Value>(text.trim()).ok());
-        if let Some(error) = reply.as_ref().and_then(|reply| reply.get("error")) {
-            return Err(HerdrError {
-                code: error["code"].as_str().unwrap_or("failed").to_string(),
-                message: error["message"].as_str().unwrap_or("").to_string(),
-            });
-        }
-        Err(HerdrError {
-            code: "failed".into(),
-            message: format!("`herdr {}`: {}", args.join(" "), out.error_text()),
-        })
-    }
-
     fn call_as<T: serde::de::DeserializeOwned>(
         &self,
         args: &[&str],
@@ -392,7 +360,7 @@ impl<'a> Herdr<'a> {
     pub fn pane_run(&self, pane: &str, command: &[String]) -> Result<(), HerdrError> {
         let mut args = vec!["pane", "run", pane];
         args.extend(command.iter().map(String::as_str));
-        self.call_status(&args, CALL_TIMEOUT)
+        self.call(&args, CALL_TIMEOUT).map(|_| ())
     }
 
     pub fn pane_swap(&self, source: &str, target: &str) -> Result<(), HerdrError> {

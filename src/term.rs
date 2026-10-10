@@ -103,11 +103,6 @@ pub fn width(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// Cuts to `max` columns with an ellipsis, after removing terminal controls.
-pub fn fit(text: &str, max: usize) -> String {
-    fit_terminal_row(text, max)
-}
-
 fn is_bidi_or_line_control(character: char) -> bool {
     matches!(
         character as u32,
@@ -181,7 +176,8 @@ fn sanitize_terminal_text(value: &str) -> String {
     output
 }
 
-pub fn fit_terminal_row(value: &str, max_width: usize) -> String {
+/// Cuts to `max_width` columns with an ellipsis, after removing terminal controls.
+pub fn fit(value: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }

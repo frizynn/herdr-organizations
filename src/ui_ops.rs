@@ -11,7 +11,6 @@ use crate::herdr::{CALL_TIMEOUT, Herdr};
 use crate::organizations::{NodeRequest, ROOT_ID};
 use crate::paths::{Ctx, SessionFlags};
 use crate::project::{self, Project};
-use crate::runner::Cmd;
 use crate::state::{self, Live, Snapshot};
 use crate::thread::{self, Kind, NodeRole, Thread};
 use crate::{agent_profile, inbox, pr, steps, term, threads};
@@ -199,18 +198,7 @@ pub fn open_pr(ctx: &Ctx, url: &str) -> Result<()> {
     if !pr::valid_pr_url(url) {
         bail!("not a pull request URL");
     }
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let out = ctx
-        .runner
-        .run(&Cmd::new(opener, std::time::Duration::from_secs(5)).arg(url))?;
-    if !out.success() {
-        bail!("{opener} failed: {}", out.error_text());
-    }
-    Ok(())
+    term::quiet(|| crate::settings::system_open(ctx, url))
 }
 
 pub fn inbox_done(ctx: &Ctx, slug: &str, item: &str) -> Result<()> {

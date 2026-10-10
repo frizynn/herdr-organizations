@@ -47,14 +47,14 @@ fn read_projects_handoff(ctx: &Ctx) -> ProjectsHandoff {
 /// The originating pane and workspace, from `HERDR_PLUGIN_CONTEXT_JSON`.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
-struct ActionContext {
+pub(crate) struct ActionContext {
     workspace_id: String,
-    workspace_label: String,
+    pub(crate) workspace_label: String,
     workspace_cwd: String,
     focused_pane_id: String,
 }
 
-fn action_context(ctx: &Ctx) -> ActionContext {
+pub(crate) fn action_context(ctx: &Ctx) -> ActionContext {
     ctx.env
         .var("HERDR_PLUGIN_CONTEXT_JSON")
         .and_then(|json| serde_json::from_str(json).ok())
@@ -96,7 +96,7 @@ fn open_with(ctx: &Ctx, handoff: Handoff) -> Result<()> {
     open_popup(ctx)
 }
 
-fn current_workspace(ctx: &Ctx, context: &ActionContext) -> String {
+pub(crate) fn current_workspace(ctx: &Ctx, context: &ActionContext) -> String {
     ctx.env
         .var("HERDR_WORKSPACE_ID")
         .unwrap_or(&context.workspace_id)

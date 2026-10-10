@@ -38,7 +38,7 @@ pub fn needs_you(group: Group) -> bool {
     matches!(group, Group::WaitingOnYou | Group::ReadyForReview)
 }
 
-fn pr_number(url: &str) -> Option<&str> {
+pub fn pr_number(url: &str) -> Option<&str> {
     url.rsplit('/')
         .next()
         .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))

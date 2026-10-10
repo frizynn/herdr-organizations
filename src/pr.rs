@@ -260,7 +260,7 @@ fn valid_oid(oid: &str) -> bool {
     oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum MergeMethod {
     #[default]
     Squash,
@@ -295,29 +295,15 @@ pub fn merge(
         bail!("not a commit id");
     }
     let host = host_of(origin);
-    let mut args = vec![
-        "pr".to_string(),
-        "merge".into(),
-        method.flag().into(),
-        "--match-head-commit".into(),
-        head_oid.into(),
-    ];
-    // As in `view`: off github.com the pull request goes by number and --repo.
-    if host == "github.com" {
-        args.extend(["--".into(), url.into()]);
-    } else {
-        let parts: Vec<&str> = url
-            .trim_start_matches("https://github.com/")
-            .split('/')
-            .collect();
-        args.extend([
-            "--repo".into(),
-            format!("{}/{}", parts[0], parts[1]),
-            "--".into(),
-            parts[3].into(),
-        ]);
-    }
-    let mut cmd = gh(&host).args(args);
+    let mut cmd = gh(&host)
+        .args([
+            "pr",
+            "merge",
+            method.flag(),
+            "--match-head-commit",
+            head_oid,
+        ])
+        .args(target(&host, url));
     cmd.timeout = GH_MERGE_TIMEOUT;
     let out = runner.run(&cmd)?;
     if !out.success() {
@@ -507,27 +493,35 @@ pub fn own_login(runner: &dyn Runner, origin: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
 }
 
-/// `gh pr view` of a pull request URL, asked through `origin`'s host. `gh`
-/// sends a URL to the URL's own host, so off `github.com` the pull request
-/// goes by number and `--repo` instead.
+/// The pull request as the last `gh pr` arguments, asked through `host`.
+/// `gh` sends a URL to the URL's own host, so off `github.com` the pull
+/// request goes by number and `--repo` instead.
+fn target(host: &str, url: &str) -> Vec<String> {
+    if host == "github.com" {
+        return vec!["--".into(), url.into()];
+    }
+    let parts: Vec<&str> = url
+        .trim_start_matches("https://github.com/")
+        .split('/')
+        .collect();
+    vec![
+        "--repo".into(),
+        format!("{}/{}", parts[0], parts[1]),
+        "--".into(),
+        parts[3].into(),
+    ]
+}
+
+/// `gh pr view` of a pull request URL, asked through `origin`'s host.
 pub fn view(runner: &dyn Runner, url: &str, origin: &str) -> Result<String> {
     if !valid_pr_url(url) {
         bail!("not a pull request URL");
     }
     const FIELDS: &str = "state,reviewDecision,statusCheckRollup,comments,reviews,headRefName,headRefOid,headRepository,headRepositoryOwner,additions,deletions,isDraft,mergeable,baseRefName";
     let host = host_of(origin);
-    let cmd = if host == "github.com" {
-        gh(&host).args(["pr", "view", "--json", FIELDS, "--", url])
-    } else {
-        let parts: Vec<&str> = url
-            .trim_start_matches("https://github.com/")
-            .split('/')
-            .collect();
-        let repo = format!("{}/{}", parts[0], parts[1]);
-        gh(&host).args([
-            "pr", "view", "--json", FIELDS, "--repo", &repo, "--", parts[3],
-        ])
-    };
+    let cmd = gh(&host)
+        .args(["pr", "view", "--json", FIELDS])
+        .args(target(&host, url));
     let out = runner.run(&cmd)?;
     if !out.success() {
         bail!("gh pr view: {}", out.error_text());

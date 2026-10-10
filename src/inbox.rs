@@ -241,12 +241,6 @@ pub fn print_list(project: &Project, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn inline_body(body: &str) -> (String, bool) {
-    let mut chars = body.chars();
-    let text: String = chars.by_ref().take(MAX_INLINE_BODY_CHARS).collect();
-    (text, chars.next().is_some())
-}
-
 fn inline_text(text: &str, limit: usize) -> (String, bool) {
     let mut chars = text.chars();
     let text: String = chars.by_ref().take(limit).collect();
@@ -263,7 +257,7 @@ fn render_item(item: &Item) -> String {
         ));
     }
     if !item.body.is_empty() {
-        let (body, body_truncated) = inline_body(&item.body);
+        let (body, body_truncated) = inline_text(&item.body, MAX_INLINE_BODY_CHARS);
         rendered.push_str(&format!("  Body:\n{body}\n"));
         if body_truncated {
             rendered.push_str(&format!(

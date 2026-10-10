@@ -3092,23 +3092,11 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 fn current_workspace(ctx: &Ctx) -> (String, String) {
-    #[derive(Deserialize, Default)]
-    #[serde(default)]
-    struct Context {
-        workspace_id: String,
-        workspace_label: String,
-    }
-    let context: Context = ctx
-        .env
-        .var("HERDR_PLUGIN_CONTEXT_JSON")
-        .and_then(|json| serde_json::from_str(json).ok())
-        .unwrap_or_default();
-    let id = ctx
-        .env
-        .var("HERDR_WORKSPACE_ID")
-        .map(str::to_string)
-        .unwrap_or(context.workspace_id);
-    (id, context.workspace_label)
+    let context = crate::actions::action_context(ctx);
+    (
+        crate::actions::current_workspace(ctx, &context),
+        context.workspace_label,
+    )
 }
 
 fn new_app<'a>(ctx: &'a Ctx<'a>, mode: Mode) -> App<'a> {

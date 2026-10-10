@@ -476,8 +476,8 @@ enum ThreadCommand {
     Merge {
         slug: String,
         id: String,
-        #[arg(long, value_enum, default_value_t = CliMergeMethod::Squash)]
-        method: CliMergeMethod,
+        #[arg(long, value_enum, default_value_t = pr::MergeMethod::Squash)]
+        method: pr::MergeMethod,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
@@ -522,23 +522,6 @@ enum ThreadCommand {
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
-enum CliMergeMethod {
-    Squash,
-    Merge,
-    Rebase,
-}
-
-impl From<CliMergeMethod> for pr::MergeMethod {
-    fn from(value: CliMergeMethod) -> Self {
-        match value {
-            CliMergeMethod::Squash => pr::MergeMethod::Squash,
-            CliMergeMethod::Merge => pr::MergeMethod::Merge,
-            CliMergeMethod::Rebase => pr::MergeMethod::Rebase,
-        }
-    }
-}
-
-#[derive(clap::ValueEnum, Clone, Copy)]
 enum Toggle {
     On,
     Off,
@@ -547,21 +530,6 @@ enum Toggle {
 impl Toggle {
     fn on(self) -> bool {
         matches!(self, Toggle::On)
-    }
-}
-
-#[derive(clap::ValueEnum, Clone, Copy)]
-enum CliNodeRole {
-    Worker,
-    Coordinator,
-}
-
-impl From<CliNodeRole> for NodeRole {
-    fn from(value: CliNodeRole) -> Self {
-        match value {
-            CliNodeRole::Worker => NodeRole::Worker,
-            CliNodeRole::Coordinator => NodeRole::Coordinator,
-        }
     }
 }
 
@@ -574,8 +542,8 @@ struct NodeStartArgs {
     #[arg(long, default_value = "root")]
     parent: String,
     /// Coordinators can create children; workers cannot
-    #[arg(long, value_enum, default_value_t = CliNodeRole::Worker)]
-    role: CliNodeRole,
+    #[arg(long, value_enum, default_value_t = NodeRole::Worker)]
+    role: NodeRole,
     /// Explicitly grant a coordinator permission to create children
     #[arg(long, conflicts_with = "no_spawn")]
     can_spawn: bool,
@@ -1153,7 +1121,7 @@ pub fn run() -> Result<()> {
                 let project = Project::load(&ctx.root, &slug)?;
                 threads::refuse_agent_pane(&ctx, &project, "`thread merge`")?;
                 let record = thread::load(&project, &id)?;
-                steps::merge_pull_request(&ctx, &project, &id, method.into())?;
+                steps::merge_pull_request(&ctx, &project, &id, method)?;
                 // The merge already happened; a missing item must not report failure.
                 if let Err(error) = inbox::write(
                     &project,
@@ -1263,7 +1231,6 @@ pub fn run() -> Result<()> {
                     .map(crate::thread::Kind::parse)
                     .transpose()?;
                 let task = read_text(&task_file)?;
-                let role = role.into();
                 let can_spawn = if can_spawn {
                     Some(true)
                 } else if no_spawn {
