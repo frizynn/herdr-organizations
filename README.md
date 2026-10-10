@@ -47,7 +47,7 @@ A node's profile is `--profile`, else its parent's, else the project default for
 
 The ticker is the one resident process. It listens to Herdr events instead of polling, reconciles once a minute, and reports display tokens that Herdr draws in its own sidebar: per coordinator workspace `●need ●working ●review` counts, per agent `$org_task`, and "needs you" in place of "blocked". `herdr-organizations sidebar install` adds the rows that render them without touching your rows or the sidebar headers. An optional dock split shows one coordinator next to its agents from the same state file.
 
-Keybindings default to the design (`n` new, `c` coordinator, `t` thread, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` jump, or answer from a thread's detail) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
+The first row holds the tabs Projects, Board and Settings, clickable or cycled with Tab. Keybindings default to the design (`n` new project, `c` coordinator, `t` thread, both under the selected coordinator, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` answer from a thread's detail) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
 
 The upstream sidebar grouping stays: `configure` writes rows that group agents and spaces by project with a bold head row and a `$hp_sub` line, and the tab bar shows `projects: N need you`. Pane metadata adds node depth, parent, role, tree order and `$org_task`. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
 

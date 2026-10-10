@@ -40,14 +40,15 @@ Use the installed Codex CLI to check a node with a model, reasoning effort and e
 
 Open **Herdr Organizations: launcher** (or the bound key) in a disposable session.
 
-1. Confirm needs-you rows list first, oldest first, then each project with its coordinators numbered 1-9. Press a digit and confirm the tree opens on that coordinator.
-2. In the tree, move with Up/Down and press Enter on a live node: the pane receives focus and the popup closes. Close an active tab and confirm Enter recreates it. Space folds a coordinator and the fold survives a state-file change.
-3. Press `b` for the board; Left/Right/Up/Down move between cards, `f` cycles the coordinator filter, Enter opens the detail, Esc returns.
-4. On a thread in review with a pull request, press `m`: the confirmation is drawn inside the popup. With a blocker it only offers Esc. Merge only in a scratch repository.
-5. Press `n`: type a name and confirm the inline validation and the CLI preview update. Esc cancels without creating anything.
-6. Press `s`: change dock side and notification choice with Left/Right, rebind a command (Enter, then a key) and confirm `~/.config/herdr-projects/tui.toml` holds only the changed key. A conflicting key is refused with a message.
-7. Press Esc until the popup closes and confirm no `herdr-organizations pane ui` process remains.
-8. Click a row to select it and click it again to open it when the client forwards mouse events.
+1. Confirm the tabs Projects, Board and Settings on the first row, the active one highlighted. Tab and Shift+Tab cycle them, and a click on each switches to it. Confirm needs-you rows list first, oldest first, then each project with its coordinators nested and no number column.
+2. Select a project, then a coordinator, then a thread, and confirm the bottom row reads `New under <project>`, `New under <coordinator>` and `New under <the thread's coordinator>`. Press `c` and `t` (or click the chips) and confirm the form's Under field and the CLI preview's `--parent` name that node.
+3. In the tree, move with Up/Down and press Enter on a live node: the pane receives focus and the popup closes. Close an active tab and confirm Enter recreates it. Space folds a coordinator and the fold survives a state-file change.
+4. Press `b` for the board; Left/Right/Up/Down move between cards, `f` cycles the coordinator filter, Enter opens the detail, Esc returns.
+5. On a thread in review with a pull request, press `m`: the confirmation is drawn inside the popup. With a blocker it only offers Esc. Merge only in a scratch repository.
+6. Press `n`: type a name and confirm the inline validation and the CLI preview update. Esc cancels without creating anything.
+7. Press `s`: change dock side and notification choice with Left/Right, rebind a command (Enter, then a key) and confirm `~/.config/herdr-projects/tui.toml` holds only the changed key. A conflicting key is refused with a message.
+8. Press Esc until the popup closes and confirm no `herdr-organizations pane ui` process remains.
+9. Click a row to select it and click it again to open it when the client forwards mouse events.
 
 ## Native sidebar tokens and headers
 
