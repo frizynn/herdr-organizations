@@ -1193,6 +1193,37 @@ fn a_failed_view_close_leaves_the_node_open_and_retryable() {
 }
 
 #[test]
+fn a_view_herdr_already_closed_counts_as_closed() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    world.thread(&project, world.home.path(), |_| {});
+    world.runner.on(
+        "workspace close w2",
+        fail(
+            1,
+            r#"{"error":{"code":"workspace_not_found","message":"workspace w2 not found"}}"#,
+        ),
+    );
+
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            close_view: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Resolved
+    );
+}
+
+#[test]
 fn a_failed_final_copy_blocks_resolve_unless_skipped() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
