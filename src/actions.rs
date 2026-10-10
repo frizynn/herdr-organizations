@@ -180,6 +180,9 @@ pub fn run_action(ctx: &Ctx, id: &str) -> Result<()> {
             ),
         },
         "unfocus" => overview::unfocus(ctx, &SessionFlags::default()),
+        "agents-view" => crate::setup::set_agents_view(ctx, None).map(|view| {
+            println!("agents sidebar: {}", crate::sidebar::agents_view_word(view));
+        }),
         "adopt-workspace" => {
             // The originating pane is captured here, before any popup opens.
             let pane = current_pane(ctx, &context);

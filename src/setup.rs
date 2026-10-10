@@ -782,9 +782,32 @@ pub fn apply_view(ctx: &Ctx) {
     if !configured {
         return;
     }
+    let view = crate::tui_config::load(&ctx.config_dir)
+        .map(|c| c.view.agents)
+        .unwrap_or_default();
     if let Some(herdr) = session_herdr(ctx) {
-        let _ = herdr.agent_view_set(crate::sidebar::default_view());
+        let _ = crate::sidebar::apply_agents_view(&herdr, view);
     }
+}
+
+/// Switches the agents list between the project view and Herdr's own, saves
+/// the choice and applies it now. Returns the view now shown.
+pub fn set_agents_view(
+    ctx: &Ctx,
+    choice: Option<crate::tui_config::AgentsView>,
+) -> anyhow::Result<crate::tui_config::AgentsView> {
+    use crate::tui_config::AgentsView;
+    let mut config = crate::tui_config::load(&ctx.config_dir)?;
+    config.view.agents = choice.unwrap_or(match config.view.agents {
+        AgentsView::Projects => AgentsView::Herdr,
+        AgentsView::Herdr => AgentsView::Projects,
+    });
+    crate::tui_config::save(&ctx.config_dir, &config)?;
+    if let Some(herdr) = session_herdr(ctx) {
+        crate::sidebar::apply_agents_view(&herdr, config.view.agents)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(config.view.agents)
 }
 
 #[cfg(test)]

@@ -253,6 +253,25 @@ pub fn needs_you_line(root: &Path) -> Option<String> {
 
 /// The default view: agents in project blocks (`hp_group`, see `grouping`),
 /// each by need; agents without it last.
+/// Puts Herdr's agents list in the chosen view: grouped by project, or
+/// Herdr's own, whose header cycles priority and the other built-in sorts.
+pub fn apply_agents_view(
+    herdr: &crate::herdr::Herdr,
+    view: crate::tui_config::AgentsView,
+) -> Result<(), crate::herdr::HerdrError> {
+    match view {
+        crate::tui_config::AgentsView::Projects => herdr.agent_view_set(default_view()),
+        crate::tui_config::AgentsView::Herdr => herdr.agent_view_clear(crate::herdr::SOURCE),
+    }
+}
+
+pub fn agents_view_word(view: crate::tui_config::AgentsView) -> &'static str {
+    match view {
+        crate::tui_config::AgentsView::Projects => "projects",
+        crate::tui_config::AgentsView::Herdr => "herdr (priority and Herdr's sorts)",
+    }
+}
+
 pub fn default_view() -> serde_json::Value {
     serde_json::json!({
         "source": crate::herdr::SOURCE,

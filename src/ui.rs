@@ -24,7 +24,9 @@ use crate::term::{
     Terminal, YELLOW,
 };
 use crate::thread::NodeRole;
-use crate::tui_config::{self, Action, Config, Dock as DockSide, Notify, Resolved, Screen};
+use crate::tui_config::{
+    self, Action, AgentsView, Config, Dock as DockSide, Notify, Resolved, Screen,
+};
 use crate::ui_ops;
 
 pub const HARNESSES: [&str; 3] = ["claude", "codex", "opencode"];
@@ -1684,7 +1686,7 @@ impl<'a> App<'a> {
     fn settings_lines(&self) -> Vec<Line> {
         let v = &self.config.view;
         let mut lines = vec![Line::new().at(1, "VIEW", HEAD)];
-        let rows: [(&str, String, &str); 6] = [
+        let rows: [(&str, String, &str); 7] = [
             (
                 "Dock",
                 match v.dock {
@@ -1719,6 +1721,15 @@ impl<'a> App<'a> {
                 "Answer with 1-9",
                 if v.answer { "on" } else { "off" }.into(),
                 "on (thread detail only) · off",
+            ),
+            (
+                "Agents sidebar",
+                match v.agents {
+                    AgentsView::Projects => "projects",
+                    AgentsView::Herdr => "herdr",
+                }
+                .into(),
+                "projects · herdr (priority…)",
             ),
             (
                 "Launcher key",
@@ -3075,6 +3086,20 @@ impl<'a> App<'a> {
                 v.notify = all[cycle(3, at)];
             }
             4 => v.answer = !v.answer,
+            5 => {
+                let next = match v.agents {
+                    AgentsView::Projects => AgentsView::Herdr,
+                    AgentsView::Herdr => AgentsView::Projects,
+                };
+                self.message = match crate::setup::set_agents_view(self.ctx, Some(next)) {
+                    Ok(view) => {
+                        self.config.view.agents = view;
+                        format!("agents sidebar: {}", crate::sidebar::agents_view_word(view))
+                    }
+                    Err(error) => format!("{error:#}"),
+                };
+                return;
+            }
             _ => return,
         }
         self.save_config();

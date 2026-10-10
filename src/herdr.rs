@@ -828,6 +828,12 @@ impl<'a> Herdr<'a> {
         self.request("agent.view.set", params).map(|_| ())
     }
 
+    /// Removes the agent view `source` installed, leaving another tool's alone.
+    pub fn agent_view_clear(&self, source: &str) -> Result<(), HerdrError> {
+        self.request("agent.view.clear", serde_json::json!({ "source": source }))
+            .map(|_| ())
+    }
+
     /// Moves a Space to `insert_index` (a gap in the list before the move;
     /// socket only in 0.9.1).
     pub fn workspace_move(
