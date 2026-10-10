@@ -307,6 +307,22 @@ fn join_text(thread: std::thread::JoinHandle<Vec<u8>>) -> String {
     String::from_utf8_lossy(&thread.join().unwrap_or_default()).into_owned()
 }
 
+/// Starts `command` in a session of its own, so it outlives the process group
+/// and terminal of whatever started it (an agent's shell tool, a popup).
+pub fn new_session(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe extern "C" {
+        fn setsid() -> i32;
+    }
+    // SAFETY: setsid is async-signal-safe and touches no memory.
+    unsafe {
+        command.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+}
+
 fn kill(child: &mut std::process::Child, own_group: bool) {
     if own_group {
         // The child is its group's leader, so its pid is the pgid. Grandchildren

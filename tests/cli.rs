@@ -322,3 +322,49 @@ fn node_rules_of_an_unknown_node_is_an_error() {
     );
     assert!(!output.status.success());
 }
+
+#[test]
+fn jump_waits_for_the_popup_to_exit_and_reports_a_failure_as_a_notification() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
+    // A herdr that records its arguments and refuses every call.
+    let log = home.path().join("herdr.log");
+    let herdr = home.path().join("herdr");
+    std::fs::write(
+        &herdr,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut jump = Command::new(BIN)
+        .env_clear()
+        .env("HOME", home.path())
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_SOCKET_PATH", home.path().join("herdr.sock"))
+        .args(["--root", root_arg, "jump", "node", "demo", "root"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!log.exists(), "it called herdr while the popup was open");
+
+    // The popup's process exits: its end of the pipe closes.
+    drop(jump.stdin.take());
+    assert!(jump.wait().unwrap().success());
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        calls
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with("notification show Herdr Organizations --body "),
+        "{calls}"
+    );
+}

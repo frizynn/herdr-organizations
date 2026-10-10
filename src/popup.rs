@@ -2706,7 +2706,6 @@ fn focus(ctx: &Ctx, socket: &str, machine: &str, pane: &str) {
     if herdr.agent_focus(pane).is_ok() {
         return;
     }
-    use std::os::unix::process::CommandExt;
     let mut args = Vec::new();
     if !machine.is_empty() {
         args.extend(["--machine".to_string(), machine.to_string()]);
@@ -2720,15 +2719,7 @@ fn focus(ctx: &Ctx, socket: &str, machine: &str, pane: &str) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    unsafe {
-        command.pre_exec(|| {
-            unsafe extern "C" {
-                fn setsid() -> i32;
-            }
-            setsid();
-            Ok(())
-        });
-    }
+    crate::runner::new_session(&mut command);
     let _ = command.spawn();
 }
 
