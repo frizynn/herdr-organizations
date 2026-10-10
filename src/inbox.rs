@@ -22,6 +22,10 @@ pub struct Item {
     pub subject: String,
     pub created: String,
     pub summary: String,
+    /// What happened, in a few words this binary chose ("merged", "blocked on
+    /// a prompt"). The nudge line is built from subjects and events only, never
+    /// from summaries, which may quote text from reports or GitHub.
+    pub event: String,
     /// Empty except for `routine` items.
     #[serde(skip)]
     pub body: String,
@@ -64,11 +68,13 @@ pub fn safe_subject(subject: &str) -> String {
 
 /// Writes one item. The id is `<UTC timestamp>-<kind>-<subject>-<n>`, where
 /// `<n>` is a counter allocated under the project lock, so two events in one
-/// tick never share a name. `body` is empty except for `routine` items.
+/// tick never share a name. `event` is a fixed phrase from this binary. `body`
+/// is empty except for `routine` items.
 pub fn write(
     project: &Project,
     kind: &str,
     subject: &str,
+    event: &str,
     summary: &str,
     body: &str,
 ) -> Result<String> {
@@ -90,6 +96,7 @@ pub fn write(
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect(),
+        event: event.to_string(),
         body: String::new(),
     };
     let mut text = format!("+++\n{}+++\n", toml::to_string(&item)?);
@@ -195,10 +202,43 @@ pub fn done(project: &Project, ids: &[String], all: bool) -> Result<usize> {
     Ok(moved)
 }
 
-fn inline_body(body: &str) -> (String, bool) {
-    let mut chars = body.chars();
-    let text: String = chars.by_ref().take(MAX_INLINE_BODY_CHARS).collect();
-    (text, chars.next().is_some())
+/// `inbox list`: unhandled items, oldest first. Reads only: nothing is marked
+/// seen or moved.
+pub fn print_list(project: &Project, json: bool) -> Result<()> {
+    let items = unhandled(project);
+    if json {
+        let seen = seen(project);
+        let items: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.id,
+                    "kind": item.kind,
+                    "subject": item.subject,
+                    "created": item.created,
+                    "summary": item.summary,
+                    "body": item.body,
+                    "seen": seen.contains(&item.id),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+                "project": project.slug,
+                "items": items,
+            })
+        );
+        return Ok(());
+    }
+    for item in items {
+        println!(
+            "{}\t{}\t{}\t{}",
+            item.id, item.kind, item.subject, item.summary
+        );
+    }
+    Ok(())
 }
 
 fn inline_text(text: &str, limit: usize) -> (String, bool) {
@@ -217,7 +257,7 @@ fn render_item(item: &Item) -> String {
         ));
     }
     if !item.body.is_empty() {
-        let (body, body_truncated) = inline_body(&item.body);
+        let (body, body_truncated) = inline_text(&item.body, MAX_INLINE_BODY_CHARS);
         rendered.push_str(&format!("  Body:\n{body}\n"));
         if body_truncated {
             rendered.push_str(&format!(
@@ -322,8 +362,16 @@ mod tests {
     fn two_events_in_one_tick_get_two_items() {
         let root = tempfile::tempdir().unwrap();
         let project = project::create(root.path(), "demo", "", vec![]).unwrap();
-        let a = write(&project, "thread-state", "t-0001", "first", "").unwrap();
-        let b = write(&project, "thread-state", "t-0001", "second\nline", "").unwrap();
+        let a = write(&project, "thread-state", "t-0001", "idle", "first", "").unwrap();
+        let b = write(
+            &project,
+            "thread-state",
+            "t-0001",
+            "idle",
+            "second\nline",
+            "",
+        )
+        .unwrap();
         assert_ne!(a, b);
         assert!(a.ends_with("-thread-state-t-0001-1"), "{a}");
         assert!(b.ends_with("-thread-state-t-0001-2"), "{b}");
@@ -339,12 +387,21 @@ mod tests {
     fn routine_items_carry_a_body_and_subjects_are_made_file_safe() {
         let root = tempfile::tempdir().unwrap();
         let project = project::create(root.path(), "demo", "", vec![]).unwrap();
-        let id = write(&project, "outage", "Elias MacBook/../x", "down", "").unwrap();
+        let id = write(
+            &project,
+            "outage",
+            "Elias MacBook/../x",
+            "unreachable",
+            "down",
+            "",
+        )
+        .unwrap();
         assert!(id.contains("-outage-elias-macbook----x-"), "{id}");
         write(
             &project,
             "routine",
             "nightly",
+            "due",
             "due",
             "Check the build.\n\n```\nout\n```",
         )
@@ -375,6 +432,7 @@ mod tests {
                 &project,
                 "thread-state",
                 &format!("t-{n:04}"),
+                "state",
                 &format!("state {n}"),
                 "",
             )
@@ -404,7 +462,7 @@ mod tests {
 
         let root = tempfile::tempdir().unwrap();
         let project = project::create(root.path(), "demo", "", vec![]).unwrap();
-        write(&project, "thread-state", "t-0001", "ready", "").unwrap();
+        write(&project, "thread-state", "t-0001", "ready", "ready", "").unwrap();
 
         assert!(consume(&project, &mut Broken).is_err());
         assert_eq!(unhandled(&project).len(), 1);

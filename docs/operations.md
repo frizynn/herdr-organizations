@@ -1,100 +1,237 @@
 # Operations and development
 
-How Herdr Organizations stores recursive nodes, what its safety settings do and do not stop, and how to operate nodes on other machines.
+How Herdr Organizations works, what it writes where, how it stores recursive nodes, what its safety settings do and don't stop, and how to run nodes on other machines. Herdr Organizations is a superset of Herdr Projects 0.2.34: everything below that names `herdr-projects` works the same with `herdr-organizations`, the same program under its own name.
 
 ## How it works
 
-- **The root coordinator is an ordinary agent** in a Herdr pane that follows a skill (`herdr-organizations skill` prints it). Local coordinator nodes may create children beneath themselves. Plugin code does not route messages, plan work or decide anything.
-- **The binary does mechanics.** Starting or restarting a node, copying reports, marking inbox items handled: each is one deterministic subcommand. It talks to Herdr through Herdr's CLI. The existing `focus`/`unfocus` actions control the flat sidebar view. The organization popup focuses a live agent, focuses a surviving tab, or delegates a missing active tab to the same restart mechanic used by the CLI.
-- **Files are the record, prompts are nudges.** Threads write a report file, the ticker writes events to an inbox folder, and the root coordinator keeps a compact `HANDOFF.md`. A human turn starts with full `context`; an automated ticker turn consumes one bounded event batch without reloading the full digest. A missed prompt loses nothing.
-- **One ticker per projects root** checks every 15 seconds: node state and groups, pending prompts, changed reports, pull requests (every two minutes), routines, auto-resolve. Remote machines are polled once a minute.
-- **Tools are found even under a bare `PATH`.** A Herdr server started outside a login shell gives its plugins a minimal `PATH`; the binary appends `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin` to its own, so the ticker finds `gh`, `rsync` and friends. `ticker status` and `doctor` show what resolved.
-- **Nothing destructive is automatic.** The binary never removes a worktree, deletes a branch, merges or pushes on its own. Text from reports, pull requests and command output is never placed in a prompt.
+- **It relies on Herdr and nothing else.** No other plugin is needed or called. Pull requests open in your browser, text files open in a new Herdr tab running `$EDITOR`.
+- **A project is a folder.** `~/.herdr-projects/<slug>/` holds `AGENTS.md`, which tells any agent started in that folder that it is the coordinator and which commands to run. `CLAUDE.md` is a link to it. Several coordinators can share the folder.
+- **The coordinator is an ordinary agent** following a skill (`herdr-projects skill` prints it). Local coordinator nodes may create children beneath themselves. Plugin code does not route messages, plan work or decide anything.
+- **The binary does mechanics.** Starting a thread, copying reports, cleaning up after a resolve: each is one deterministic subcommand. It talks to Herdr through Herdr's CLI. The exceptions use the socket: the agent view (`focus`, `unfocus`, the default sort; Herdr 0.9.1 has no CLI for `agent.view.set`), and the ticker's `events.subscribe` connection, agent and pane lists and `org_*` token reports.
+- **Agents report their own progress.** `herdr-projects report --percent N --activity "..."`, run by the agent in its pane, writes one small JSON file per pane under `<root>/.progress/` which the ticker shows on the pane's sub-line for five minutes. Thread briefs and the coordinator skill carry the instructions, so any agent reports; hooks in Claude Code, Codex, Droid, Gemini CLI and Copilot CLI (installed by `configure`) also inject them and a reminder. There is no daemon and no database.
+- **Files are the record, prompts are nudges.** Threads write a report file, the ticker writes events to an inbox folder, and the coordinator reads state with `context` at the start of every turn. A missed prompt loses nothing.
+- **One ticker per projects root** wakes on Herdr events (one `events.subscribe` connection per project socket, a 250 ms settle) and reconciles at least every minute, every 15 seconds while a launch or brief is pending; between passes it checks for briefs to send every 2 seconds. Each pass covers coordinators (any agent in a project folder, also one started by hand in a project never opened), thread state and groups, sidebar tokens and the per-project grouping of agents and Spaces, pending prompts, changed reports, pull requests (every two minutes), routines, auto-resolve, notifications. Remote machines are polled once a minute.
+- **Tools are found even under a bare `PATH`.** The binary appends `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `~/.cargo/bin` to its own `PATH`, so a ticker started by Herdr finds `gh` and `rsync`.
+- **Cleanup is part of the flow, never forced.** Resolving a thread removes its worktree (Herdr and git refuse a dirty one, and the plugin never forces) and, once its pull request is merged, its local branch. Reports and library files always stay. Text from reports, pull requests and command output is never placed in a prompt.
 
 ## Where things live
 
 ```
 ~/.herdr-projects/<project>/
-  PROJECT.md              settings (TOML between +++ lines) and your standing instructions; yours
-  HANDOFF.md              compact objective, decisions, active work and next action; coordinator's
+  PROJECT.md              settings (TOML between +++ lines) and your standing instructions
+  AGENTS.md, CLAUDE.md    who is the coordinator, by working directory; written by the binary
+  HANDOFF.md              compact objective, decisions, active work and next action; the coordinator's
   MEMORY.md, memory/      project memory; the coordinator's
-  nodes/<id>/             node instructions, memory index and node-specific memory files
-  TASKS.md                the task list; the coordinator's
-  routines/<name>.md      routines; the coordinator's
+  nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md
+  TASKS.md                the task list, each task with optional indented notes; the coordinator's
+  routines/<name>.md      routines, including pr-followup.md; the coordinator's
+  uploads/                files you give the threads
   scratch/                the coordinator's temporary files
-  threads/<id>.toml       node and lifecycle record     threads/<id>.md   home copy of its report
-  threads/<id>.task.md    the task as given              threads/<id>/     working folder of a tab node
+  threads/<id>.toml       thread record          threads/<id>.md       home copy of its report
+  threads/<id>.task.md    the task and every forwarded prompt (## Follow-ups)
+  threads/<id>.next.md    Next lines the coordinator added    threads/<id>/  a tab thread's folder
   inbox/, inbox/done/     events for the coordinator
   library/<id>/           home copy of files a thread produced
-  .state/                 status, coordinator pane, ticker state, lock
-~/.herdr-projects/.ticker.lock  .ticker.log  .trash/
-~/.config/herdr-projects/config.toml             yours, edited by hand
+  .state/                 status, coordinator record, live coordinators, ticker state, lock
+~/.herdr-projects/.ticker.lock  .ticker.log  .progress/  .trash/
+~/.herdr-projects/.organizations-state.json      the popup's view model, written by the ticker
+~/.config/herdr-projects/tui.toml                popup and dock keybindings and view settings
+~/.config/herdr-projects/config.toml             yours: root, profiles, safety tables, machines
+~/.config/herdr-projects/owned.json              what `configure` changed, for `unconfigure`
 ~/.config/herdr-projects/approved-routines.json  written only by `routine approve`
 ```
 
-Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`: `brief.md` (written by the binary), `report.md` and `library/` (written by the agent). In a git repository that folder is added to `info/exclude`, so nothing in it is committed. **Git therefore treats it as clean: removing a worktree deletes it**, which is why `--remove-worktree` insists on a complete copy home first.
+Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`: `brief.md` (written by the binary), `report.md` and `library/` (written by the agent). In a git repository that folder is in `info/exclude`, so nothing in it is committed. Git therefore treats it as clean and removing a worktree deletes it, which is why a resolve keeps the worktree when the final copy home was partial.
 
-`PROJECT.md` settings: `name` (the Herdr workspace label; an edited name renames the workspace on the next `open`), `goal`, `repos` (`path`, optional `machine`), `coordinator_agent`, `thread_agent` (default `claude`), `max_parallel_threads` (3), `auto_resolve_days` (7), `nudge` (`false`). The historical `max_parallel_threads` name still caps active nodes.
+`PROJECT.md` settings, all changeable from the Projects popup's settings section, from chat, or with `herdr-projects set <project> <key> <value>`: `name` (the workspace label), `goal`, `repos` (`repos.add PATH[@MACHINE]`, `repos.remove PATH`), `coordinator_profile` and `thread_profile` (the default [profiles](#agent-profiles); the old names `coordinator_agent` and `thread_agent` still read), `max_parallel_threads` (10), `auto_resolve_days` (7), `nudge` (`true`), `mute` (`false`).
 
-The virtual `root` is the project coordinator. A new worker has `parent_id=root`, role `worker` and cannot spawn. A local coordinator can create worker or coordinator children at any depth when `can_spawn=true`. Remote workers remain supported. A remote coordinator with child-spawn permission is refused until a remote CLI bridge is available. Node scopes are `nodes/<id>/INSTRUCTIONS.md`, `nodes/<id>/MEMORY.md` and `nodes/<id>/memory/*.md`. A brief includes project context followed by each ancestor scope through the target. Sibling and descendant context is excluded. See [Architecture](architecture.md) for validation and storage details.
+The virtual `root` is the project coordinator. A thread record is a node: a new worker has `parent_id = "root"`, role `worker` and cannot spawn. A local coordinator node can create worker or coordinator children at any depth when `can_spawn = true`. Records written before nodes load as workers under `root`; reading never rewrites them. A brief includes the project context, then each ancestor's node scope from root to parent, then the node's own; siblings and descendants are excluded. See [Architecture](architecture.md) for validation and storage details.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `new <name> [--goal] [--repo PATH[@MACHINE]]...` | Create a project folder. |
-| `list [--all]` | Projects with status and thread counts by group. |
-| `open <project> [--reprime] [--session N \| --socket P] [--rebind]` | Workspace, coordinator tab and coordinator agent; focuses it when it already runs. |
-| `context <project> [--peek]` | Full human-turn digest: project instructions, handoff, memory index, tasks, organization tree, inbox and routines. `--peek` records nothing. |
-| `inbox consume <project>` | Print and archive one bounded batch after successful stdout delivery; used by automated ticker turns. |
-| `inbox done <project> <item>... \| --all` | Mark inbox items handled. |
-| `node start <project> --parent root\|<id> --role worker\|coordinator --title T [profile flags] [--repo PATH] [--machine M] [--base REF] --task-file F` | New hierarchy node; `node create` is an alias, and `-` reads the task from standard input. Returns before the agent is up. |
-| `node restart`, `node prompt`, `node list`, `node show`, `node ack`, `node resolve [--close-view]` | Hierarchy-aware lifecycle and reports. `--close-view` closes the recorded Herdr surface but keeps the branch and worktree. |
-| `thread start <project> ...` | Backward-compatible alias for a worker directly under `root`. Existing thread lifecycle commands remain accepted for old records. |
-| `organizations` action | Project picker and recursive tree popup with keyboard selection, session recovery and focus. |
-| `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Node work grouped by attention, as text and in the flat sidebar. |
-| `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
-| `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |
-| `ticker start \| run \| stop \| status`, `doctor`, `skill` | Housekeeping. |
+| `new <name> [--goal] [--repo PATH[@MACHINE]]... [--thread-profile P] [--coordinator-profile P]` | Create a project folder. The profiles default to `[defaults]` in config.toml, else `claude`. |
+| `open <project> [--profile P] [--new] [--tab] [--session N \| --socket P] [--rebind]` | A coordinator agent in the project folder; focuses a running one. From a shell pane inside Herdr it runs in that pane and quitting it returns to the shell; `--tab`, the popup, actions and a terminal outside Herdr use a tab of the project's workspace. |
+| `context <project> [--peek]` | The digest the coordinator reads every turn. |
+| `assignable <project> [--refresh] [--check OWNER]` | Who TASKS.md tasks may be assigned to (see [Task owners](#task-owners)); `--check` refuses an owner that is not valid. |
+| `coordinator prompt <project> --text-file F` | A sentence to the coordinator (the popup's task keys use it). |
+| `thread start <project> --title T [--repo PATH] [--kind worktree\|tab\|checkout] [--profile P] [--machine M] [--base REF] --task-file F [--from-task TITLE]` | New thread; `-` reads the task from standard input. `--kind` is the placement; `--profile` is the agent, one the project allows. `--from-task` adds a TASKS.md task's notes and takes `--profile` and `--machine` from its owner. |
+| `thread prompt`, `thread next [--line N \| --add TEXT]`, `thread stop`, `thread restart [--profile P]` | Steer a thread. Prompts are recorded in its task file. |
+| `thread read [--lines N]`, `thread keys [KEY]... [--text T]`, `thread brief` | Answer a thread's pane without going there: print what it shows (a trust dialog, a question menu, a permission prompt), then type text and press keys (`up`, `down`, `enter`, `esc`, `tab`, a digit). `thread keys` refuses a trust screen when `trust_screens` is `user`. `thread brief` sends a brief the ticker has not delivered yet (the ticker waits for a settled, empty input box, counts a brief sent only once the agent starts working, never types it twice, and after three unconfirmed tries leaves an inbox item). |
+| `thread list/show [--json]`, `thread ack`, `thread adopt` | Look at threads. `--json` prints the versioned document of [docs/json.md](json.md). |
+| `thread resolve [--keep-worktree \| --close-view] [--discard-uncopied] [--skip-copy] [--reopen]` | Final copy home, then clean up. `--close-view` keeps the worktree and branch, closes the thread's tab or workspace first, and resolves nothing when it cannot close it. |
+| `thread merge [--method squash\|merge\|rebase] [--json]`, `thread set [--auto-fix-ci on\|off] [--auto-merge on\|off] [--json]` | Merge a thread's pull request only when it is open, approved, conflict-free and every check passed, pinned to the checked head commit; and the per-thread pull request automation. Both refuse from an agent pane of the project. Auto-fix leaves events an enabled `pr` routine covers to that routine. |
+| `node start <project> --parent root\|<id> --role worker\|coordinator --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] --task-file F` | A node in the tree (`node create` is an alias). `thread start` is the same for a worker under `root`. |
+| `node restart [--profile P]`, `node prompt`, `node list [--json]`, `node show [--json]`, `node ack`, `node resolve [--keep-worktree \| --close-view]` | Hierarchy-aware lifecycle; `node list` prints the tree in stable preorder. |
+| `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
+| `list [--json]`, `new ... --json`, `overview [project] [--json]` | The project documents of [docs/json.md](json.md). |
+| `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
+| `sweep <project> [--dry-run] [--yes]` | Remove what nothing uses any more. |
+| `set <project> <key> <value>`, `routine list/toggle/approve`, `safety show/yolo/set` | Settings, routines and safety (see below). |
+| `profile list [--project P \| --names]`, `profile resolve [NAME]`, `profile add/edit/remove`, `profile allow threads\|coordinator NAMES... [--project P] [--all]`, `profile default threads\|coordinator NAME` | [Agent profiles](#agent-profiles). Everything but `list` and `resolve` needs a person at a terminal. |
+| `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. |
+| `rename <project> <new-slug> [--name NAME] [--dry-run]` | A new slug (folder name), and with `--name` a new display name. Refused while a thread is not resolved. While agents run in the project folder (its coordinator, which may run it itself) the ticker takes over: once they are idle (at most 5 minutes) it closes their panes, renames, reopens the coordinator in the new folder resuming its conversation, and prompts it with a note; `thread start` is refused meanwhile. The folder moves in one step; the thread records, the coordinator record, `AGENTS.md`, the project's `[safety]` table (yolo, profile lists), routine approvals and the home Space's label follow it. Branches and worktrees keep `hp/<old>/` and `sweep` still finds them; the coordinator's conversation follows (Claude Code's transcript is copied to the new folder; other harnesses resume by id, one that cannot starts anew). It lists what it could not update (other machines), then runs `doctor`. Run it again to finish one that stopped halfway. |
+| `popup [project]`, `focus [project]`, `unfocus`, `overview [project] [--wait]`, `needs-you --line` | Views. `popup` and the **projects** action open the Projects popup below; the **Herdr Organizations** launcher and the popup key open the Organizations popup. |
+| `configure [--key K] [--hooks-only] [--dry-run]`, `unconfigure`, `report`, `progress` | Sidebar, keys, hooks, the `autoproject` skill, self-reports. |
+| `open-file <path>`, `open-url <url>` | Open a text file in a new tab with `$EDITOR`, or a PR in the browser. |
+| `ticker start \| run \| stop \| status`, `doctor [--fix]`, `skill` | Housekeeping. `doctor --fix` also relinks `~/.local/bin/herdr-projects`. |
+| `update [--check]` | Update to the newest `vX.Y.Z` tag on origin: fetch, rebuild, `doctor --fix`, restart the ticker. This fork publishes no tags yet, so it exits 1 ([Updating](getting-started.md#updating)). |
 
-Groups, first match wins: Resolved; Working while starting; **Waiting on you** (failed, a launch stuck for 60 seconds, a pane gone with no report, or blocked for 30 seconds); **Working**; **Landing** (pull request open and approved); **Ready for review** (a report exists and either its pull request is open or you haven't acknowledged it); Idle. Threads idle for `auto_resolve_days` are resolved after a final copy home.
+## Groups
 
-`focus` replaces any sidebar view another tool has set, and `unfocus` clears whatever view is set, because Herdr holds a single one. `focus` covers local threads only.
+Every thread is in one group, shown in the sidebar, the popup and the digest, needs-you first:
 
-## Harness profiles
+1. **Waiting on you** (`needs you`): a failed start, a pane that is gone before a report, a launch stuck on a dialog, the agent blocked on a question or permission for 30 seconds, or the agent's own report `Waiting for you` while it is not working.
+2. **Ready for review** (`review`): a report you haven't acknowledged, or a report with an open pull request, while the agent is not working.
+3. **Landing**: an open pull request that is approved.
+4. **Working**: the agent works, a launch is under way, or the agent reported progress under 100% in the last five minutes.
+5. **Idle**, then **Resolved**.
 
-`node start` accepts `--harness`, `--model`, `--reasoning-effort`, `--permission-profile`, and repeatable `--raw-agent-arg`. The child inherits each omitted field from its parent. Raw argv components inherit only when the harness stays the same. Set a profile value to an empty string to clear an inherited value. `--can-spawn` explicitly grants a coordinator permission; `--no-spawn` creates a leaf coordinator. Workers cannot spawn, and the CLI rejects a child under a worker or a coordinator without spawn permission. For a known Herdr node pane, the caller must be a coordinator and its `--parent` must be its own id.
+Threads idle for `auto_resolve_days` are resolved (and cleaned) after a final copy home.
 
-Codex supports model, reasoning effort (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) and permission profiles (`read-only`, `workspace-write`, `full-access`). Claude Code supports model and permission profiles (`default`, `plan`, `accept-edits`, `bypass-permissions`). Claude reasoning effort has no built-in adapter. Other harnesses accept explicit raw argv only. Unsupported built-in values and conflicting permission, sandbox or approval flags are rejected before node placement. Raw values are passed as argv components, never through a shell. Legacy `thread_agent_args` remain appended after profile arguments for unrelated flags. Permission profiles validate argv only; they do not provide OS isolation or remove shell access.
+## The Organizations popup and dock
+
+The popup key (`prefix+a`, the **open-popup** action) and the **Herdr Organizations: launcher** action open the Organizations TUI: needs-you across all coordinators, projects with their coordinators, a New form for projects, coordinators, threads and workspaces, the project tree, a four-column board, thread detail with digit answers, an in-popup merge confirmation and settings. It reads `.organizations-state.json` and calls Herdr only for an action you ask for. The **toggle dock** action opens the same view in a split for one coordinator. Keybindings and view settings (dock, resolved rows, which transitions notify) live in `tui.toml` and in its Settings screen.
+
+## The Projects popup
+
+The **projects** action (or `popup`) opens it, scoped to the current workspace's project: the coordinator's workspace or a thread's, found by where its panes work. From any section, `P` opens a project picker with All projects first and the current scope highlighted: `↑`/`↓` (or `k`/`j`) move, `↵` switches, `esc` closes (archived projects are skipped; `↵` on a settings project row still jumps there). In the picker `/` filters by name or slug as you type; `esc` clears the filter, then closes. `/` in any section opens the picker straight into the filter. Outside a project it opens on all projects. Every key runs a CLI command; the popup can do nothing the CLI cannot.
+
+| Section | Keys |
+| --- | --- |
+| threads | `↵` jump to the pane · `1`-`9` send that Next line to the thread · `s` stop (Escape) · `r` restart with a kind picker · `a` ack · `x` resolve · `o` open the PR · `i` detail (report, Next list, files: `↵` opens, `y` copies the path) · `c` start or focus a coordinator of a chosen kind · `S` sweep |
+| tasks | `↵` jump to the delegated thread (or show the notes of a task without one) · `i` notes (a task with notes ends in `≡`) · `d` delegate · `m` done · `D` drop (each sends a sentence to the coordinator, which stays the only writer of TASKS.md) |
+| inbox | `↵` detail · `a` done |
+| routines | `↵` enable or disable · `i` the prompt |
+| settings | `↵` edit (also a safety row) · `Y` yolo mode on or off (asks before turning on) · `p` pause or resume · `A` archive · `X` delete (asks first). Unscoped, the rows are the all-projects safety defaults |
+| memory | `↵` read (change memory by asking the coordinator) |
+
+## Node flags
+
+A node's profile is `--profile` (or `--harness KIND`, the built-in profile of that kind), else its parent node's, else the project's default for its role: `thread_profile` for a worker, `coordinator_profile` for a coordinator node. It is checked against that role's allow-list at creation and at every launch. On top of the profile a node can carry `--model`, `--reasoning-effort` (the same flags as a profile's), `--permission-profile` and repeatable `--raw-agent-arg`; children inherit them, raw arguments only while the harness stays the same, and `thread restart --profile` clears them. A node's model and effort replace its profile's. Codex permission profiles are `read-only`, `workspace-write` and `full-access`; Claude Code's are `default`, `plan`, `accept-edits` and `bypass-permissions`; other harnesses take raw arguments only. Conflicting permission, sandbox or approval flags in raw, profile or project arguments are refused before placement, and a node with its own permission profile gets no yolo flags. These flags validate argv; they are not OS isolation.
 
 ## Safety settings
 
-Set per project in `~/.config/herdr-projects/config.toml`; `safety show <project>` prints the table header to use.
+They live in `~/.config/herdr-projects/config.toml`, per project and as an all-projects default; a project's own value wins, then the default, then the built-in value. Change them in the Projects popup's settings section (`Y` toggles yolo mode, `↵` edits a row) or in a terminal; `safety show <project>|--global` prints them and where each comes from.
+
+```sh
+herdr-projects safety yolo billing on          # or off, or default (use the all-projects value)
+herdr-projects safety yolo --global on         # every project without its own value
+herdr-projects safety set billing routine_commands on
+herdr-projects safety set billing start_threads default
+```
+
+`safety yolo` and `safety set` refuse unless standard input and output are a terminal, and ask `y/N` before writing. What they write:
 
 ```toml
-[safety."/path/to/herdr-projects/billing"]
-  start_threads = "propose"          # or "auto": the coordinator starts nodes without asking
-coordinator_agent_args = []        # extra arguments for the coordinator's agent CLI
-  thread_agent_args = []             # extra arguments for every node's agent CLI
+[safety.default]                   # all projects
+yolo = true
+
+[safety."/Users/you/.herdr-projects/billing"]
+yolo = false                       # on: threads start without asking, agents skip permission prompts
+start_threads = "propose"          # or "auto": the coordinator starts threads without asking
+trust_screens = "user"             # or "coordinator": who answers trust screens in thread panes (unset: follows yolo)
+coordinator_agent_args = []        # extra arguments for every coordinator's agent CLI
+thread_agent_args = []             # extra arguments for every thread's agent CLI
 routine_commands = false           # true lets approved routines run shell commands
 ```
 
-The table is keyed by the project folder's canonical path. It stays when you delete the project and applies to a new project at the same path.
+**Yolo mode** is the one switch for "never stop to ask": `start_threads` becomes `auto` whatever it says, and every coordinator and thread launches with its own harness's skip-permissions flag, added after the profile's own arguments: Claude Code `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, Gemini CLI and Qwen Code `--yolo`, Cursor Agent `--force`, OpenCode `--auto`, Copilot CLI `--allow-all-tools`, Amp `--dangerously-allow-all`, Pi nothing (it never asks). Other kinds have no known flag: their agents still ask (`safety show` says so for the project's kinds). Routine commands are not part of yolo mode: a routine command runs with no agent in the loop, so it stays behind `routine_commands` and a per-command approval.
+
+**Trust screens** are an agent's "trust this folder?" dialog, its restricted-folder chooser, and its hooks or settings review (Codex's "Hooks need review"). The harness saves the answer for every later session in that folder, so `trust_screens` says who gives it: `coordinator` (it answers them with `thread keys` for the thread's own folder) or `user` (it tells you, and `thread keys` refuses while one shows). Unset, it follows yolo mode: on, the coordinator; off, you. Whatever the setting, nothing is typed into a trust screen: a thread's brief waits, and `thread prompt` refuses, while one shows, even when Herdr reads the pane as idle, and the thread shows `needs you`.
+
+A change reaches agents launched after it. Running agents keep the flags they started with until restarted: `r` on a thread in the Projects popup, or quit the coordinator and `open` it again (it resumes its session). A running coordinator sees a new `start_threads` at its next `context`.
+
+`thread_agent_args` and `coordinator_agent_args` are from before profiles. They were written for the harness of the project's default profile, so they now reach only a built-in profile of that harness: Claude flags stay with Claude threads and no longer break a Codex thread. Move them into a profile of your own (below) and remove them.
+
+## Agent profiles
+
+A profile is a named launch setup: a harness (any Herdr agent kind), a model, a reasoning effort, extra arguments and a one-line description. The coordinator only ever chooses a profile by name (`thread start --profile deep`, `open --profile claude`), and `context` lists the ones it may use with their descriptions, so it can pick one per task. It can never pass a launch flag itself: `--agent-arg` is gone. Yolo mode still adds the harness's skip-permissions flag on top of a profile's arguments.
+
+```toml
+[profiles.luna]
+agent = "omp"
+args = ["--config", "~/.omp/agent/luna.yml"]   # `~/` is expanded for local agents
+description = "Cheap tier for small, clear tasks"
+
+[profiles.deep]
+agent = "codex"
+model = "gpt-5.5"
+effort = "high"
+description = "Hard debugging and design"
+
+[profiles.claude]                  # replaces the built-in `claude`
+agent = "claude"
+args = ["--add-dir", "~/dev/shared"]
+
+[defaults]                         # what `new` writes into a new PROJECT.md
+thread_profile = "claude"
+coordinator_profile = "claude"
+
+[safety.default]                   # every project without its own list
+thread_profiles = ["claude", "luna", "deep"]   # absent: every profile
+coordinator_profiles = ["claude"]
+
+[safety."/Users/you/.herdr-projects/billing"]
+thread_profiles = ["luna"]         # this project's own list wins
+```
+
+- **Built-ins.** Every Herdr agent kind is a profile of the same name with no arguments, so `thread_profile = "codex"` works with no config at all. Lists show the built-ins whose CLI is on `PATH` and looks signed in. Herdr exposes neither (its `integration.list` sees only hook files and some binaries), so the binary checks itself, offline: credential files and variables such as `~/.codex/auth.json`, `~/.claude.json`'s account, `~/.gemini/oauth_creds.json`, `CURSOR_API_KEY`. A kind with no known check counts once installed. Any built-in can be named even when it is not listed (a remote machine's, say).
+- **Model and effort** become the harness's own flags: `--model NAME` for every harness; effort as `--effort` (Claude Code: low, medium, high, xhigh, max; Copilot CLI: none to max), `-c model_reasoning_effort="…"` (Codex: none to ultra), `--thinking` (pi, oh-my-pi: off to max). Cursor puts effort in the model id (`gpt-5.6-sol-xhigh`), and Gemini CLI and OpenCode have no launch flag for it: use the model id or `args`.
+- **Allow-lists.** A project's own `thread_profiles` / `coordinator_profiles` wins, then `[safety.default]`'s, then every profile. A profile off the list is refused at `thread start`, `thread restart` and `open`, and the ticker checks again at every launch: a thread whose profile you removed or disallowed since fails with the reason and an inbox item. The project's defaults (`thread_profile`, `coordinator_profile` in PROJECT.md) must be allowed too; `doctor` says when one is not.
+- **Who changes what.** Profiles and lists live only in config.toml, which the coordinator never writes. `profile add/edit/remove/allow/default` refuse without a person at a terminal, as `routine approve` does; the Projects popup's settings section writes them directly (`n` new profile, `↵` edit, `d` delete, `↵` on a list toggles profiles with space). The default profiles in PROJECT.md are ordinary settings the coordinator may change when you ask, only to an allowed profile. This is a soft boundary: an agent that fakes a terminal or edits config.toml by hand is stopped only by its own permission prompts.
+- **Old threads and coordinators.** A thread started before profiles keeps its harness and its stored model flag. `open` resumes or reuses a coordinator only when it runs the same profile; one started before profiles counts as the built-in of its kind.
+
+## Task owners
+
+Each task in `TASKS.md` has at most one owner, in brackets after its title. The thread running it comes after, as status:
+
+```
+- [ ] Write the release notes (me)
+- [ ] Rename the settings keys (codex-fast)          a profile, on this machine
+- [ ] Fix the M1 build (@elias-macbook-pro-m1)       that machine; its coordinator picks the profile
+- [ ] Profile the ticker (deep@elias-macbook-pro-m1) that profile on that machine
+- [ ] Look into Safari logouts                       unassigned
+- [ ] Review the contract (Priya)                    a person, only when you name them
+- [ ] Fix login (claude) · t-0007                    delegated: t-0007 runs it
+```
+
+- **Agent owners.** The coordinator assigns only valid names: the thread profiles the project allows here, and each machine with the profiles it lists. Machines come from two places, used together: `herdr machine list` (their profiles are fetched over SSH by running `herdr-projects profile list --names` there), and config.toml, for a machine this one cannot reach, such as a sandboxed VM that only learns the names:
+
+  ```toml
+  [machines.elias-macbook-pro-m1]
+  profiles = ["claude", "codex-fast"]   # names only; gives no access
+  ```
+
+  A machine with an `ssh` key there is fetched as well. A machine is valid only if one of these sources knows it, and `profile@machine` only if that profile is in the machine's list from the lookup or from config.toml. `context` prints one `Assignable:` line (`claude, codex-fast, @m1: claude|pi`), and `assignable <project>` the full list. The SSH lookups are cached for an hour in `<root>/.machines.json`, so `context` does not reach other machines every turn; `assignable --refresh` looks again. A machine that did not answer and has no profiles in config.toml shows as `@m1 (not reached, profiles unknown)`: `@m1` is valid, `profile@m1` is refused. With no machines, only local profiles are valid.
+- **Checked owners.** The coordinator checks a profile or machine owner with `assignable --check` before writing it and refuses one that is not valid.
+- **People.** `me`, or any name or text you give (`(Elias)`, `(Priya Rao)`), is written only when you name that owner. A bare name that is no profile here is a person: shown as written and never delegated.
+- **Delegating.** `thread start --from-task "<title>"` starts the thread with the owner's profile and machine (`--profile`, `--machine`); a flag that contradicts the owner is refused. A remote thread runs its machine's own definition of the profile (see [Threads on other machines](#threads-on-other-machines)), and a `@machine` owner gets that machine's default thread profile.
+- **Old lines.** `(agent)` reads as unassigned and `(agent → t-0007)` as this machine's default profile with thread t-0007.
 
 ## The allow-list for your coordinator
 
-The coordinator runs the binary every turn, so allow-list it in your agent **by subcommand, never the bare binary**. `context` prints the exact prefix (`Commands: <binary> --root <root>`); the patterns must start with it. For Claude Code, in the project folder's `.claude/settings.local.json`:
+The coordinator runs the binary every turn, so allow-list it in your agent by subcommand, never the bare binary. `context` prints the exact prefix (`Commands: <binary> --root <root>`); the patterns must start with it. For Claude Code, in the project folder's `.claude/settings.local.json`:
 
 ```json
 { "permissions": { "allow": [
   "Bash(<binary> --root <root> skill:*)",
   "Bash(<binary> --root <root> context:*)",
-  "Bash(<binary> --root <root> inbox consume:*)",
+  "Bash(<binary> --root <root> assignable:*)",
+  "Bash(<binary> --root <root> report:*)",
   "Bash(<binary> --root <root> inbox done:*)",
   "Bash(<binary> --root <root> list:*)",
-  "Bash(<binary> --root <root> overview:*)",
-  "Bash(<binary> --root <root> safety show:*)",
   "Bash(<binary> --root <root> routine list:*)",
+  "Bash(<binary> --root <root> thread list:*)",
+  "Bash(<binary> --root <root> thread show:*)",
+  "Bash(<binary> --root <root> thread prompt:*)",
+  "Bash(<binary> --root <root> thread next:*)",
+  "Bash(<binary> --root <root> thread read:*)",
+  "Bash(<binary> --root <root> thread brief:*)",
+  "Bash(<binary> --root <root> thread keys:*)",
+  "Bash(<binary> --root <root> thread ack:*)",
+  "Bash(<binary> --root <root> thread restart:*)",
   "Bash(<binary> --root <root> node list:*)",
   "Bash(<binary> --root <root> node show:*)",
   "Bash(<binary> --root <root> node prompt:*)",
@@ -103,49 +240,61 @@ The coordinator runs the binary every turn, so allow-list it in your agent **by 
 ] } }
 ```
 
-These patterns also cover the here-document form the coordinator uses to pass text on standard input (checked with Claude Code 2.1). A root with spaces is printed shell-quoted; write the pattern for that quoted form.
-
-- **Allow `node start` only where you've set `start_threads = "auto"`.** Left off the list, every node start meets your agent's own permission prompt, which turns "propose first" from skill text into a real confirmation. Keep `thread start` off the list too unless direct root workers are intended.
-- **Never allow** `node resolve` (with any flag), `thread resolve`, `thread adopt`, `delete`, `archive`, `pause`, `routine approve`, `new`, `open` or `ticker stop`.
-
-For other agents the principle is the same: allow reading and steering, keep anything that starts, ends or deletes on a prompt.
+- Allow `thread start` and `node start` only where you've set `start_threads = "auto"`. Left off the list, every start meets your agent's own permission prompt.
+- With `thread keys` on the list, the coordinator answers a thread's questions and permission prompts itself, by the skill's rules, and its trust screens when `trust_screens` is `coordinator`. Remove it to confirm each answer first.
+- Never allow `thread resolve`, `node resolve`, `thread merge`, `thread set`, `sweep`, `delete`, `rename`, `archive`, `routine approve`, `configure` or `unconfigure`.
 
 ## What the safety settings do and don't stop
 
-- **They are soft.** Agents have a shell. `can_spawn` is a deterministic CLI check, not an ACL. The guards are skill text, your agent's permission prompts, keeping `config.toml` and approvals outside every agent's working directory, and `routine approve` refusing without a terminal and a typed confirmation. None of this stops an agent that runs with skip-permission arguments from editing those files directly.
-- **A node can impersonate you.** Any node agent can prompt the root coordinator's pane through Herdr, and that message carries no ticker marker. The skill's rule that a go-ahead must name the nodes lowers the risk; it does not remove it.
+- **They are soft.** Agents have a shell. `can_spawn` is a deterministic CLI check, not an ACL. The guards are the skill text, your agent's permission prompts, keeping `config.toml` and approvals outside every agent's working directory, and `routine approve`, `safety yolo` and `safety set` refusing without a terminal and a typed confirmation. An agent's shell commands have no terminal, so it cannot flip them by running the CLI; one that fakes a terminal (`script`) or edits `config.toml` directly is stopped only by its own permission prompts, which yolo mode turns off.
+- **The coordinator answers threads' prompts.** With `thread keys` it approves plainly in-task permission prompts once, accepts trust screens for the thread's own folder when `trust_screens` is `coordinator`, and asks you about the rest. That is the skill's judgement, not a hard rule (except that `thread keys` refuses trust screens when `trust_screens` is `user`); take `thread keys` off the allow-list to see each one first.
+- **A thread can impersonate you.** Any thread agent can prompt the coordinator's pane through Herdr. The skill's rule that a go-ahead must name the threads lowers the risk; it does not remove it.
 - **An approved routine command covers the command text only.** `./check.sh` keeps its hash while the script changes.
-- **Prompt injection is reduced, not removed.** The coordinator reads reports and may choose to fetch pull request comments itself. Memory is a carrier: whatever it writes there is inlined into every later brief.
-- **Agent variety.** Codex and Claude Code have separate argument adapters. Other harnesses can receive raw argv. Each supported profile should be manually checked with the installed agent CLI.
-- **Cost.** Every node is a full agent session, and each nudge and each `context` spends coordinator tokens. Coordinators must return idle after delegation instead of polling. The ticker accumulates meaningful direct-child transitions while a parent is busy and sends one compact, code-generated prompt when that parent becomes ready.
+- **Prompt injection is reduced, not removed.** No GitHub text reaches a prompt from the plugin, but threads read pull request comments themselves with `gh`, and memory is inlined into every later brief.
+- **Hooks run in every agent session on the machine.** They exit at once outside a Herdr pane.
+- **Cost.** Every thread is a full agent session, and each nudge and each `context` spends coordinator tokens.
 
 ## Nudges and notifications
 
-`nudge = false` is the default, because on Herdr 0.9.1 a prompt that arrives while you are typing in the coordinator **is merged with, and submits, your half-typed text**. With it off, the ticker shows one Herdr notification per set of new inbox items ("3 new inbox items") and the coordinator picks them up at its next human turn. Set `nudge = true` in `PROJECT.md` to have the ticker prompt the coordinator when it is idle. The message always begins `[herdr-projects ticker: automated, not the user, approves nothing]`, carries no inbox or report text, and names one exact `inbox consume` command. That command prints at most 32 events and archives exactly the printed batch only after stdout flushes successfully. It replaces the previous full `context` plus `inbox done` loop for automated turns.
+Direct-child delivery for nested coordinators is event-driven and independent of `nudge`. Transitions of a direct child to Ready for review, Waiting on you, Landing or Idle are queued per parent; Working clears a stale entry. When the parent agent is ready the ticker sends one code-generated line with node ids and states only, never report text.
 
-Direct-child delivery for nested coordinators is event-driven independently of the root `nudge` preference. Only state transitions to Ready for review, Waiting on you, Landing or Idle are queued. Working clears a stale queued event. The ticker waits until the direct parent agent is ready, sends node ids and states only, and removes the queue entry after Herdr accepts the prompt. Reports and other untrusted text are never injected into that notification.
+`HANDOFF.md` is deliberately small: the current objective, user decisions and constraints, active work and the next action, linking reports and memory instead of copying them, so a replacement coordinator rebuilds its state from one `context`.
 
-`HANDOFF.md` is deliberately small and semantic. It records the current objective, user decisions and constraints, active work and next action. Reports remain in `threads/`, durable facts remain in project or node memory, and user-owned work remains in `TASKS.md`; the handoff links to those sources instead of copying transcripts. This lets a replacement Codex or Claude coordinator reconstruct operational state from one full `context` call without inheriting the previous model's chat transcript.
+- **Notifications** go out once per event, titled `<Project> · <thread>`: `needs you · ...` with Herdr's request sound; a new report or a merged pull request with the done sound; failed checks, review activity and due routines without sound. `mute = true` silences a project except for errors (a broken routine file, `gh` failing for ten minutes).
+- **Nudges** (`nudge = true`, the default for new projects) prompt a coordinator with one line saying what happened (`[hp inbox] t-0040 PR merged; t-0043 blocked on a prompt`) once a set of new inbox items arrives. On Herdr 0.9.1 a prompt merges with text you have half-typed, so the ticker only prompts a coordinator whose state has not changed and been idle for 60 seconds and whose input box, read from its screen, has looked empty for 10 seconds, and picks the one that changed most recently when several qualify. A box it cannot read (a menu, a scrolled view, a harness other than Claude, Codex, Cursor, Gemini, OpenCode and Pi) counts as not empty, and the nudge waits. `thread prompt` refuses to type into a thread's box that holds a draft. `nudge = false` turns this off; notifications still come.
 
 ## Routines
 
-A file `routines/<name>.md`: TOML front matter with `schedule` (`every <N>m|h|d` or `daily HH:MM`, local time), optional `command`, `enabled`; the body is the prompt the coordinator receives as an inbox item when it is due. A routine with a `command` runs (`sh -c`, in the project folder, 60 second timeout) only when `routine_commands = true` **and** you have run `herdr-projects routine approve <project> <name>` in a terminal; its output reaches the coordinator capped at 4,000 characters inside a fence labelled as untrusted. Edit the command and it stops until approved again.
+A file `routines/<name>.md` with TOML front matter; the body is the prompt.
+
+- `schedule = "every <N>m|h|d"` or `"daily HH:MM"` (local time): the coordinator gets the body as an inbox item when it is due; while that item is unhandled, later runs add none. With no coordinator running (any agent in the project folder counts), a due run does nothing, runs no command and is not made up later; `routine list`, the popup and `doctor` show it as `skipped: no coordinator`. `routine list` shows each routine's last and next run. An optional `command` runs (`sh -c`, in the project folder, 60 second timeout) only when `routine_commands = true` and you have run `herdr-projects routine approve <project> <name>` in a terminal; its output reaches the coordinator capped at 4,000 characters inside a fence labelled as untrusted.
+- `on = "pr"`, optionally `events = ["opened", "checks-failed", "review", "merged"]`: fired by the ticker's pull request poll. The body goes to the thread whose pull request changed, as a prompt, with facts the binary generates (how many checks fail, how many comments, the `gh` commands to read them). It needs no coordinator, only the open thread.
+- Every project has `routines/pr-followup.md` (`checks-failed`, `review`): it tells the thread to fix failing checks and address review comments. Turn it off in the Projects popup's routines section; `doctor --fix` puts it back if the file is missing.
+
+## Cleanup
+
+- **Resolve on merge**: the ticker resolves a thread whose pull request merged only when its agent is neither working nor waiting on you, its own progress says `Done` (an agent that reports no progress: it has written a report since the merge or 10 minutes have passed), and no other pull request its report names is still open. A thread that merged its own pull request can still tag, deploy, land more pull requests and write its final report.
+- **Resolve** (Projects popup `x`, chat, or `thread resolve`) copies the report and library home, then removes the worktree with `herdr worktree remove --workspace` (which also closes the workspace) or `git worktree remove` and `git worktree prune`, deletes the local branch if the pull request is merged (it asks GitHub once more first, and finds a pull request by the thread's branch when the report has no `PR:` line), and closes a tab thread's tab. Once no open thread uses the repository's primary workspace that Herdr grouped the worktree under, and it has no agent and only idle, unfocused shells, it is closed too, with one inbox item; the ticker retries one it had to keep. An adopted pane is left alone. The inbox item lists what was removed and what was kept, and why.
+- **Merged pull requests and auto-resolve** clean up the same way.
+- **Sweep** lists and removes worktrees on `hp/<project>/` branches with no open thread, branches of resolved threads whose pull request merged, tabs of resolved threads, working folders of tab threads resolved longer than `auto_resolve_days` ago, empty repository workspaces its threads' worktrees were grouped under, and handled inbox items older than 30 days. `doctor` shows the same list. Sweep covers local repositories.
+- **Archive** closes the project's workspace and its threads' workspaces and hides the project; nothing is deleted, and `unarchive` reopens it. Archive never closes a repository's primary workspace.
+- **Delete** moves the folder to `.trash/`.
 
 ## Threads on other machines
 
-Save the machine with `herdr machine add --label <label> <ssh target>` (both machines need Herdr 0.9.1), then list a repo as `--repo /path/on/machine@<label>` or pass `thread start --machine <label>`. The home machine owns the project; only outbound SSH from home is needed, in batch mode, so set up key-based login first.
+Remote worker nodes use the same SSH and remote Herdr flow as remote threads. A remote coordinator with `can_spawn = true` is refused because its brief cannot safely run the local CLI from that machine; one with `--no-spawn` is a leaf.
 
-Remote worker nodes use the existing SSH and remote Herdr flow. A remote coordinator with `can_spawn=true` is refused because its brief cannot safely launch the local CLI from that machine. Remote recursive coordinators require a future bridge. A remote coordinator with `--no-spawn` remains a leaf.
+Save the machine with `herdr machine add --label <label> <ssh target>` (both machines need Herdr 0.9.1), then list a repo as `/path/on/machine@<label>` or pass `thread start --machine <label>`. The home machine owns the project; only outbound SSH from home is needed, in batch mode.
 
-- The worktree, the brief and the report live on the remote machine. The home ticker polls it once a minute and copies a changed report with `scp` and the thread's `library/` with `rsync -rt` (symbolic links are never followed or copied; a library over 50 MB is not copied and the inbox item says so).
-- A machine that doesn't answer is left alone: no state is read, threads keep their last group, and it is skipped for about two minutes. After ten minutes you get one `outage` inbox item, and one more when it is back.
-- A blocked remote thread needs you in its pane on that machine: select the machine in Herdr's sidebar, or run `herdr --remote <ssh target>`.
-- `focus` does not cover remote threads: their sidebar tokens are set on the remote Herdr server. They appear in `overview`, `thread list` and inbox items.
+- **Profiles are the machine's own.** `thread start --machine m1 [--profile NAME]` runs `herdr-projects profile resolve [NAME]` on m1 over SSH, which prints m1's definition of that profile (harness, model and effort flags, arguments, `~/` expanded to m1's home) or, without a name, m1's `[defaults] thread_profile`. The thread record keeps it, and the ticker launches with it, so the profile need not exist here. The name must still be on this project's allow-list, checked again at every launch; yolo mode adds its flags as for any thread. `thread restart --profile` looks it up again. m1 needs a herdr-projects that has `profile resolve`; an older one is refused with a hint to run `herdr-projects update` there. A machine known only from config.toml `profiles` has no SSH access, so nothing starts on it from here.
+- The worktree, the brief and the report live on the remote machine. The home ticker polls it once a minute and copies a changed report with `scp` and the thread's `library/` with `rsync -rt` (symbolic links are never followed; a library over 50 MB is not copied).
+- Remote threads get no self-reports: `report` writes on the machine where the agent runs. Their group comes from the agent state Herdr detects and from their pull request.
+- A machine that doesn't answer is left alone: no state is read, threads keep their last group, and after ten minutes you get one `outage` inbox item, and one more when it is back.
 - Tasks with no repository always run locally, as tabs.
 
 ## Laptop-closed operation
 
-No plugin code is involved: install Herdr and this plugin on an always-on machine, keep the projects root there, open the project there, and attach from your laptop with `herdr --remote <ssh target>` (add `--session <name>` for a named session). The ticker runs on that machine. If Herdr asks whether to restart a remote server "that may not survive SSH connection loss", answering `n` keeps its panes. Checked on a Linux (aarch64) machine from a Mac.
+Install Herdr and this plugin on an always-on machine, keep the projects root there, open the project there, and attach from your laptop with `herdr --remote <ssh target>` (add `--session <name>` for a named session). The ticker runs on that machine. If Herdr asks whether to restart a remote server "that may not survive SSH connection loss", answering `n` keeps its panes.
 
 ## Development
 
@@ -154,6 +303,7 @@ cargo test                       # unit tests and scenarios against a scripted f
 scripts/dev-server               # a throwaway `hp-dev` Herdr session with a scratch root
 scripts/dev-hp <subcommand>      # the binary against <repo>/.dev-root; pass --session hp-dev to open/doctor
 scripts/dev-herdr <args>         # herdr against that session
+HERDR_CONFIG_PATH=<copy> ...     # point configure and `herdr config check` at a scratch config
 ```
 
-Never develop against your default session or `~/.herdr-projects`. [`herdr-notes.md`](herdr-notes.md) records earlier Herdr client checks, and [`manual-test.md`](manual-test.md) lists the current hierarchy and client acceptance checks.
+Never develop against your default session, `~/.herdr-projects` or your real `config.toml`. [`herdr-notes.md`](herdr-notes.md) records what was verified about Herdr, and [`manual-test.md`](manual-test.md) lists the acceptance checks, including the visual ones only a person can confirm.

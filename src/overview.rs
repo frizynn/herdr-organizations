@@ -2,38 +2,103 @@
 
 use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Write as _};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use serde::Serialize;
 
 use crate::paths::Ctx;
 use crate::project::{self, Project, Status};
 use crate::thread::{self, Group};
 use crate::threads::{self, Row};
 
-/// The project a herdr workspace belongs to: the coordinator's workspace or a
-/// local thread's recorded workspace, and only among projects whose recorded
-/// socket is the current one (workspace ids repeat across sessions).
+/// The project a herdr workspace belongs to, only among projects whose
+/// recorded socket is the current one (workspace ids repeat across sessions).
+/// First by where the workspace's panes work (the focused pane first): in the
+/// project folder or in an open thread's worktree. Recorded ids go stale when
+/// a coordinator is reopened or started elsewhere, so they come second: the
+/// coordinator's workspace, a live coordinator's, or an open local thread's.
 pub fn project_for_workspace(ctx: &Ctx, workspace_id: &str, socket: &str) -> Option<String> {
     if workspace_id.is_empty() || socket.is_empty() {
         return None;
     }
-    project::list_slugs(&ctx.root).into_iter().find(|slug| {
-        let Ok(project) = Project::load(&ctx.root, slug) else {
-            return false;
-        };
-        let Some(record) = project.coordinator() else {
-            return false;
-        };
-        if record.socket != socket || project.status() == Status::Archived {
-            return false;
+    let projects: Vec<(Project, crate::project::Coordinator)> = project::list_slugs(&ctx.root)
+        .into_iter()
+        .filter_map(|slug| Project::load(&ctx.root, &slug).ok())
+        .filter(|p| p.status() != Status::Archived)
+        .filter_map(|p| {
+            p.coordinator()
+                .filter(|r| r.socket == socket)
+                .map(|r| (p, r))
+        })
+        .collect();
+    if projects.is_empty() {
+        return None;
+    }
+    let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner);
+    let mut panes: Vec<crate::herdr::Pane> = herdr
+        .pane_list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.workspace_id == workspace_id)
+        .collect();
+    let focused = ctx.env.var("HERDR_PANE_ID").unwrap_or("");
+    panes.sort_by_key(|p| p.pane_id != focused);
+    let open_threads = |project: &Project| {
+        thread::list(project)
+            .into_iter()
+            .filter(|t| !t.is_remote() && t.status != thread::Status::Resolved)
+            .collect::<Vec<_>>()
+    };
+    for pane in &panes {
+        for dir in [&pane.foreground_cwd, &pane.cwd]
+            .into_iter()
+            .filter(|d| !d.is_empty())
+        {
+            let dir = Path::new(dir);
+            let found = projects.iter().find(|(project, record)| {
+                let home = if record.cwd.is_empty() {
+                    project.canonical_dir()
+                } else {
+                    PathBuf::from(&record.cwd)
+                };
+                dir.starts_with(&home)
+                    || open_threads(project).iter().any(|t| {
+                        t.kind == thread::Kind::Worktree
+                            && !t.worktree_path.is_empty()
+                            && dir.starts_with(canonical(&t.worktree_path))
+                    })
+            });
+            if let Some((project, _)) = found {
+                return Some(project.slug.clone());
+            }
         }
-        record.workspace_id == workspace_id
-            || thread::list(&project).iter().any(|t| {
-                !t.is_remote()
-                    && t.status != thread::Status::Resolved
-                    && t.workspace_id == workspace_id
-            })
-    })
+    }
+    projects
+        .iter()
+        .find(|(project, record)| {
+            record.workspace_id == workspace_id
+                || crate::coordinator::live(project)
+                    .iter()
+                    .any(|c| c.workspace_id == workspace_id)
+                || open_threads(project)
+                    .iter()
+                    .any(|t| t.workspace_id == workspace_id)
+        })
+        .map(|(project, _)| project.slug.clone())
+}
+
+/// The path with symlinks resolved when it exists (herdr reports physical
+/// working directories).
+fn canonical(path: &str) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
+/// The current workspace's project, without asking.
+pub fn resolve_slug_quiet(ctx: &Ctx) -> Option<String> {
+    let workspace = ctx.env.var("HERDR_WORKSPACE_ID").unwrap_or("");
+    let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+    project_for_workspace(ctx, workspace, socket)
 }
 
 pub enum Resolved {
@@ -95,6 +160,76 @@ pub fn pick(ctx: &Ctx) -> Result<String> {
         Some(slug) => Ok(slug.clone()),
         None => bail!("no project number {}", line.trim()),
     }
+}
+
+/// Thread counts per group, in display order, skipping empty groups.
+pub fn group_counts(rows: &[Row]) -> Vec<(Group, usize)> {
+    Group::DISPLAY_ORDER
+        .into_iter()
+        .map(|group| (group, rows.iter().filter(|r| r.group == group).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// One project in the `--json` contract.
+#[derive(Serialize)]
+pub struct ProjectJson {
+    pub slug: String,
+    pub name: String,
+    pub goal: String,
+    pub status: Status,
+    pub dir: String,
+    /// Group token -> number of threads, for groups with at least one.
+    pub counts: std::collections::BTreeMap<&'static str, usize>,
+}
+
+pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
+    let settings = project
+        .read_project_md()
+        .map(|(s, _)| s)
+        .unwrap_or_default();
+    ProjectJson {
+        slug: project.slug.clone(),
+        name: project::display_name(&settings.name, &project.slug),
+        goal: settings.goal,
+        status: project.status(),
+        dir: project.dir().to_string_lossy().into_owned(),
+        counts: group_counts(rows)
+            .into_iter()
+            .map(|(group, n)| (group.token(), n))
+            .collect(),
+    }
+}
+
+/// `overview --json`: never asks on a terminal. Without a slug it is the
+/// current workspace's project, else every project that is not archived.
+pub fn run_json(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
+    let slugs = match slug {
+        Some(slug) => {
+            project::validate_slug(slug)?;
+            vec![slug.to_string()]
+        }
+        None => {
+            let workspace = ctx.env.var("HERDR_WORKSPACE_ID").unwrap_or("");
+            let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+            match project_for_workspace(ctx, workspace, socket) {
+                Some(slug) => vec![slug],
+                None => visible_slugs(ctx),
+            }
+        }
+    };
+    let mut projects = Vec::new();
+    for slug in slugs {
+        let project = Project::load(&ctx.root, &slug)?;
+        let rows = threads::rows(ctx, &project);
+        let mut value = serde_json::to_value(project_json(&project, &rows))?;
+        value["threads"] = serde_json::to_value(threads::threads_json(&project, &rows))?;
+        projects.push(value);
+    }
+    threads::print_json(&serde_json::json!({
+        "schema_version": threads::JSON_SCHEMA_VERSION,
+        "projects": projects,
+    }))
 }
 
 /// Threads grouped by state, in the one display order.
@@ -178,23 +313,27 @@ pub fn focus(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
     let view = threads::session_view(ctx, &project).ok_or_else(|| {
         anyhow::anyhow!("the herdr session of `{slug}` is not reachable; run `open {slug}` first")
     })?;
+    let name = project
+        .read_project_md()
+        .map(|(settings, _)| project::display_name(&settings.name, &slug))
+        .unwrap_or_else(|_| slug.clone());
     view.herdr
-        .agent_view_set_project(&slug)
+        .agent_view_set(crate::sidebar::project_view(&slug, &name))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!(
-        "sidebar focused on `{slug}`; `unfocus` clears it (this replaced any view another tool had set)"
+        "sidebar focused on `{slug}`; `unfocus` restores the by-need order (this replaced any view another tool had set)"
     );
     Ok(())
 }
 
-/// `unfocus`: herdr holds a single transient view, so this clears whatever is set.
+/// `unfocus`: back to the default view, every agent sorted by need.
 pub fn unfocus(ctx: &Ctx, session: &crate::paths::SessionFlags) -> Result<()> {
     let session = crate::paths::resolve_session(session, ctx.env, ctx.runner)?;
     let herdr = crate::herdr::Herdr::new(ctx.env.herdr_bin(), &session.socket, ctx.runner);
     herdr
-        .agent_view_clear()
+        .agent_view_set(crate::sidebar::default_view())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!("sidebar view cleared");
+    println!("sidebar shows every agent, sorted by need");
     Ok(())
 }
 
@@ -232,10 +371,10 @@ mod tests {
         ];
         let text = render(&project, &rows);
         let order: Vec<usize> = [
-            "Ready for review",
             "Waiting on you",
-            "Working",
+            "Ready for review",
             "Landing",
+            "Working",
             "Idle",
             "Resolved",
         ]
@@ -279,6 +418,106 @@ mod tests {
     }
 
     #[test]
+    fn workspace_resolves_by_where_its_panes_work_when_recorded_ids_are_stale() {
+        let world = World::new();
+        let alpha = world.project("alpha", "a.sock");
+        world.project("beta", "a.sock");
+        let worktree = world.home.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        // The thread record still says w2; its worktree workspace is now w8.
+        world.thread(&alpha, &worktree, |_| {});
+        let socket = alpha.coordinator().unwrap().socket;
+        let home = alpha.canonical_dir().to_string_lossy().into_owned();
+        let sub = alpha
+            .canonical_dir()
+            .join("threads")
+            .to_string_lossy()
+            .into_owned();
+        // The coordinator was reopened in w5 (the record still says w1, which
+        // beta also records), a shell in w6 works elsewhere.
+        *world.panes.borrow_mut() = format!(
+            "[{},{},{},{},{}]",
+            crate::scenarios::pane_json("w5", "w5:t1", "w5:p1", "/elsewhere"),
+            crate::scenarios::pane_json("w5", "w5:t1", "w5:p2", &home),
+            crate::scenarios::pane_json("w8", "w8:t1", "w8:p1", &worktree.to_string_lossy()),
+            crate::scenarios::pane_json("w6", "w6:t1", "w6:p1", "/elsewhere"),
+            crate::scenarios::pane_json("w9", "w9:t1", "w9:p1", &sub),
+        );
+        let ctx = world.ctx();
+        assert_eq!(
+            project_for_workspace(&ctx, "w5", &socket).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            project_for_workspace(&ctx, "w8", &socket).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            project_for_workspace(&ctx, "w9", &socket).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(project_for_workspace(&ctx, "w6", &socket), None);
+        // w1 has no panes listed: the recorded ids decide (alpha lists first).
+        assert_eq!(
+            project_for_workspace(&ctx, "w1", &socket).as_deref(),
+            Some("alpha")
+        );
+
+        // A live coordinator the ticker saw in w4 counts too.
+        let beta = Project::load(&world.root, "beta").unwrap();
+        crate::coordinator::save_live(
+            &beta,
+            &[crate::coordinator::LivePane {
+                pane_id: "w4:p1".into(),
+                workspace_id: "w4".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            project_for_workspace(&ctx, "w4", &socket).as_deref(),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn the_focused_pane_decides_between_two_projects_in_one_workspace() {
+        let world = World::new();
+        let alpha = world.project("alpha", "a.sock");
+        let beta = world.project("beta", "a.sock");
+        let socket = alpha.coordinator().unwrap().socket;
+        *world.panes.borrow_mut() = format!(
+            "[{},{}]",
+            crate::scenarios::pane_json(
+                "w5",
+                "w5:t1",
+                "w5:p1",
+                &alpha.canonical_dir().to_string_lossy()
+            ),
+            crate::scenarios::pane_json(
+                "w5",
+                "w5:t1",
+                "w5:p2",
+                &beta.canonical_dir().to_string_lossy()
+            ),
+        );
+        let env = crate::paths::Env::for_test(world.home.path(), &[("HERDR_PANE_ID", "w5:p2")]);
+        let ctx = Ctx {
+            env: &env,
+            ..world.ctx()
+        };
+        assert_eq!(
+            project_for_workspace(&ctx, "w5", &socket).as_deref(),
+            Some("beta")
+        );
+        assert_eq!(
+            project_for_workspace(&world.ctx(), "w5", &socket).as_deref(),
+            Some("alpha")
+        );
+    }
+
+    #[test]
     fn focus_filters_on_the_project_token_and_sorts_by_rank_in_the_projects_socket() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
@@ -294,11 +533,11 @@ mod tests {
         assert_eq!(request["params"]["source"], "herdr-projects");
         assert_eq!(
             request["params"]["filter"],
-            serde_json::json!({"op":"eq","field":{"token":"project"},"value":"demo"})
+            serde_json::json!({"op":"eq","field":{"token":"hp_project"},"value":"demo"})
         );
         assert_eq!(
             request["params"]["sort"],
-            serde_json::json!([{"field":{"token":"rank"},"order":"asc"}])
+            serde_json::json!([{"field":{"token":"hp_group"},"order":"asc"},{"field":{"token":"hp_rank"},"order":"asc"}])
         );
     }
 

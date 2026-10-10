@@ -140,6 +140,16 @@ impl std::fmt::Display for HerdrError {
 impl std::error::Error for HerdrError {}
 
 pub const AGENT_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long `agent_prompt_confirmed` lets herdr wait for the agent to start.
+pub const PROMPT_WAIT: Duration = Duration::from_secs(8);
+
+/// herdr refused the prompt before typing anything.
+pub fn refused_before_typing(error: &HerdrError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "agent_blocked" | "pane_not_found" | "unreachable"
+    )
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct Pane {
@@ -149,11 +159,51 @@ pub struct Pane {
     #[serde(default)]
     pub cwd: String,
     #[serde(default)]
-    pub focused: bool,
-    #[serde(default)]
     pub label: String,
     #[serde(default)]
     pub tokens: serde_json::Map<String, serde_json::Value>,
+    /// The working directory of the pane's foreground process; differs from
+    /// `cwd` (the shell's) while `open` runs a coordinator in the pane.
+    #[serde(default)]
+    pub foreground_cwd: String,
+    /// Stable across pane moves; restarts with the server.
+    #[serde(default)]
+    pub terminal_id: String,
+    #[serde(default)]
+    pub focused: bool,
+}
+
+/// A Space as `workspace list` shows it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct Workspace {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub focused: bool,
+    #[serde(default)]
+    pub pane_count: usize,
+    #[serde(default)]
+    pub worktree: Option<WorkspaceWorktree>,
+}
+
+/// The git checkout herdr groups a Space under. A repository's primary Space
+/// (the "parent" herdr makes or reuses for its worktrees) is not linked.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct WorkspaceWorktree {
+    #[serde(default)]
+    pub repo_key: String,
+    #[serde(default)]
+    pub checkout_path: String,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
+}
+
+/// The native session reference an official integration reported.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct AgentSession {
+    #[serde(default)]
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -169,12 +219,37 @@ pub struct Agent {
     pub agent_status: String,
     #[serde(default)]
     pub cwd: String,
+    /// The agent's own terminal title without its spinner (herdr 0.9.3+).
+    #[serde(default)]
+    pub terminal_title_stripped: String,
+    /// See `Pane::foreground_cwd`.
+    #[serde(default)]
+    pub foreground_cwd: String,
+    #[serde(default)]
+    pub terminal_id: String,
+    #[serde(default)]
+    pub state_change_seq: u64,
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
 }
 
 impl Agent {
     /// The one "ready for a prompt" predicate: state `idle` or `done`.
     pub fn ready(&self) -> bool {
         ready_state(&self.agent_status)
+    }
+
+    /// True when the agent works in `dir`: its shell's directory, or its own
+    /// when it runs as a child of `open` in a shell elsewhere.
+    pub fn works_in(&self, dir: &str) -> bool {
+        !dir.is_empty() && (self.cwd == dir || self.foreground_cwd == dir)
+    }
+
+    pub fn session_id(&self) -> &str {
+        self.agent_session
+            .as_ref()
+            .map(|s| s.value.as_str())
+            .unwrap_or("")
     }
 }
 
@@ -221,38 +296,9 @@ impl<'a> Herdr<'a> {
                     .cloned()
                     .unwrap_or(serde_json::Value::Null));
             }
-        }
-        Err(HerdrError {
-            code: "failed".into(),
-            message: format!("`herdr {}`: {}", args.join(" "), out.error_text()),
-        })
-    }
-
-    /// Runs a Herdr command whose successful CLI form may intentionally emit
-    /// no JSON, while preserving structured errors when Herdr returns one.
-    fn call_status(&self, args: &[&str], timeout: Duration) -> Result<(), HerdrError> {
-        let cmd = self.cmd(timeout).args(args.iter().copied());
-        let out = self.runner.run(&cmd).map_err(|error| HerdrError {
-            code: "unreachable".into(),
-            message: format!("{error:#}"),
-        })?;
-        if out.timed_out {
-            return Err(HerdrError {
-                code: "timeout".into(),
-                message: format!("`herdr {}` timed out", args.join(" ")),
-            });
-        }
-        if out.success() {
-            return Ok(());
-        }
-        let reply = [&out.stdout, &out.stderr]
-            .into_iter()
-            .find_map(|text| serde_json::from_str::<serde_json::Value>(text.trim()).ok());
-        if let Some(error) = reply.as_ref().and_then(|reply| reply.get("error")) {
-            return Err(HerdrError {
-                code: error["code"].as_str().unwrap_or("failed").to_string(),
-                message: error["message"].as_str().unwrap_or("").to_string(),
-            });
+        } else if out.success() && out.stdout.trim().is_empty() {
+            // Metadata writes acknowledge success with the exit status alone.
+            return Ok(serde_json::Value::Null);
         }
         Err(HerdrError {
             code: "failed".into(),
@@ -314,7 +360,7 @@ impl<'a> Herdr<'a> {
     pub fn pane_run(&self, pane: &str, command: &[String]) -> Result<(), HerdrError> {
         let mut args = vec!["pane", "run", pane];
         args.extend(command.iter().map(String::as_str));
-        self.call_status(&args, CALL_TIMEOUT)
+        self.call(&args, CALL_TIMEOUT).map(|_| ())
     }
 
     pub fn pane_swap(&self, source: &str, target: &str) -> Result<(), HerdrError> {
@@ -332,19 +378,6 @@ impl<'a> Herdr<'a> {
         .map(|_| ())
     }
 
-    pub fn pane_focus_direction(&self, pane: &str, direction: &str) -> Result<(), HerdrError> {
-        self.call(
-            &["pane", "focus", "--direction", direction, "--pane", pane],
-            CALL_TIMEOUT,
-        )
-        .map(|_| ())
-    }
-
-    pub fn plugin_pane_focus(&self, pane: &str) -> Result<(), HerdrError> {
-        self.call(&["plugin", "pane", "focus", pane], CALL_TIMEOUT)
-            .map(|_| ())
-    }
-
     pub fn pane_close(&self, pane: &str) -> Result<(), HerdrError> {
         self.call(&["pane", "close", pane], CALL_TIMEOUT)
             .map(|_| ())
@@ -352,6 +385,26 @@ impl<'a> Herdr<'a> {
 
     pub fn agent_list(&self) -> Result<Vec<Agent>, HerdrError> {
         self.call_as(&["agent", "list"], "agents")
+    }
+
+    pub fn workspace_list(&self) -> Result<Vec<Workspace>, HerdrError> {
+        self.call_as(&["workspace", "list"], "workspaces")
+    }
+
+    /// True when the pane's shell is its foreground process: nothing runs in
+    /// it. Unknown (no shell pid, an error) counts as busy.
+    pub fn pane_idle_shell(&self, pane: &str) -> bool {
+        let Ok(result) = self.call(&["pane", "process-info", "--pane", pane], CALL_TIMEOUT) else {
+            return false;
+        };
+        let info = &result["process_info"];
+        let Some(shell) = info["shell_pid"].as_u64() else {
+            return false;
+        };
+        info["foreground_process_group_id"].as_u64() == Some(shell)
+            && info["foreground_processes"]
+                .as_array()
+                .is_some_and(|all| all.iter().all(|p| p["pid"].as_u64() == Some(shell)))
     }
 
     fn created(result: &serde_json::Value) -> Result<Created, HerdrError> {
@@ -582,43 +635,103 @@ impl<'a> Herdr<'a> {
             .map(|_| ())
     }
 
-    /// Submits initial work and waits until Herdr observes the agent start it.
-    /// A plain accepted prompt can otherwise race an agent UI that is still
-    /// becoming interactive after `agent start`.
-    pub fn agent_prompt_start(&self, target: &str, text: &str) -> Result<(), HerdrError> {
-        self.call(
-            &[
-                "agent",
-                "prompt",
-                target,
-                text,
-                "--wait",
-                "--until",
-                "working",
-                "--until",
-                "blocked",
-                "--timeout",
-                "10000",
-            ],
-            Duration::from_secs(15),
-        )?;
-        // `agent prompt` can observe a stale startup transition before the
-        // agent UI has actually accepted the paste. The rendered prompt is
-        // the durable boundary: only clear `prompt_pending` after Herdr can
-        // see the exact initial instruction in the pane.
-        self.call(
-            &[
-                "pane",
-                "wait-output",
-                target,
-                "--match",
-                text,
-                "--timeout",
-                "5000",
-            ],
-            Duration::from_secs(7),
-        )?;
-        Ok(())
+    /// Submits a prompt and waits until the agent is seen `working` (or
+    /// `blocked`, a question it asked): herdr's own proof that the text was
+    /// taken, not only typed. `agent_prompt_stalled` (herdr saw neither within
+    /// its 5 s), a timeout or a reply without a result mean the text may or may
+    /// not sit in the input box: callers never type it again blindly.
+    pub fn agent_prompt_confirmed(&self, target: &str, text: &str) -> Result<(), HerdrError> {
+        let timeout_ms = PROMPT_WAIT.as_millis().to_string();
+        let args = [
+            "agent",
+            "prompt",
+            target,
+            text,
+            "--wait",
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            &timeout_ms,
+        ];
+        match self.call(&args, PROMPT_WAIT + Duration::from_secs(5))? {
+            serde_json::Value::Null => Err(HerdrError {
+                code: "no_reply".into(),
+                message: "`herdr agent prompt --wait` answered without a result".into(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// The agent's screen as plain text: what is visible now, or the last
+    /// `lines` lines of scrollback. `agent read` prints the text itself, not a
+    /// JSON reply; only a failure is JSON (checked on 0.9.1).
+    pub fn agent_read(&self, target: &str, lines: Option<usize>) -> Result<String, HerdrError> {
+        self.agent_read_as(target, lines, "text")
+    }
+
+    fn agent_read_as(
+        &self,
+        target: &str,
+        lines: Option<usize>,
+        format: &str,
+    ) -> Result<String, HerdrError> {
+        let lines = lines.map(|n| n.to_string());
+        let mut args = vec!["agent", "read", target, "--format", format];
+        match &lines {
+            Some(n) => args.extend(["--source", "recent", "--lines", n.as_str()]),
+            None => args.extend(["--source", "visible"]),
+        }
+        let cmd = self.cmd(CALL_TIMEOUT).args(args.iter().copied());
+        let out = self.runner.run(&cmd).map_err(|e| HerdrError {
+            code: "unreachable".into(),
+            message: format!("{e:#}"),
+        })?;
+        if out.timed_out {
+            return Err(HerdrError {
+                code: "timeout".into(),
+                message: format!("`herdr {}` timed out", args.join(" ")),
+            });
+        }
+        if out.success() {
+            return Ok(out.stdout);
+        }
+        let reply = [&out.stderr, &out.stdout]
+            .into_iter()
+            .find_map(|text| serde_json::from_str::<serde_json::Value>(text.trim()).ok());
+        Err(match reply.as_ref().and_then(|r| r.get("error")) {
+            Some(error) => HerdrError {
+                code: error["code"].as_str().unwrap_or("failed").to_string(),
+                message: error["message"].as_str().unwrap_or("").to_string(),
+            },
+            None => HerdrError {
+                code: "failed".into(),
+                message: format!("`herdr {}`: {}", args.join(" "), out.error_text()),
+            },
+        })
+    }
+
+    /// The visible screen with its styling (SGR escapes), for telling typed
+    /// text from a dim placeholder (`prompt_box`).
+    pub fn agent_screen(&self, target: &str) -> Result<String, HerdrError> {
+        self.agent_read_as(target, None, "ansi")
+    }
+
+    /// Key presses in herdr's key syntax (`enter`, `esc`, `up`, `tab`,
+    /// `ctrl+c`, a single character). herdr checks every key before it sends
+    /// any, and refuses a pane that no longer hosts the agent.
+    pub fn agent_send_keys(&self, target: &str, keys: &[String]) -> Result<(), HerdrError> {
+        let mut args = vec!["agent", "send-keys", target];
+        args.extend(keys.iter().map(String::as_str));
+        self.call(&args, CALL_TIMEOUT).map(|_| ())
+    }
+
+    /// Literal text typed into a pane, with no Enter (herdr has no agent-level
+    /// form of this in 0.9.1).
+    pub fn pane_send_text(&self, pane: &str, text: &str) -> Result<(), HerdrError> {
+        self.call(&["pane", "send-text", pane, text], CALL_TIMEOUT)
+            .map(|_| ())
     }
 
     pub fn agent_focus(&self, target: &str) -> Result<(), HerdrError> {
@@ -631,6 +744,13 @@ impl<'a> Herdr<'a> {
             .map(|_| ())
     }
 
+    /// Names an already detected agent (after Herdr's native resume leaves a
+    /// restored pane unnamed).
+    pub fn agent_rename(&self, pane: &str, name: &str) -> Result<(), HerdrError> {
+        self.call(&["agent", "rename", pane, name], CALL_TIMEOUT)
+            .map(|_| ())
+    }
+
     pub fn notification_show(&self, title: &str, body: &str) -> Result<(), HerdrError> {
         self.call(
             &["notification", "show", title, "--body", body],
@@ -638,69 +758,39 @@ impl<'a> Herdr<'a> {
         )
         .map(|_| ())
     }
-
-    /// Display tokens on a pane row, always with a TTL so they fade if the
-    /// ticker stops.
-    pub fn pane_report_tokens(
-        &self,
-        pane: &str,
-        tokens: &[(&str, &str)],
-        ttl: Duration,
-    ) -> Result<(), HerdrError> {
-        self.pane_report_tokens_from(pane, SOURCE, tokens, ttl)
-    }
-
-    pub fn pane_report_tokens_from(
-        &self,
-        pane: &str,
-        source: &str,
-        tokens: &[(&str, &str)],
-        ttl: Duration,
-    ) -> Result<(), HerdrError> {
-        self.pane_report_tokens_with_title_from(pane, source, None, tokens, ttl)
-    }
-
-    pub fn pane_report_tokens_with_title_from(
-        &self,
-        pane: &str,
-        source: &str,
-        title: Option<&str>,
-        tokens: &[(&str, &str)],
-        ttl: Duration,
-    ) -> Result<(), HerdrError> {
-        let ttl = ttl.as_millis().to_string();
-        let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        let mut args = vec![
-            "pane",
-            "report-metadata",
-            pane,
-            "--source",
-            source,
-            "--ttl-ms",
-            &ttl,
-        ];
-        if let Some(title) = title {
-            args.push("--title");
-            args.push(title);
-        }
-        for pair in &pairs {
-            args.push("--token");
-            args.push(pair);
-        }
-        self.call_status(&args, CALL_TIMEOUT)
-    }
-
-    pub fn pane_clear_tokens(&self, pane: &str, names: &[&str]) -> Result<(), HerdrError> {
-        let mut args = vec!["pane", "report-metadata", pane, "--source", SOURCE];
-        for name in names {
-            args.push("--clear-token");
-            args.push(name);
-        }
-        self.call_status(&args, CALL_TIMEOUT)
-    }
 }
 
 pub const SOURCE: &str = "herdr-projects";
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct WorkspaceInfo {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub agent_status: String,
+    #[serde(default)]
+    pub tab_count: usize,
+    #[serde(default)]
+    pub focused: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// One metadata patch for a pane: tokens (`None` clears one) and a TTL. Sent
+/// as a single socket request instead of a CLI fork. It carries no display
+/// name or state labels, so it leaves those as `sidebar::report_pane` set them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PaneMetadata {
+    pub tokens: Vec<(String, Option<String>)>,
+    pub ttl: Option<Duration>,
+}
 
 impl<'a> Herdr<'a> {
     fn request(
@@ -732,31 +822,201 @@ impl<'a> Herdr<'a> {
         }
     }
 
-    /// Filters the sidebar's agents to one project and sorts them by attention:
-    /// the coordinator (rank 0) first, then by the group's display-order digit.
-    /// herdr holds one transient view, so this replaces any other tool's view.
-    pub fn agent_view_set_project(&self, slug: &str) -> Result<(), HerdrError> {
+    /// Installs an agent view (socket only in 0.9.1). One view is active
+    /// globally, so this replaces any other tool's view.
+    pub fn agent_view_set(&self, params: serde_json::Value) -> Result<(), HerdrError> {
+        self.request("agent.view.set", params).map(|_| ())
+    }
+
+    /// Moves a Space to `insert_index` (a gap in the list before the move;
+    /// socket only in 0.9.1).
+    pub fn workspace_move(
+        &self,
+        workspace_id: &str,
+        insert_index: usize,
+    ) -> Result<(), HerdrError> {
         self.request(
-            "agent.view.set",
-            serde_json::json!({
-                "source": SOURCE,
-                "label": format!("project: {slug}"),
-                "filter": { "op": "eq", "field": { "token": "project" }, "value": slug },
-                "sort": [{ "field": { "token": "rank" }, "order": "asc" }],
-            }),
+            "workspace.move",
+            serde_json::json!({ "workspace_id": workspace_id, "insert_index": insert_index }),
         )
         .map(|_| ())
     }
 
-    pub fn agent_view_clear(&self) -> Result<(), HerdrError> {
-        self.request("agent.view.clear", serde_json::json!({}))
+    pub fn agent_list_rpc(&self) -> Result<Vec<Agent>, HerdrError> {
+        let result = self.request("agent.list", serde_json::json!({}))?;
+        serde_json::from_value(result["agents"].clone()).map_err(|e| HerdrError {
+            code: "failed".into(),
+            message: format!("agent.list reply changed: {e}"),
+        })
+    }
+
+    pub fn pane_list_rpc(&self) -> Result<Vec<Pane>, HerdrError> {
+        let result = self.request("pane.list", serde_json::json!({}))?;
+        serde_json::from_value(result["panes"].clone()).map_err(|e| HerdrError {
+            code: "failed".into(),
+            message: format!("pane.list reply changed: {e}"),
+        })
+    }
+
+    /// The visible text of a pane. A passive read: unlike a `recent` read it
+    /// never scrolls the agent's view.
+    pub fn pane_read_visible(&self, pane: &str) -> Result<String, HerdrError> {
+        let result = self.request(
+            "pane.read",
+            serde_json::json!({ "pane_id": pane, "source": "visible", "format": "text" }),
+        )?;
+        Ok(result["read"]["text"]
+            .as_str()
+            .or_else(|| result["text"].as_str())
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    pub fn workspace_list_rpc(&self) -> Result<Vec<WorkspaceInfo>, HerdrError> {
+        let result = self.request("workspace.list", serde_json::json!({}))?;
+        Ok(serde_json::from_value(result["workspaces"].clone()).unwrap_or_default())
+    }
+
+    pub fn tab_list_rpc(&self) -> Result<Vec<TabInfo>, HerdrError> {
+        let result = self.request("tab.list", serde_json::json!({}))?;
+        Ok(serde_json::from_value(result["tabs"].clone()).unwrap_or_default())
+    }
+
+    /// `(version, protocol)` of the server, from `ping`.
+    pub fn ping(&self) -> Result<(String, u64), HerdrError> {
+        let result = self.request("ping", serde_json::json!({}))?;
+        Ok((
+            result["version"].as_str().unwrap_or_default().to_string(),
+            result["protocol"].as_u64().unwrap_or(0),
+        ))
+    }
+
+    pub fn pane_report_metadata_rpc(
+        &self,
+        pane: &str,
+        metadata: &PaneMetadata,
+    ) -> Result<(), HerdrError> {
+        let mut params = serde_json::json!({ "pane_id": pane, "source": SOURCE });
+        params["tokens"] = metadata_tokens(&metadata.tokens);
+        if let Some(ttl) = metadata.ttl {
+            params["ttl_ms"] = (ttl.as_millis() as u64).into();
+        }
+        self.request("pane.report_metadata", params).map(|_| ())
+    }
+
+    pub fn workspace_report_metadata_rpc(
+        &self,
+        workspace: &str,
+        tokens: &[(String, Option<String>)],
+        ttl: Option<Duration>,
+    ) -> Result<(), HerdrError> {
+        let mut params = serde_json::json!({
+            "workspace_id": workspace,
+            "source": SOURCE,
+            "tokens": metadata_tokens(tokens),
+        });
+        if let Some(ttl) = ttl {
+            params["ttl_ms"] = (ttl.as_millis() as u64).into();
+        }
+        self.request("workspace.report_metadata", params)
             .map(|_| ())
+    }
+}
+
+/// At most 14 columns: the default 26-column sidebar keeps " agents" plus a
+/// gap on the same row.
+pub fn view_label(name: &str) -> String {
+    let count = name.chars().count();
+    if count <= 14 {
+        name.to_string()
+    } else {
+        format!("{}…", name.chars().take(13).collect::<String>())
+    }
+}
+
+fn metadata_tokens(tokens: &[(String, Option<String>)]) -> serde_json::Value {
+    tokens
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                v.clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+/// A long-lived `events.subscribe` connection. Events are only wake-up
+/// signals: callers re-read state, so a lost event costs one reconcile.
+pub struct EventStream {
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+}
+
+impl EventStream {
+    /// Connects and waits for `subscription_started`. Any herdr error (an
+    /// unknown event type, a pane that closed meanwhile) is returned so the
+    /// caller can rebuild the list and retry.
+    pub fn open(socket: &Path, subscriptions: &[serde_json::Value]) -> Result<EventStream> {
+        use std::io::{BufRead, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)
+            .with_context(|| format!("could not connect to {}", socket.display()))?;
+        stream.set_write_timeout(Some(CALL_TIMEOUT))?;
+        stream.set_read_timeout(Some(CALL_TIMEOUT))?;
+        let line = serde_json::json!({
+            "id": "herdr-projects-events",
+            "method": "events.subscribe",
+            "params": { "subscriptions": subscriptions },
+        });
+        stream.write_all(format!("{line}\n").as_bytes())?;
+        let mut reader = std::io::BufReader::new(stream);
+        let mut ack = String::new();
+        reader.read_line(&mut ack)?;
+        let reply: serde_json::Value =
+            serde_json::from_str(ack.trim()).context("events.subscribe reply did not parse")?;
+        if let Some(error) = reply.get("error") {
+            bail!(
+                "events.subscribe: {} ({})",
+                error["message"].as_str().unwrap_or(""),
+                error["code"].as_str().unwrap_or("failed")
+            );
+        }
+        reader.get_ref().set_read_timeout(None)?;
+        Ok(EventStream { reader })
+    }
+
+    /// Blocks until the next event and returns its name. An error line
+    /// (`events_lost`) or a closed connection ends the stream.
+    pub fn next_event(&mut self) -> Result<String> {
+        use std::io::BufRead;
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            bail!("herdr closed the event stream");
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(line.trim()).context("event did not parse")?;
+        if let Some(error) = value.get("error") {
+            bail!(
+                "event stream ended: {}",
+                error["code"].as_str().unwrap_or("failed")
+            );
+        }
+        Ok(value["event"].as_str().unwrap_or_default().to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_labels_leave_room_for_the_agents_header() {
+        assert_eq!(view_label("producto"), "producto");
+        assert_eq!(view_label("Acme Billing Suite"), "Acme Billing …");
+        assert_eq!(view_label("Acme Billing Suite").chars().count(), 14);
+    }
 
     #[test]
     fn parses_versions() {
@@ -819,79 +1079,5 @@ mod tests {
             ["--model", "a model with spaces", shell_text.as_str()]
         );
         assert!(!marker.exists());
-    }
-
-    #[test]
-    fn initial_prompt_waits_for_observed_work() {
-        let runner = crate::runner::fake::FakeRunner::new();
-        runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
-        runner.on(
-            "pane wait-output",
-            crate::runner::fake::ok(r#"{"result":{}}"#),
-        );
-        let herdr = Herdr::new("herdr", "socket", &runner);
-
-        herdr.agent_prompt_start("w1:p1", "read the brief").unwrap();
-
-        let calls = runner.calls.borrow();
-        let call = calls
-            .iter()
-            .find(|call| call.args.starts_with(&["agent".into(), "prompt".into()]))
-            .unwrap();
-        assert_eq!(
-            call.args,
-            [
-                "agent",
-                "prompt",
-                "w1:p1",
-                "read the brief",
-                "--wait",
-                "--until",
-                "working",
-                "--until",
-                "blocked",
-                "--timeout",
-                "10000",
-            ]
-        );
-        let wait = calls
-            .iter()
-            .find(|call| {
-                call.args
-                    .starts_with(&["pane".into(), "wait-output".into()])
-            })
-            .unwrap();
-        assert_eq!(
-            wait.args,
-            [
-                "pane",
-                "wait-output",
-                "w1:p1",
-                "--match",
-                "read the brief",
-                "--timeout",
-                "5000",
-            ]
-        );
-    }
-
-    #[test]
-    fn initial_prompt_fails_when_the_text_never_reaches_the_pane() {
-        let runner = crate::runner::fake::FakeRunner::new();
-        runner.on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
-        runner.on(
-            "pane wait-output",
-            crate::runner::fake::fail(
-                1,
-                r#"{"error":{"code":"timeout","message":"not rendered"}}"#,
-            ),
-        );
-        let herdr = Herdr::new("herdr", "socket", &runner);
-
-        let error = herdr
-            .agent_prompt_start("w1:p1", "read the brief")
-            .unwrap_err();
-
-        assert_eq!(error.code, "timeout");
     }
 }

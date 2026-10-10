@@ -21,6 +21,25 @@ pub struct ProfileOverrides {
 }
 
 impl AgentProfile {
+    /// The node's own launch flags as its record stores them.
+    pub fn of_record(record: &crate::thread::Thread) -> AgentProfile {
+        AgentProfile {
+            harness: record.agent.clone(),
+            model: record.model.clone(),
+            reasoning_effort: record.reasoning_effort.clone(),
+            permission_profile: record.permission_profile.clone(),
+            raw_agent_args: record.raw_agent_args.clone(),
+        }
+    }
+
+    /// True when the node sets no flag of its own: its profile alone launches it.
+    pub fn is_plain(&self) -> bool {
+        self.model.is_empty()
+            && self.reasoning_effort.is_empty()
+            && self.permission_profile.is_empty()
+            && self.raw_agent_args.is_empty()
+    }
+
     pub fn apply(&mut self, overrides: &ProfileOverrides) {
         if let Some(harness) = &overrides.harness {
             self.harness = harness.clone();
@@ -38,8 +57,10 @@ impl AgentProfile {
             .extend(overrides.raw_agent_args.iter().cloned());
     }
 
-    /// Returns argv components for the selected harness. Raw arguments and
-    /// legacy project-wide safety arguments remain separate process arguments.
+    /// Returns argv components for the selected harness: the node's model and
+    /// effort flags (the profile flags' own adapter), its permission flags,
+    /// its raw arguments, then `safety_args` (the profile's and the project's
+    /// arguments). Each stays a separate process argument.
     pub fn argv(&self, safety_args: &[String]) -> Result<Vec<String>> {
         validate_arg("harness", &self.harness)?;
         validate_optional_arg("model", &self.model)?;
@@ -52,17 +73,15 @@ impl AgentProfile {
         }
         validate_permission_overrides(self, safety_args)?;
 
-        let mut argv = Vec::new();
+        let mut argv =
+            crate::profiles::typed_args(&self.harness, &self.model, &self.reasoning_effort)?;
         match self.harness.as_str() {
-            "codex" => codex_argv(self, &mut argv)?,
-            "claude" => claude_argv(self, &mut argv)?,
+            "codex" => codex_permissions(self, &mut argv)?,
+            "claude" => claude_permissions(self, &mut argv)?,
             other => {
-                if !self.model.is_empty()
-                    || !self.reasoning_effort.is_empty()
-                    || !self.permission_profile.is_empty()
-                {
+                if !self.permission_profile.is_empty() {
                     bail!(
-                        "the `{other}` harness has no built-in model, reasoning or permission adapter; pass harness-specific values with repeatable `--raw-agent-arg` options"
+                        "the `{other}` harness has no built-in permission adapter; pass harness-specific values with repeatable `--raw-agent-arg` options"
                     );
                 }
             }
@@ -101,7 +120,7 @@ fn validate_permission_overrides(profile: &AgentProfile, safety_args: &[String])
 
     for (source, arguments) in [
         ("raw agent arguments", profile.raw_agent_args.as_slice()),
-        ("project safety arguments", safety_args),
+        ("profile and project arguments", safety_args),
     ] {
         for argument in arguments {
             let flag = argument
@@ -142,22 +161,7 @@ fn validate_optional_arg(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn codex_argv(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
-    if !profile.model.is_empty() {
-        argv.extend(["--model".into(), profile.model.clone()]);
-    }
-    if !profile.reasoning_effort.is_empty() {
-        if !matches!(
-            profile.reasoning_effort.as_str(),
-            "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-        ) {
-            bail!("Codex reasoning effort must be minimal, low, medium, high, xhigh or max");
-        }
-        argv.extend([
-            "--config".into(),
-            format!("model_reasoning_effort={:?}", profile.reasoning_effort),
-        ]);
-    }
+fn codex_permissions(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
     match profile.permission_profile.as_str() {
         "" => {}
         "read-only" => argv.extend([
@@ -185,15 +189,7 @@ fn codex_argv(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn claude_argv(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
-    if !profile.reasoning_effort.is_empty() {
-        bail!(
-            "Claude Code has no built-in reasoning-effort adapter; use repeatable `--raw-agent-arg` options if your setup supports one"
-        );
-    }
-    if !profile.model.is_empty() {
-        argv.extend(["--model".into(), profile.model.clone()]);
-    }
+fn claude_permissions(profile: &AgentProfile, argv: &mut Vec<String>) -> Result<()> {
     let permission_mode = match profile.permission_profile.as_str() {
         "" => None,
         "default" => Some("default"),
@@ -232,7 +228,7 @@ mod tests {
             [
                 "--model",
                 "gpt-5.6",
-                "--config",
+                "-c",
                 "model_reasoning_effort=\"high\"",
                 "--sandbox",
                 "workspace-write",
@@ -255,7 +251,7 @@ mod tests {
         };
         assert_eq!(
             profile.argv(&[]).unwrap(),
-            ["--config", "model_reasoning_effort=\"max\""]
+            ["-c", "model_reasoning_effort=\"max\""]
         );
     }
 
@@ -290,11 +286,18 @@ mod tests {
                 .argv(&[])
                 .unwrap_err()
                 .to_string()
-                .contains("reasoning effort")
+                .contains("effort")
         );
 
         let profile = AgentProfile {
             harness: "claude".into(),
+            reasoning_effort: "high".into(),
+            ..AgentProfile::default()
+        };
+        assert_eq!(profile.argv(&[]).unwrap(), ["--effort", "high"]);
+
+        let profile = AgentProfile {
+            harness: "gemini".into(),
             reasoning_effort: "high".into(),
             ..AgentProfile::default()
         };
@@ -303,7 +306,7 @@ mod tests {
                 .argv(&[])
                 .unwrap_err()
                 .to_string()
-                .contains("no built-in reasoning")
+                .contains("effort")
         );
     }
 
@@ -316,7 +319,7 @@ mod tests {
         };
         assert_eq!(profile.argv(&[]).unwrap(), ["--custom-flag"]);
         let profile = AgentProfile {
-            model: "model-x".into(),
+            permission_profile: "plan".into(),
             ..profile
         };
         assert!(
@@ -324,7 +327,7 @@ mod tests {
                 .argv(&[])
                 .unwrap_err()
                 .to_string()
-                .contains("no built-in")
+                .contains("no built-in permission")
         );
     }
 
@@ -371,7 +374,7 @@ mod tests {
             .argv(&["--ask-for-approval".into(), "never".into()])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("project safety arguments"));
+        assert!(error.contains("profile and project arguments"));
         assert!(error.contains("--ask-for-approval"));
     }
 
@@ -399,7 +402,7 @@ mod tests {
             .argv(&["--dangerously-skip-permissions".into()])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("project safety arguments"));
+        assert!(error.contains("profile and project arguments"));
         assert!(error.contains("--dangerously-skip-permissions"));
     }
 }
