@@ -76,6 +76,7 @@ pub enum Action {
     NewThread,
     Board,
     Merge,
+    Close,
     Settings,
     Search,
     Adopt,
@@ -129,7 +130,7 @@ const ALL_SCREENS: &[Screen] = &[
 ];
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -141,6 +142,7 @@ impl Action {
         Action::NewThread,
         Action::Board,
         Action::Merge,
+        Action::Close,
         Action::Settings,
         Action::Search,
         Action::Adopt,
@@ -172,6 +174,7 @@ impl Action {
             Action::NewThread => "new thread",
             Action::Board => "threads board",
             Action::Merge => "merge",
+            Action::Close => "close node",
             Action::Settings => "settings",
             Action::Search => "search",
             Action::Adopt => "adopt workspace",
@@ -204,6 +207,7 @@ impl Action {
             Action::NewThread => &["t"],
             Action::Board => &["b"],
             Action::Merge => &["m"],
+            Action::Close => &["x"],
             Action::Settings => &["s"],
             Action::Search => &["/"],
             Action::Adopt => &["a"],
@@ -236,6 +240,7 @@ impl Action {
             Action::NewThread => &[Launcher, Tree, Dock],
             Action::Board | Action::Settings | Action::NextTab | Action::PrevTab => TABBED,
             Action::Merge => &[Tree, Board, Detail, Dock],
+            Action::Close => &[Launcher, Tree, Board, Detail],
             Action::Search => &[Launcher],
             Action::Adopt => &[Launcher],
             Action::Fold => &[Tree],
@@ -618,8 +623,8 @@ mod tests {
         );
         assert!(keys.set(Action::Board, "3").is_err());
         // `d` is free on the launcher because done and doctor live elsewhere.
-        keys.set(Action::Board, "x").unwrap();
-        assert_eq!(keys.action(Screen::Launcher, "x"), Some(Action::Board));
+        keys.set(Action::Board, "z").unwrap();
+        assert_eq!(keys.action(Screen::Launcher, "z"), Some(Action::Board));
         assert_eq!(keys.action(Screen::Launcher, "b"), None);
         keys.reset(Action::Board);
         assert_eq!(keys.action(Screen::Launcher, "b"), Some(Action::Board));
