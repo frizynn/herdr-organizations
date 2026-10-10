@@ -437,6 +437,47 @@ pub fn close(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
     })
 }
 
+/// Stops the project's running coordinator agents and starts a fresh one on
+/// `profile` in the same session. The old conversation ends with its pane.
+pub fn replace_coordinator(ctx: &Ctx, slug: &str, profile: &str) -> Result<String> {
+    let project = Project::load(&ctx.root, slug)?;
+    let socket = project
+        .coordinator()
+        .map(|record| PathBuf::from(record.socket))
+        .filter(|socket| !socket.as_os_str().is_empty() && socket.exists())
+        .or_else(|| env_socket(ctx))
+        .context("no Herdr session to start the coordinator in")?;
+    let herdr = Herdr::new(ctx.env.herdr_bin(), &socket, ctx.runner);
+    let cwd = project.canonical_dir().to_string_lossy().into_owned();
+    let running: Vec<String> = herdr
+        .agent_list()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .into_iter()
+        .filter(|a| a.works_in(&cwd))
+        .map(|a| a.pane_id)
+        .collect();
+    for pane in &running {
+        herdr
+            .pane_close(pane)
+            .map_err(|e| anyhow::anyhow!("could not stop the coordinator in {pane}: {e}"))?;
+    }
+    let options = coordinator::OpenOptions {
+        session: SessionFlags {
+            session: None,
+            socket: Some(socket),
+        },
+        rebind: true,
+        profile: (!profile.is_empty()).then(|| profile.to_string()),
+        new: true,
+        here: false,
+    };
+    coordinator::open_quiet(ctx, slug, &options).context("could not start the new coordinator")?;
+    Ok(match running.len() {
+        0 => format!("started a coordinator on {profile}"),
+        n => format!("stopped {n} coordinator agent(s) and started a new one on {profile}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

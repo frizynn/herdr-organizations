@@ -3324,6 +3324,53 @@ fn open_starts_a_coordinator_without_a_priming_prompt_then_focuses_it_and_resume
 }
 
 #[test]
+fn replacing_the_coordinator_stops_the_live_one_then_starts_the_chosen_profile() {
+    let world = World::new();
+    let project = project::create(&world.root, "demo", "Ship it", vec![]).unwrap();
+    let socket = world.home.path().join("a.sock");
+    std::fs::write(&socket, b"").unwrap();
+    let dir = project.canonical_dir().to_string_lossy().into_owned();
+    project
+        .update_coordinator(|c| c.socket = socket.to_string_lossy().into_owned())
+        .unwrap();
+    *world.agents.borrow_mut() = format!(
+        "[{}]",
+        agent_json("w3", "w3:t1", "w3:p1", &dir, "hpc-demo", "idle")
+    );
+    *world.panes.borrow_mut() = format!("[{}]", pane_json("w3", "w3:t1", "w3:p1", &dir));
+    world.runner.on("pane close w3:p1", ok(r#"{"result":{}}"#));
+    world.runner.on("tab rename", ok(r#"{"result":{}}"#));
+    world.runner.on(
+        "workspace get",
+        ok(r#"{"result":{"workspace":{"label":"Demo"}}}"#),
+    );
+    world.runner.on(
+        "workspace create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
+    );
+    world.runner.on(
+        "tab create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
+    );
+    world.runner.on("--pane w3:p2", ok(r#"{"result":{"agent":{"pane_id":"w3:p2","tab_id":"w3:t2","workspace_id":"w3","name":"hpc-demo-1","agent":"codex","agent_status":"idle"}}}"#));
+
+    let message = crate::ui_ops::replace_coordinator(&world.ctx(), "demo", "codex").unwrap();
+
+    assert!(message.contains("stopped 1"), "{message}");
+    let calls = world.runner.calls.borrow();
+    let shown: Vec<String> = calls.iter().map(|c| c.display()).collect();
+    let close = shown
+        .iter()
+        .position(|c| c.contains("pane close w3:p1"))
+        .unwrap();
+    let start = shown
+        .iter()
+        .position(|c| c.contains("agent start") && c.contains("--kind codex"))
+        .unwrap_or_else(|| panic!("{shown:#?}"));
+    assert!(close < start, "{shown:#?}");
+}
+
+#[test]
 fn open_new_starts_a_fresh_coordinator_beside_a_live_one_without_its_session() {
     let world = World::new();
     let project = project::create(&world.root, "demo", "Ship it", vec![]).unwrap();
