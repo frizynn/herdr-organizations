@@ -470,7 +470,7 @@ fn dot(status: Status) -> (&'static str, Style) {
         Status::Need => ("●", RED),
         Status::Work => ("●", YELLOW),
         Status::Review => ("●", BLUE),
-        Status::Done => ("✓", GREEN),
+        Status::Done => ("✓", GREY),
         Status::Idle => ("○", GREY),
     }
 }
@@ -683,13 +683,16 @@ impl<'a> App<'a> {
             ),
             DIM,
         ));
-        let fold = self.config.view.resolved == Resolved::Count && self.search.is_empty();
+        // Resolved coordinators leave the tree for the project's history,
+        // except while searching, which looks through everything.
+        let history_apart = self.search.is_empty();
+        let history_open = self.config.view.resolved == Resolved::List;
         for p in &self.snap.projects {
             let (resolved, coords): (Vec<&Node>, Vec<&Node>) = p
                 .coordinators
                 .iter()
                 .filter(|c| self.matches(p, c) || self.search.is_empty())
-                .partition(|c| fold && c.id != ROOT_ID && c.status == Status::Done);
+                .partition(|c| history_apart && c.id != ROOT_ID && c.status == Status::Done);
             if !self.search.is_empty()
                 && coords.is_empty()
                 && !p.name.to_lowercase().contains(&self.search.to_lowercase())
@@ -734,14 +737,32 @@ impl<'a> App<'a> {
                 lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
             }
             if !resolved.is_empty() {
-                let n = resolved.len();
-                let plural = if n == 1 { "" } else { "s" };
+                let (arrow, verb) = if history_open {
+                    ("▾", "↵ hide")
+                } else {
+                    ("▸", "↵ show")
+                };
                 lines.push(
                     Line::new()
-                        .at(6, format!("✓ {n} resolved coordinator{plural}"), DIM)
-                        .at(-2, "↵ show", DIM)
+                        .at(4, arrow, GREY)
+                        .at(6, "History", GREY)
+                        .at(14, format!("{} resolved", resolved.len()), GREY)
+                        .at(-2, verb, DIM)
                         .target(Target::Resolved(p.slug.clone(), ROOT_ID.into())),
                 );
+                if history_open {
+                    for c in &resolved {
+                        let mut line =
+                            Line::new()
+                                .at(6, "✓", GREY)
+                                .at(8, term::fit(&c.title, 44), GREY);
+                        let done = c.counts.get(Status::Done);
+                        if done > 0 {
+                            line = line.at(-22, format!("{done} threads"), GREY);
+                        }
+                        lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
+                    }
+                }
             }
         }
         let outside: Vec<&state::Workspace> = self
@@ -2799,8 +2820,10 @@ impl<'a> App<'a> {
             Target::NewProject => self.new_form(Kind::Project, "", ""),
             Target::Adopt => self.adopt_current(),
             Target::Resolved(_, _) => {
-                self.config.view.resolved = Resolved::List;
-                self.message = "showing resolved nodes (Settings keeps the choice)".into();
+                self.config.view.resolved = match self.config.view.resolved {
+                    Resolved::Count => Resolved::List,
+                    Resolved::List => Resolved::Count,
+                };
             }
             Target::Setting(i) => self.change_setting(i, 1),
             Target::Key(_) => {
@@ -3713,16 +3736,24 @@ mod tests {
             c.status = Status::Done;
             let text = app.render(84, 24).text();
             assert!(!text.contains("✓ mobile redesign"), "{text}");
-            assert!(text.contains("✓ 1 resolved coordinator"), "{text}");
+            assert!(text.contains("▸ History 1 resolved"), "{text}");
 
-            let at = targets(&app.launcher_lines())
-                .iter()
-                .position(|t| matches!(t, Target::Resolved(_, id) if id == ROOT_ID))
-                .unwrap();
-            app.stack = vec![View::Launcher { sel: at }];
+            let history = |app: &App| {
+                targets(&app.launcher_lines())
+                    .iter()
+                    .position(|t| matches!(t, Target::Resolved(_, id) if id == ROOT_ID))
+                    .unwrap()
+            };
+            app.stack = vec![View::Launcher { sel: history(app) }];
             app.activate();
             let text = app.render(84, 24).text();
+            assert!(text.contains("▾ History 1 resolved"), "{text}");
             assert!(text.contains("✓ mobile redesign"), "{text}");
+
+            app.stack = vec![View::Launcher { sel: history(app) }];
+            app.activate();
+            let text = app.render(84, 24).text();
+            assert!(!text.contains("✓ mobile redesign"), "{text}");
         });
     }
 
