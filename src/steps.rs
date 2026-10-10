@@ -45,8 +45,9 @@ pub struct State {
     pub session_item_written: bool,
     /// thread id -> what the last auto-fix prompt was about.
     pub auto_fix: BTreeMap<String, AutoFixSent>,
-    /// thread id -> head commit an auto-merge was attempted for, so a refused
-    /// merge is not retried until something is pushed.
+    /// thread id -> `pr::merge_attempt_key` of the last auto-merge attempt, so
+    /// a refused merge is retried only when its head commit, review,
+    /// mergeability or check counts change.
     pub auto_merge_tried: BTreeMap<String, String>,
 }
 
@@ -616,7 +617,7 @@ pub fn merge_pull_request(
         }
         pr::Checked::Summary(summary) => summary,
     };
-    if let Some(reason) = pr::merge_blocker(&summary) {
+    if let Some(reason) = threads::merge_blocker(&t, &summary) {
         anyhow::bail!("{id}: not merged: {reason}");
     }
     pr::merge(ctx.runner, &t.pr, &summary.head_oid, method)?;
@@ -642,13 +643,12 @@ fn auto_actions(
     if t.status != Status::Open || summary.state != "OPEN" {
         return errors;
     }
+    let attempt = pr::merge_attempt_key(summary);
     if t.auto_merge
-        && pr::merge_blocker(summary).is_none()
-        && state.auto_merge_tried.get(&t.id) != Some(&summary.head_oid)
+        && threads::merge_blocker(&t, summary).is_none()
+        && state.auto_merge_tried.get(&t.id) != Some(&attempt)
     {
-        state
-            .auto_merge_tried
-            .insert(t.id.clone(), summary.head_oid.clone());
+        state.auto_merge_tried.insert(t.id.clone(), attempt);
         let text = match merge_pull_request(ctx, project, &t.id, pr::MergeMethod::default()) {
             Ok(_) => format!(
                 "{}: pull request {url} was merged by the ticker because auto-merge is on",
@@ -684,8 +684,18 @@ fn auto_fix(
     let checks_key = format!("{} {}", summary.head_oid, summary.failing_checks.join(","));
     let comments_key = format!("{} {}", summary.comment_count, summary.review_decision);
     let fix_checks = summary.checks.failed > 0 && checks_key != sent.checks;
-    let has_comments = summary.comment_count > 0 || summary.review_decision == "CHANGES_REQUESTED";
-    let fix_comments = has_comments && comments_key != sent.comments;
+    // Only more comments or a fresh change request is feedback; an approval
+    // is not, and a needless push could restart checks or dismiss it.
+    let (sent_count, sent_review) = sent.comments.split_once(' ').unwrap_or(("0", ""));
+    let more_comments = summary.comment_count > sent_count.parse().unwrap_or(0);
+    let changes_requested =
+        summary.review_decision == "CHANGES_REQUESTED" && sent_review != "CHANGES_REQUESTED";
+    let fix_comments = more_comments || changes_requested;
+    if !fix_comments && comments_key != sent.comments {
+        // Seen without news: the baseline a later comment or change request
+        // is compared with.
+        state.auto_fix.entry(t.id.clone()).or_default().comments = comments_key.clone();
+    }
     if !(fix_checks || fix_comments) || t.is_remote() {
         return Ok(());
     }
@@ -1041,8 +1051,18 @@ mod tests {
         const RED: &str = r#"{"name":"build","conclusion":"FAILURE"}"#;
 
         fn view(review: &str, checks: &str, additions: u64) -> String {
+            view_with_comments(review, checks, additions, 0)
+        }
+
+        fn view_with_comments(
+            review: &str,
+            checks: &str,
+            additions: u64,
+            comments: usize,
+        ) -> String {
+            let comments = vec![r#"{"author":{"login":"rev"}}"#; comments].join(",");
             format!(
-                r#"{{"state":"OPEN","reviewDecision":"{review}","headRefName":"hp/demo/t-0001-task","headRefOid":"{HEAD}","headRepository":{{"name":"app"}},"headRepositoryOwner":{{"login":"owner"}},"additions":{additions},"deletions":2,"mergeable":"MERGEABLE","statusCheckRollup":[{checks}]}}"#
+                r#"{{"state":"OPEN","reviewDecision":"{review}","headRefName":"hp/demo/t-0001-task","headRefOid":"{HEAD}","headRepository":{{"name":"app"}},"headRepositoryOwner":{{"login":"owner"}},"additions":{additions},"deletions":2,"mergeable":"MERGEABLE","statusCheckRollup":[{checks}],"comments":[{comments}]}}"#
             )
         }
 
@@ -1200,6 +1220,79 @@ mod tests {
                 .collect();
             assert_eq!(refusals.len(), 1);
             assert!(refusals[0].summary.contains("Required status check"));
+        }
+
+        #[test]
+        fn a_refused_auto_merge_is_retried_when_a_check_appears_on_the_same_commit() {
+            let setup =
+                Setup::with_merge("idle", fail(1, "Required status check is expected"), |t| {
+                    t.auto_merge = true
+                });
+            let mut state = State::default();
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("gh pr merge"), 1);
+            *setup.gh_view.borrow_mut() = view("APPROVED", &format!("{GREEN},{GREEN}"), 10);
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("gh pr merge"), 2);
+        }
+
+        #[test]
+        fn auto_fix_treats_more_comments_or_a_change_request_as_news_but_not_an_approval() {
+            let pending = r#"{"name":"build","status":"IN_PROGRESS"}"#;
+            let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
+            let mut state = State::default();
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", pending, 10, 2);
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("agent prompt"), 1);
+
+            *setup.gh_view.borrow_mut() = view_with_comments("APPROVED", pending, 10, 2);
+            setup.check(&mut state);
+            assert_eq!(
+                setup.world.runner.count("agent prompt"),
+                1,
+                "an approval is not feedback"
+            );
+
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", pending, 10, 2);
+            setup.check(&mut state);
+            assert_eq!(
+                setup.world.runner.count("agent prompt"),
+                2,
+                "a new change request is"
+            );
+
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", pending, 10, 3);
+            setup.check(&mut state);
+            assert_eq!(
+                setup.world.runner.count("agent prompt"),
+                3,
+                "so is a new comment"
+            );
+        }
+
+        #[test]
+        fn thread_merge_refuses_a_pull_request_into_another_base() {
+            let setup = Setup::new("idle", |t| t.base = "origin/main".into());
+            setup.check(&mut State::default());
+            let merge = || {
+                merge_pull_request(
+                    &setup.world.ctx(),
+                    &setup.project,
+                    "t-0001",
+                    pr::MergeMethod::Squash,
+                )
+            };
+            let served = view("APPROVED", GREEN, 10);
+            *setup.gh_view.borrow_mut() =
+                served.replace("\"state\"", "\"baseRefName\":\"release\",\"state\"");
+            let error = merge().unwrap_err().to_string();
+            assert!(error.contains("not the thread's base"), "{error}");
+            assert_eq!(setup.world.runner.count("gh pr merge"), 0);
+
+            *setup.gh_view.borrow_mut() =
+                served.replace("\"state\"", "\"baseRefName\":\"main\",\"state\"");
+            merge().unwrap();
+            assert_eq!(setup.world.runner.count("gh pr merge"), 1);
         }
 
         #[test]

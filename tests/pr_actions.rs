@@ -63,12 +63,20 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_in_pane("", args)
+    }
+
+    /// As if run from the Herdr pane `pane`; empty means a plain terminal.
+    fn run_in_pane(&self, pane: &str, args: &[&str]) -> Output {
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
-        Command::new(BIN)
-            .env_clear()
+        let mut cmd = Command::new(BIN);
+        cmd.env_clear()
             .env("HOME", self.home.path())
-            .env("PATH", path)
-            .arg("--root")
+            .env("PATH", path);
+        if !pane.is_empty() {
+            cmd.env("HERDR_PANE_ID", pane);
+        }
+        cmd.arg("--root")
             .arg(&self.root)
             .args(args)
             .output()
@@ -204,4 +212,83 @@ fn thread_merge_without_a_pull_request_never_calls_gh() {
         stderr(&out)
     );
     assert!(fixture.gh_calls().is_empty());
+}
+
+#[test]
+fn an_agent_pane_of_the_project_cannot_merge_or_turn_auto_merge_on() {
+    let fixture = Fixture::new();
+    let record = fixture.record() + "pane_id = \"w2:p1\"\n";
+    std::fs::write(fixture.root.join("demo/threads/t-0001.toml"), record).unwrap();
+    fixture.serve("APPROVED", r#"{"name":"build","conclusion":"SUCCESS"}"#);
+
+    let out = fixture.run_in_pane(
+        "w2:p1",
+        &["thread", "set", "demo", "t-0001", "--auto-merge", "on"],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("agent pane"), "{}", stderr(&out));
+    assert!(
+        fixture.record().contains("auto_merge = false")
+            || !fixture.record().contains("auto_merge = true")
+    );
+
+    let out = fixture.run_in_pane("w2:p1", &["thread", "merge", "demo", "t-0001"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("agent pane"), "{}", stderr(&out));
+    assert!(fixture.gh_calls().is_empty(), "{:?}", fixture.gh_calls());
+
+    let out = fixture.run_in_pane(
+        "w2:p1",
+        &[
+            "thread",
+            "set",
+            "demo",
+            "t-0001",
+            "--auto-merge",
+            "off",
+            "--auto-fix-ci",
+            "on",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "turning it off stays allowed: {}",
+        stderr(&out)
+    );
+
+    let out = fixture.run_in_pane(
+        "w9:p9",
+        &["thread", "set", "demo", "t-0001", "--auto-merge", "on"],
+    );
+    assert!(
+        out.status.success(),
+        "a pane the project did not record: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn after_thread_merge_the_json_reports_a_blocker_until_the_ticker_reads_again() {
+    let fixture = Fixture::new();
+    fixture.serve("APPROVED", r#"{"name":"build","conclusion":"SUCCESS"}"#);
+    // The ticker's cached summary from before the merge: open, approved, green.
+    std::fs::create_dir_all(fixture.root.join("demo/.state")).unwrap();
+    std::fs::write(
+        fixture.root.join("demo/.state/ticker.json"),
+        format!(
+            r#"{{"prs":{{"t-0001":{{"state":"OPEN","review_decision":"APPROVED","checks":{{"passed":1}},"mergeable":"MERGEABLE","head_oid":"{HEAD}"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let blocker = || {
+        let out = fixture.run(&["thread", "list", "demo", "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        list["threads"][0]["pr"]["merge_blocker"].clone()
+    };
+    assert_eq!(blocker(), serde_json::Value::Null);
+
+    let out = fixture.run(&["thread", "merge", "demo", "t-0001"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(blocker(), "it is not open (state MERGED)");
 }

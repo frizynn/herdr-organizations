@@ -1066,6 +1066,46 @@ pub struct PrJson {
     pub merge_blocker: Option<String>,
 }
 
+/// Merging and turning auto-merge on are the user's call. When the caller is
+/// a pane this project recorded for its coordinator or a local thread, the
+/// action is refused. Defense in depth, not access control: an agent can still
+/// unset the variable or call `gh` itself.
+pub fn refuse_agent_pane(ctx: &Ctx, project: &Project, action: &str) -> Result<()> {
+    let pane = ctx.env.var("HERDR_PANE_ID").unwrap_or("");
+    if pane.is_empty() {
+        return Ok(());
+    }
+    let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+    let coordinator = project.coordinator();
+    // Pane ids are only unique within one Herdr server.
+    if let Some(c) = &coordinator
+        && !socket.is_empty()
+        && !c.socket.is_empty()
+        && c.socket != socket
+    {
+        return Ok(());
+    }
+    let known = coordinator.is_some_and(|c| c.pane_id == pane)
+        || thread::list(project)
+            .iter()
+            .any(|t| t.machine.is_empty() && t.pane_id == pane);
+    if known {
+        bail!(
+            "{action} is refused from an agent pane of this project; run it from your own terminal or Nenu"
+        );
+    }
+    Ok(())
+}
+
+/// Why `thread merge` would refuse this thread's pull request as `summary`
+/// describes it, or `None` when it would merge.
+pub fn merge_blocker(t: &Thread, summary: &pr::Summary) -> Option<String> {
+    if t.status != Status::Open {
+        return Some("the thread is not open".into());
+    }
+    pr::merge_blocker(summary).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
+}
+
 pub fn thread_json(row: &Row, prs: &std::collections::BTreeMap<String, pr::Summary>) -> ThreadJson {
     let t = &row.thread;
     let pr = (!t.pr.is_empty()).then(|| {
@@ -1085,9 +1125,13 @@ pub fn thread_json(row: &Row, prs: &std::collections::BTreeMap<String, pr::Summa
             comment_count: prs.get(&t.id).map(|s| s.comment_count),
             draft: summary.map(|s| s.is_draft),
             mergeable: summary.map(|s| s.mergeable.clone()),
+            // `thread merge` writes `pr_state` before the ticker's next read
+            // refreshes the cached summary, so the record wins when it differs.
             merge_blocker: match summary {
-                _ if t.status != Status::Open => Some("the thread is not open".into()),
-                Some(s) => pr::merge_blocker(s),
+                _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => {
+                    Some(format!("it is not open (state {})", t.pr_state))
+                }
+                Some(s) => merge_blocker(t, s),
                 None => Some("the ticker has not read this pull request yet".into()),
             },
         }

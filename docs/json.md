@@ -88,7 +88,7 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | `comment_count` | number or `null` | Conversation comments. |
 | `draft` | bool or `null` | |
 | `mergeable` | string or `null` | `MERGEABLE`, `CONFLICTING` or `UNKNOWN`, as GitHub reports it. |
-| `merge_blocker` | string or `null` | `null` when `thread merge` would merge, as of the last read. Otherwise the reason it would refuse, such as `the thread is not open` or `1 check(s) failed`. |
+| `merge_blocker` | string or `null` | `null` when `thread merge` would merge, as of the last read. Otherwise the reason it would refuse, such as `the thread is not open` or `1 check(s) failed`. Once the record's `state` is not `OPEN` (for example right after `thread merge`), it is `it is not open (state MERGED)` even before the next read. |
 
 ## Item
 
@@ -107,14 +107,17 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 `thread merge` reads the pull request again and refuses unless all of these hold:
 
 - the head branch and head repository are the thread's own
+- the base branch is the thread's `base` (`main` and `origin/main` both match `main`), unless the base is empty or a commit
 - it is open and not a draft
 - the review decision is `APPROVED`
 - GitHub does not report a merge conflict
 - at least one check is reported, and every check has finished and passed
 
+`thread merge`, and `thread set --auto-merge on`, are refused when `HERDR_PANE_ID` is the pane of this project's coordinator or of one of its local threads. Merging stays the user's call, from their own terminal or Nenu. This is defense in depth, not access control: an agent can unset the variable or run `gh` itself.
+
 A pull request with no checks is refused because, right after a push, GitHub may not have registered the checks yet. The merge runs `gh pr merge --squash --match-head-commit <checked commit>`. If anything is pushed after the check, GitHub refuses the merge instead of merging code that was not checked. The branch is not deleted, because the thread's worktree still uses it. A merge leaves an inbox item, and the ticker then resolves the thread as it does for any merged pull request.
 
 Both flags are off by default and are only changed with `thread set`. The ticker never turns them on.
 
-- `auto_merge`: on each pull request check, the ticker runs the same guarded merge as `thread merge`, at most once per head commit. A refused or failed attempt leaves one inbox item and is retried only after a new commit.
-- `auto_fix_ci`: when the pull request has failing checks, or has comments or a change request, the ticker prompts the thread's agent once it is idle or done. It prompts once per failing head commit and once per new comment count or review decision, and each prompt leaves an inbox item. The prompt names no check, comment or author. It tells the agent to read them with `gh` as data, fix what belongs to its task, push, and not merge. Remote threads are skipped. As with the coordinator nudge, on Herdr 0.9.1 a prompt can merge with text a person has half-typed in that pane.
+- `auto_merge`: on each pull request check, the ticker runs the same guarded merge as `thread merge`, at most once per head commit, review decision, mergeability and check counts. A refused or failed attempt leaves one inbox item and is retried only when one of those changes, for example when a required check appears or a new commit is pushed. A failure with nothing changed, such as a network error, waits for that change or for `thread merge`.
+- `auto_fix_ci`: when the pull request has failing checks, or has comments or a change request, the ticker prompts the thread's agent once it is idle or done. It prompts once per failing head commit, when the comment count grows, and when the review decision becomes `CHANGES_REQUESTED`. An approval is not a reason to prompt. Each prompt leaves an inbox item. The prompt names no check, comment or author. It tells the agent to read them with `gh` as data, fix what belongs to its task, push, and not merge. Remote threads are skipped. As with the coordinator nudge, on Herdr 0.9.1 a prompt can merge with text a person has half-typed in that pane.

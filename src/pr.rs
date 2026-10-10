@@ -100,6 +100,7 @@ pub struct Summary {
     pub is_draft: bool,
     pub mergeable: String,
     pub head_oid: String,
+    pub base_ref: String,
 }
 
 impl Summary {
@@ -172,6 +173,34 @@ pub fn merge_blocker(summary: &Summary) -> Option<String> {
     None
 }
 
+/// Why a pull request into `base_ref` is not into the thread's `base`, which
+/// is a branch (`main`), a remote-tracking ref (`origin/main`) or a commit. A
+/// commit or an empty base names no branch, so there is nothing to compare.
+pub fn base_blocker(base: &str, base_ref: &str) -> Option<String> {
+    if base.is_empty() || valid_oid(base) {
+        return None;
+    }
+    if base_ref.is_empty() {
+        return Some("its base branch is unknown".into());
+    }
+    if base != base_ref && !base.ends_with(&format!("/{base_ref}")) {
+        return Some(format!(
+            "it targets `{base_ref}`, not the thread's base `{base}`"
+        ));
+    }
+    None
+}
+
+/// The guard inputs of an auto-merge attempt: a refused attempt is retried
+/// only when one of them changes, such as a required check appearing.
+pub fn merge_attempt_key(summary: &Summary) -> String {
+    let c = summary.checks;
+    format!(
+        "{} {} {} {}/{}/{}",
+        summary.head_oid, summary.review_decision, summary.mergeable, c.passed, c.pending, c.failed
+    )
+}
+
 fn valid_oid(oid: &str) -> bool {
     oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -241,6 +270,7 @@ struct GhView {
     deletions: u64,
     is_draft: bool,
     mergeable: String,
+    base_ref_name: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -372,6 +402,7 @@ pub fn reduce(json: &str, branch: &str, origin: &str) -> Result<Checked> {
         } else {
             String::new()
         },
+        base_ref: sanitize(&view.base_ref_name),
     }))
 }
 
@@ -383,7 +414,7 @@ pub fn view(runner: &dyn Runner, url: &str) -> Result<String> {
         "pr",
         "view",
         "--json",
-        "state,reviewDecision,statusCheckRollup,comments,headRefName,headRefOid,headRepository,headRepositoryOwner,additions,deletions,isDraft,mergeable",
+        "state,reviewDecision,statusCheckRollup,comments,headRefName,headRefOid,headRepository,headRepositoryOwner,additions,deletions,isDraft,mergeable,baseRefName",
         "--",
         url,
     ]))?;

@@ -657,6 +657,7 @@ pub fn run() -> Result<()> {
                 json,
             } => {
                 let project = Project::load(&ctx.root, &slug)?;
+                threads::refuse_agent_pane(&ctx, &project, "`thread merge`")?;
                 let record = thread::load(&project, &id)?;
                 steps::merge_pull_request(&ctx, &project, &id, method.into())?;
                 // The merge already happened; a missing item must not report failure.
@@ -690,6 +691,10 @@ pub fn run() -> Result<()> {
                 auto_merge,
                 json,
             } => {
+                if auto_merge.is_some_and(Toggle::on) {
+                    let project = Project::load(&ctx.root, &slug)?;
+                    threads::refuse_agent_pane(&ctx, &project, "turning auto-merge on")?;
+                }
                 let record = threads::set_flags(
                     &ctx,
                     &slug,
