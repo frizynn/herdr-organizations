@@ -60,8 +60,8 @@ impl Default for View {
     }
 }
 
-/// Every rebindable command. Digits 1-9 (jump, or answer from the thread
-/// detail) are fixed; Settings can turn answering off.
+/// Every rebindable command. Digits 1-9 (open a waiting agent's question, or
+/// answer it from the thread detail) are fixed; Settings can turn answering off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -90,6 +90,8 @@ pub enum Action {
     NextField,
     PrevField,
     Help,
+    NextTab,
+    PrevTab,
 }
 
 /// Where a command is read. Two commands may share a key only when they never
@@ -106,6 +108,15 @@ pub enum Screen {
     Dock,
 }
 
+/// The popup screens that show the tab row and read its keys.
+const TABBED: &[Screen] = &[
+    Screen::Launcher,
+    Screen::Tree,
+    Screen::Board,
+    Screen::Detail,
+    Screen::Settings,
+];
+
 const ALL_SCREENS: &[Screen] = &[
     Screen::Launcher,
     Screen::Form,
@@ -118,7 +129,7 @@ const ALL_SCREENS: &[Screen] = &[
 ];
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 27] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -144,6 +155,8 @@ impl Action {
         Action::NextField,
         Action::PrevField,
         Action::Help,
+        Action::NextTab,
+        Action::PrevTab,
     ];
 
     pub fn label(self) -> &'static str {
@@ -173,6 +186,8 @@ impl Action {
             Action::NextField => "next field",
             Action::PrevField => "previous field",
             Action::Help => "keys",
+            Action::NextTab => "next tab",
+            Action::PrevTab => "previous tab",
         }
     }
 
@@ -203,6 +218,8 @@ impl Action {
             Action::NextField => &["tab"],
             Action::PrevField => &["shift+tab"],
             Action::Help => &["?"],
+            Action::NextTab => &["tab"],
+            Action::PrevTab => &["shift+tab"],
         }
     }
 
@@ -216,10 +233,9 @@ impl Action {
             Action::Left | Action::Right => &[Form, Board, Settings],
             Action::NewProject => &[Launcher, Tree, Board],
             Action::NewCoordinator => &[Launcher, Tree],
-            Action::NewThread => &[Tree, Dock],
-            Action::Board => &[Launcher, Tree],
+            Action::NewThread => &[Launcher, Tree, Dock],
+            Action::Board | Action::Settings | Action::NextTab | Action::PrevTab => TABBED,
             Action::Merge => &[Tree, Board, Detail, Dock],
-            Action::Settings => &[Launcher],
             Action::Search => &[Launcher],
             Action::Adopt => &[Launcher],
             Action::Fold => &[Tree],
@@ -312,7 +328,7 @@ fn valid_key(name: &str) -> bool {
             .split('+')
             .take(modifiers)
             .all(|m| matches!(m, "ctrl" | "alt" | "shift"))
-        // Digits jump or answer on every screen.
+        // Digits open or answer a question on every screen.
         && !(modifiers == 0 && last.chars().all(|c| c.is_ascii_digit()) && last != "0")
 }
 
@@ -544,6 +560,14 @@ mod tests {
         );
         // `k` moves up everywhere else.
         assert_eq!(keys.action(Screen::Tree, "k"), Some(Action::Up));
+        // Tab switches tabs; on the form it moves between fields.
+        assert_eq!(keys.action(Screen::Board, "tab"), Some(Action::NextTab));
+        assert_eq!(
+            keys.action(Screen::Settings, "shift+tab"),
+            Some(Action::PrevTab)
+        );
+        assert_eq!(keys.action(Screen::Form, "tab"), Some(Action::NextField));
+        assert_eq!(keys.action(Screen::Detail, "s"), Some(Action::Settings));
     }
 
     #[test]

@@ -141,7 +141,7 @@ What to answer:
 
 - **Coordination preferences are saved unasked.** When the user states how they want threads run (parallel cap, harness or model for workers, PR habits, review habits), write it to `memory/preferences.md`, keep `MEMORY.md` as an index, and say so in one line ("Noted in memory: workers use codex."). Drop it when the user says so.
 - **Project facts** go to memory only when the user says to remember them, or from a report's `## Remember` section, of which you write your own short summary. Do not paste it.
-- **Node scopes.** A node can add `nodes/<id>/INSTRUCTIONS.md`, `nodes/<id>/MEMORY.md` and `nodes/<id>/memory/*.md`. Project-wide facts belong at the root; facts for one area belong in that node's scope, where its descendants inherit them.
+- **Node scopes.** A node can add `nodes/<id>/INSTRUCTIONS.md`, `nodes/<id>/MEMORY.md` and `nodes/<id>/memory/*.md`. Project-wide facts belong at the root; facts for one area belong in that node's scope, where its descendants inherit them. Give a child its rules when you create it with `--rules-file <file>`; `hp node rules <slug> <id> --text-file <file>` changes them for its next brief or restart.
 - Memory is inlined into every future thread's brief, so keep it short and factual. Re-read a memory file before rewriting it: another coordinator may share this folder.
 - Decisions the user makes in chat that later threads must know go to memory as they happen.
 

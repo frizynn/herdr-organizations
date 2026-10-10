@@ -26,6 +26,8 @@ nodes/<id>/memory/*.md
 
 A node brief composes project context, then each ancestor from root to parent, then the node's own files. Instructions and memory are deterministic. Siblings, descendants and other projects are excluded. The same composition is rebuilt on restart. Legacy nodes without a scope inherit project context only. Scoped memory reads allow at most 8 KiB per file, 32,000 bytes total and 64 files across the project and node ancestry. Omitted files are listed in the memory index. On supported Unix targets, each memory file is opened with `O_NOFOLLOW` on its final path component and checked through the opened file descriptor, closing the file-level metadata-check/open symlink race. Parent directories are checked separately and are not pinned against same-user replacement. Other platforms use a pre-open symlink check and are not listed as supported plugin targets.
 
+`node start --rules-file <file>` writes the trimmed rules (at most 8 KiB) into the new node's `INSTRUCTIONS.md` under the same lock as the record, so the first brief already has them. `node rules <slug> <id>` prints them and `--text-file <file>` replaces them; a running agent sees the change on its next brief or restart, as its descendants do.
+
 Node scopes are treated as regular directories. Symbolic links for a node scope or its memory directory are refused, and symbolic-link memory files are skipped. This prevents a node brief from reading through a redirected scope.
 
 ## Agent profiles

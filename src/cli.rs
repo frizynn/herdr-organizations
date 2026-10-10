@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::agent_profile::ProfileOverrides;
 use crate::coordinator::{self, OpenOptions};
-use crate::organizations::NodeRequest;
+use crate::organizations::{self, NodeRequest};
 use crate::paths::{self, Ctx, Env, SessionFlags};
 use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
@@ -577,6 +577,9 @@ struct NodeStartArgs {
     /// The task; `-` reads standard input
     #[arg(long, value_name = "FILE")]
     task_file: String,
+    /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB)
+    #[arg(long, value_name = "FILE")]
+    rules_file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -613,6 +616,13 @@ enum NodeCommand {
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
+    },
+    /// Print a node's standing instructions, or replace them; the node and its descendants read them on their next brief or restart
+    Rules {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "FILE")]
+        text_file: Option<String>,
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
@@ -1225,11 +1235,19 @@ pub fn run() -> Result<()> {
                     kind,
                     base,
                     task_file,
+                    rules_file,
                 } = *args;
                 let kind = kind
                     .as_deref()
                     .map(crate::thread::Kind::parse)
                     .transpose()?;
+                let rules = match rules_file.as_deref() {
+                    Some("-") => {
+                        bail!("--rules-file does not read standard input; --task-file may")
+                    }
+                    Some(file) => read_text(file)?,
+                    None => String::new(),
+                };
                 let task = read_text(&task_file)?;
                 let can_spawn = if can_spawn {
                     Some(true)
@@ -1249,6 +1267,7 @@ pub fn run() -> Result<()> {
                         permission_profile,
                         raw_agent_args,
                     },
+                    rules,
                 };
                 let node = threads::start(
                     &ctx,
@@ -1309,6 +1328,20 @@ pub fn run() -> Result<()> {
                 }
             }
             NodeCommand::Show { slug, id, json } => threads::print_show(&ctx, &slug, &id, json),
+            NodeCommand::Rules {
+                slug,
+                id,
+                text_file,
+            } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                match text_file {
+                    Some(file) => organizations::set_node_rules(&project, &id, &read_text(&file)?),
+                    None => {
+                        print!("{}", organizations::node_rules(&project, &id)?);
+                        Ok(())
+                    }
+                }
+            }
             NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
             NodeCommand::Resolve {
                 slug,

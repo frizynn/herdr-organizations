@@ -271,6 +271,15 @@ impl Frame {
         }
     }
 
+    /// Copies `other` onto this frame from row `y` down, clipped at the edges.
+    pub fn paste(&mut self, y: usize, other: &Frame) {
+        for (row, source) in self.cells.iter_mut().skip(y).zip(&other.cells) {
+            for (cell, from) in row.iter_mut().zip(source) {
+                cell.clone_from(from);
+            }
+        }
+    }
+
     /// A full-width selected row background.
     pub fn select_row(&mut self, y: usize) {
         self.fill(0, y, self.width, Some(SELECTED));

@@ -126,9 +126,11 @@ The existing `thread start` command remains a worker-under-root alias. Use `node
 
 Run **Herdr Organizations: launcher** from Herdr's action menu, or bind it to a key (below). Every interactive screen is one small TUI inside a Herdr popup. It exists only while the popup is open; Esc goes back, then closes it.
 
-- **Launcher**: "needs you" across every coordinator (oldest first), then each project with its coordinators nested and their counts, then workspaces outside a project. `1`-`9` jump to a coordinator, `n` new project, `c` new coordinator, `a` turns the current workspace into a project, `/` filters, `b` opens the board, `s` settings.
-- **New** (`n`): one form for a project, coordinator, thread or workspace. Up/Down switch what to create, Tab moves between fields, Left/Right choose, Enter creates. The last line shows the exact CLI call the form makes.
-- **Project tree** (Enter on a project or coordinator): project › coordinators › threads. Enter goes to the selected pane, Space folds a coordinator, `t` starts a thread under it, `m` merges a reviewed pull request, `1`-`9` on an agent that is waiting on you open its detail, where a digit answers.
+The first row holds the tabs **Projects**, **Board** and **Settings**. Click one, or press Tab and Shift+Tab to cycle them (`b` and `s` jump straight to Board and Settings). A screen opened from a tab (a project's tree, a thread's detail, a New form) shows as one more tab after them while it is open; switching tabs closes it.
+
+- **Projects**: "needs you" across every coordinator (oldest first), then each project with its coordinators nested and their counts, then workspaces outside a project. The bottom row says where a new node would go, `New under <parent>`, for what is selected: a project or its root puts it under the project's root coordinator, a coordinator under that coordinator, a thread under the thread's coordinator. `c` new coordinator, `t` new thread, `n` new project (the chips are clickable too), `a` turns the current workspace into a project, `/` filters.
+- **New** (`n`, `c` or `t`): one form for a project, coordinator, thread or workspace. Up/Down switch what to create, Tab moves between fields, Left/Right choose, Enter creates. A coordinator or thread starts in the **Under** field's parent, which opens on the selected coordinator. The last line shows the exact CLI call the form makes.
+- **Project tree** (Enter on a project or coordinator): project › coordinators › threads. Enter goes to the selected pane, Space folds a coordinator, `c` and `t` create under the selected coordinator as on Projects, `m` merges a reviewed pull request, `1`-`9` on an agent that is waiting on you open its detail, where a digit answers.
 - **Board** (`b`): every thread in four columns (needs you, working, review, resolved), idle threads on one line and the running coordinators below. `f` cycles the coordinator filter.
 - **Thread detail** (Enter on a card or a needs-you row): the question or the agent's current line, the PR and its checks, the thread's inbox items (`d` marks one done) and the last lines of its pane, read once.
 - **Merge confirm** (`m`): drawn by the same process, because Herdr shows one popup at a time. It merges only when the pull request passes the same guard as `thread merge`, then resolves the thread and tells its coordinator. `k` keeps the worktree.
@@ -138,7 +140,7 @@ The popup reads `~/.herdr-projects/.organizations-state.json`, which the ticker 
 
 ### Keybindings
 
-Defaults follow the design: `↵` open, `n` new project, `c` new coordinator, `t` new thread, `b` board, `m` merge, `1`-`9` jump, `s` settings, `/` search, `esc` back. On a thread that needs you, `1`-`9` first opens its detail with the last lines of the pane; only there does a digit go to the agent, and only if the pane still shows those lines. Settings can turn that off. Rebind any command in Settings (select it, press Enter, press the new key; Backspace restores the default) or edit `~/.config/herdr-projects/tui.toml`:
+Defaults follow the design: `↵` open, `n` new project, `c` new coordinator, `t` new thread, `tab` / `shift+tab` next and previous tab, `b` board, `s` settings, `m` merge, `/` search, `esc` back. Digits are not bindable: on a thread that needs you, `1`-`9` first opens its detail with the last lines of the pane; only there does a digit go to the agent, and only if the pane still shows those lines. Settings can turn that off. Rebind any command in Settings (select it, press Enter, press the new key; Backspace restores the default) or edit `~/.config/herdr-projects/tui.toml`:
 
 ```toml
 [view]

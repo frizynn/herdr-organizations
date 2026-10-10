@@ -2,6 +2,8 @@
 //! popup (or the optional dock) is open. Launcher, New, project tree, board,
 //! thread detail, merge confirm and settings are screens of the same
 //! process; Herdr allows one popup at a time, so dialogs are drawn here.
+//! The popup's first row holds its tabs (Projects, Board, Settings); a screen
+//! opened from one of them shows as one more tab while it is open.
 //!
 //! The view reads the ticker's state file and redraws on a key or when that
 //! file changes. It never polls Herdr; it calls Herdr only for an action the
@@ -114,7 +116,6 @@ enum Target {
     NeedsYou(String, String),
     Project(String),
     Node(String, String),
-    NewCoordinator(String),
     NewThread(String),
     NewProject,
     Adopt,
@@ -147,6 +148,40 @@ impl Kind {
             Kind::Thread => ("Thread", "one agent, one task"),
             Kind::Workspace => ("Workspace", "folder, no coordinator"),
         }
+    }
+}
+
+/// The popup's tabs, in the order they are drawn and cycled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Projects,
+    Board,
+    Settings,
+}
+
+impl Tab {
+    const ALL: [Tab; 3] = [Tab::Projects, Tab::Board, Tab::Settings];
+    /// The tab row and the rule under it.
+    const ROWS: usize = 2;
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Projects => "Projects",
+            Tab::Board => "Board",
+            Tab::Settings => "Settings",
+        }
+    }
+
+    /// The tab `delta` steps from `from`; `None`, a screen opened from a
+    /// tab, is drawn after the last one.
+    fn step(from: Option<Tab>, delta: isize) -> Tab {
+        let len = Tab::ALL.len() as isize;
+        let at = match from {
+            Some(tab) => Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0) as isize + delta,
+            None if delta > 0 => 0,
+            None => len - 1,
+        };
+        Tab::ALL[at.rem_euclid(len) as usize]
     }
 }
 
@@ -198,6 +233,18 @@ struct Form {
     focus: usize,
     adopt_pane: String,
     adopt_cwd: String,
+}
+
+impl Form {
+    fn title(&self) -> &'static str {
+        match (self.kind, self.adopt_pane.is_empty()) {
+            (Kind::Project, false) => "Project from this workspace",
+            (Kind::Project, true) => "New project",
+            (Kind::Coordinator, _) => "New coordinator",
+            (Kind::Thread, _) => "New thread",
+            (Kind::Workspace, _) => "New workspace",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,8 +306,22 @@ impl View {
         }
     }
 
+    /// Drawn over the screen below it, which stays visible.
     fn overlay(&self) -> bool {
-        matches!(self, View::Confirm { .. } | View::Reply { .. } | View::Help)
+        matches!(
+            self,
+            View::Confirm { .. } | View::Reply { .. } | View::Help | View::Search { .. }
+        )
+    }
+
+    /// The tab this screen is the root of; `None` for a screen opened from one.
+    fn tab(&self) -> Option<Tab> {
+        match self {
+            View::Launcher { .. } => Some(Tab::Projects),
+            View::Board { .. } => Some(Tab::Board),
+            View::Settings { .. } => Some(Tab::Settings),
+            _ => None,
+        }
     }
 }
 
@@ -282,7 +343,22 @@ struct App<'a> {
     current_workspace: (String, String),
     /// Rows of the last frame that hold a selectable target: (row, index).
     rows: Vec<(usize, usize)>,
+    /// Tabs and action chips of the last frame, pressed by a click.
+    buttons: Vec<Button>,
     last_click: Option<(usize, std::time::Instant)>,
+}
+
+/// A clickable span of the last frame.
+struct Button {
+    y: usize,
+    x: std::ops::Range<usize>,
+    press: Press,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Press {
+    Tab(Tab),
+    Action(Action),
 }
 
 // ------------------------------------------------------------------ lines
@@ -440,7 +516,8 @@ fn counts_header(counts: &Counts) -> Line {
     line
 }
 
-fn coordinator_name(project: &ProjectView, id: &str) -> String {
+/// A node as the screens name it: the root is "Coordinator".
+fn node_name(project: &ProjectView, id: &str) -> String {
     match project.node(id) {
         Some(n) if n.id == ROOT_ID => "Coordinator".into(),
         Some(n) => n.title.clone(),
@@ -545,20 +622,6 @@ impl<'a> App<'a> {
             || node.workspace.to_lowercase().contains(&needle)
     }
 
-    /// Coordinators numbered 1-9 across projects, in launcher order.
-    fn numbered(&self) -> Vec<(String, String)> {
-        self.snap
-            .projects
-            .iter()
-            .flat_map(|p| {
-                p.coordinators
-                    .iter()
-                    .map(move |c| (p.slug.clone(), c.id.clone()))
-            })
-            .take(9)
-            .collect()
-    }
-
     fn launcher_lines(&self) -> Vec<Line> {
         let mut lines = Vec::new();
         let needs = self.needs_you();
@@ -573,7 +636,7 @@ impl<'a> App<'a> {
                     Line::new()
                         .at(3, "●", RED)
                         .at(5, term::fit(&t.title, 13), Style::PLAIN)
-                        .at(19, term::fit(&coordinator_name(p, &t.coordinator), 17), DIM)
+                        .at(19, term::fit(&node_name(p, &t.coordinator), 17), DIM)
                         .at(37, term::fit(&t.text, 38), Style::PLAIN)
                         .at(-2, state::age(&t.since), DIM)
                         .target(Target::NeedsYou(p.slug.clone(), t.id.clone())),
@@ -606,7 +669,6 @@ impl<'a> App<'a> {
             ),
             DIM,
         ));
-        let numbered = self.numbered();
         for p in &self.snap.projects {
             let coords: Vec<&Node> = p
                 .coordinators
@@ -631,11 +693,6 @@ impl<'a> App<'a> {
             }
             lines.push(head.target(Target::Project(p.slug.clone())));
             for (i, c) in coords.iter().enumerate() {
-                let digit = numbered
-                    .iter()
-                    .position(|(s, id)| *s == p.slug && *id == c.id)
-                    .map(|n| (n + 1).to_string())
-                    .unwrap_or_default();
                 let (glyph, style) = dot(c.status);
                 let branch = if i + 1 == coords.len() { "└" } else { "├" };
                 let title = if c.id == ROOT_ID {
@@ -649,7 +706,6 @@ impl<'a> App<'a> {
                     c.workspace.clone()
                 };
                 let mut line = Line::new()
-                    .at(2, digit, DIM)
                     .at(4, branch, GREY)
                     .at(6, glyph, style)
                     .at(8, term::fit(&title, 18), Style::PLAIN)
@@ -662,25 +718,7 @@ impl<'a> App<'a> {
                 };
                 lines.push(line.target(Target::Node(p.slug.clone(), c.id.clone())));
             }
-            lines.push(
-                Line::new()
-                    .at(4, "+", BLUE)
-                    .at(
-                        6,
-                        format!("New coordinator in {}", term::fit(&p.name, 40)),
-                        Style::PLAIN,
-                    )
-                    .at(-2, self.key_label(Action::NewCoordinator), DIM)
-                    .target(Target::NewCoordinator(p.slug.clone())),
-            );
         }
-        lines.push(
-            Line::new()
-                .at(4, "+", BLUE)
-                .at(6, "New project", Style::PLAIN)
-                .at(-2, self.key_label(Action::NewProject), DIM)
-                .target(Target::NewProject),
-        );
         let outside: Vec<&state::Workspace> = self
             .snap
             .workspaces
@@ -726,20 +764,85 @@ impl<'a> App<'a> {
             frame.put(1, 1, &format!("Choose a project to {}", self.pick), BLUE);
         }
         let lines = self.launcher_lines();
-        let height = frame.height.saturating_sub(4);
+        let height = frame.height.saturating_sub(6);
         self.rows = draw_list(frame, 2, height, &lines, sel);
+        frame.rule(frame.height - 4);
+        self.draw_create(frame, frame.height - 3);
         let pairs = self.hint(&[
             (Action::Open, "open"),
-            (Action::NewProject, "new"),
-            (Action::Adopt, "adopt"),
             (Action::Search, "search"),
-            (Action::Board, "board"),
-            (Action::Settings, "settings"),
+            (Action::Adopt, "adopt workspace"),
             (Action::Back, "close"),
         ]);
-        let mut pairs = pairs;
-        pairs.insert(2, ("1-9".into(), "jump"));
         frame.hint(frame.height - 1, &pairs);
+    }
+
+    /// Where New coordinator and New thread put the node for what is
+    /// selected: under the selected coordinator, under a selected thread's
+    /// coordinator, or under the project's root.
+    fn create_parent(&self) -> Option<(String, String)> {
+        let (slug, id) = match self.selected_target() {
+            Some(Target::Project(slug)) => (slug, ROOT_ID.to_string()),
+            Some(Target::Resolved(slug, coordinator)) => (slug, coordinator),
+            _ => self
+                .focused_node()
+                .unwrap_or_else(|| (self.current_slug(), ROOT_ID.into())),
+        };
+        let project = self.project(&slug)?;
+        let parent = match project.node(&id) {
+            Some(n) if n.role == "coordinator" => n.id.clone(),
+            Some(n) => n.coordinator.clone(),
+            None => ROOT_ID.into(),
+        };
+        Some((slug, parent))
+    }
+
+    /// The creation chips, naming the parent a new coordinator or thread
+    /// goes under.
+    fn draw_create(&mut self, frame: &mut Frame, y: usize) {
+        let mut x = 1;
+        if let Some((slug, parent)) = self.create_parent()
+            && let Some(project) = self.project(&slug)
+        {
+            let name = if parent == ROOT_ID {
+                project.name.clone()
+            } else {
+                node_name(project, &parent)
+            };
+            x = frame.put(x, y, "New under", DIM) + 1;
+            x = frame.put(x, y, &format!("{}:", term::fit(&name, 28)), BOLD) + 2;
+            x = self.button(frame, x, y, Action::NewCoordinator, "coordinator") + 1;
+            x = self.button(frame, x, y, Action::NewThread, "thread");
+        }
+        let label = "New project";
+        let w = term::width(&self.key_label(Action::NewProject)) + label.len() + 3;
+        let right = frame.width.saturating_sub(1 + w);
+        if right > x + 2 {
+            self.button(frame, right, y, Action::NewProject, label);
+        }
+    }
+
+    /// An action chip that a click presses like its key. Returns the column
+    /// after it, or `x` when it does not fit.
+    fn button(
+        &mut self,
+        frame: &mut Frame,
+        x: usize,
+        y: usize,
+        action: Action,
+        text: &str,
+    ) -> usize {
+        let key = self.key_label(action);
+        if x + term::width(&key) + term::width(text) + 3 > frame.width {
+            return x;
+        }
+        let end = frame.chip(x, y, &key, text);
+        self.buttons.push(Button {
+            y,
+            x: x..end,
+            press: Press::Action(action),
+        });
+        end
     }
 
     fn draw_empty(&mut self, frame: &mut Frame, sel: usize) {
@@ -877,13 +980,6 @@ impl<'a> App<'a> {
                 );
             }
         }
-        lines.push(
-            Line::new()
-                .at(3, "+", BLUE)
-                .at(5, "New coordinator", Style::PLAIN)
-                .at(-2, self.key_label(Action::NewCoordinator), DIM)
-                .target(Target::NewCoordinator(project.slug.clone())),
-        );
         lines
     }
 
@@ -900,7 +996,7 @@ impl<'a> App<'a> {
         frame.put_right(frame.width - 1, 0, &project.repo.replace(&home(), "~"), DIM);
         draw_line(frame, 1, &counts_header(&project.counts), false);
         let lines = self.tree_lines(&project, folded);
-        let detail = 8;
+        let detail = 9;
         let height = frame.height.saturating_sub(3 + detail + 1);
         self.rows = draw_list(frame, 3, height, &lines, sel);
         let y = frame.height - 1 - detail;
@@ -910,20 +1006,17 @@ impl<'a> App<'a> {
             Some(Target::Node(_, id)) => self.draw_node_summary(frame, &project, &id, y + 1),
             _ => Vec::new(),
         };
+        self.draw_create(frame, frame.height - 3);
         let mut pairs = self.hint(&[(Action::Open, "go to pane"), (Action::Fold, "fold")]);
         pairs.extend(actions);
-        pairs.extend(self.hint(&[
-            (Action::NewThread, "thread"),
-            (Action::Board, "board"),
-            (Action::Back, "back"),
-        ]));
+        pairs.extend(self.hint(&[(Action::Back, "back")]));
         frame.hint(frame.height - 1, &pairs);
     }
 
     /// The selected node under the rule: who it is, what it says, and the
     /// one-key actions that apply. Returns the hint pairs for those actions.
     fn draw_node_summary(
-        &self,
+        &mut self,
         frame: &mut Frame,
         project: &ProjectView,
         id: &str,
@@ -994,14 +1087,14 @@ impl<'a> App<'a> {
         let mut pairs = Vec::new();
         if node.status == Status::Need {
             x = frame.chip(x, chip_y, "1-9", "Question…") + 1;
-            x = frame.chip(x, chip_y, &self.key_label(Action::Reply), "Reply…") + 1;
+            x = self.button(frame, x, chip_y, Action::Reply, "Reply…") + 1;
             pairs.push(("1-9".into(), "question"));
         } else if node.pr.as_ref().is_some_and(|p| !p.merged()) && node.id != ROOT_ID {
-            x = frame.chip(x, chip_y, &self.key_label(Action::Merge), "Merge") + 1;
-            x = frame.chip(x, chip_y, &self.key_label(Action::OpenPr), "Open PR") + 1;
+            x = self.button(frame, x, chip_y, Action::Merge, "Merge") + 1;
+            x = self.button(frame, x, chip_y, Action::OpenPr, "Open PR") + 1;
             pairs.extend(self.hint(&[(Action::Merge, "merge")]));
         }
-        frame.chip(x, chip_y, &self.key_label(Action::GoToPane), "Go to pane");
+        self.button(frame, x, chip_y, Action::GoToPane, "Go to pane");
         pairs
     }
 
@@ -1043,13 +1136,19 @@ impl<'a> App<'a> {
         };
         let filters = Self::board_filters(&project);
         let filter = filter.min(filters.len() - 1);
+        let shown = project.threads.iter().filter(|t| !t.resolved).count();
+        let summary = format!("{} · {shown} threads", term::fit(&project.name, 30));
+        let end = frame.width.saturating_sub(term::width(&summary) + 3);
+        frame.put_right(frame.width - 1, 0, &summary, DIM);
         let mut x = 1;
         for (i, (name, _)) in filters.iter().enumerate() {
+            let chip = format!(" {} ", term::fit(name, 18));
+            if x + term::width(&chip) > end {
+                break;
+            }
             let style = if i == filter { term::CHIP.bold() } else { DIM };
-            x = frame.put(x, 0, &format!(" {} ", term::fit(name, 18)), style) + 1;
+            x = frame.put(x, 0, &chip, style) + 1;
         }
-        let shown = project.threads.iter().filter(|t| !t.resolved).count();
-        frame.put_right(frame.width - 1, 0, &format!("{shown} threads"), DIM);
         let columns = Self::board_columns(&project, &filters[filter].1);
         let cw = (frame.width.saturating_sub(2)) / 4;
         let card_rows = frame.height.saturating_sub(13);
@@ -1088,7 +1187,7 @@ impl<'a> App<'a> {
                 frame.put(
                     cx + 1,
                     y + 1,
-                    &term::fit(&coordinator_name(&project, &t.coordinator), cw - 3),
+                    &term::fit(&node_name(&project, &t.coordinator), cw - 3),
                     DIM,
                 );
                 let text_style = match t.status {
@@ -1112,13 +1211,7 @@ impl<'a> App<'a> {
             .threads
             .iter()
             .filter(|t| t.status == Status::Idle)
-            .map(|t| {
-                format!(
-                    "{} · {}",
-                    t.title,
-                    coordinator_name(&project, &t.coordinator)
-                )
-            })
+            .map(|t| format!("{} · {}", t.title, node_name(&project, &t.coordinator)))
             .collect();
         frame.put(1, y, "○", GREY);
         let end = frame.put(3, y, "IDLE", BOLD);
@@ -1189,7 +1282,7 @@ impl<'a> App<'a> {
         } else {
             format!(
                 "{} › {}",
-                coordinator_name(&project, &node.coordinator),
+                node_name(&project, &node.coordinator),
                 node.title
             )
         };
@@ -1246,7 +1339,7 @@ impl<'a> App<'a> {
                 y += 1 + lines.len();
             }
             let x = frame.chip(1, y + 1, "1-9", "pick that option") + 1;
-            frame.chip(x, y + 1, &self.key_label(Action::Reply), "Reply…");
+            self.button(frame, x, y + 1, Action::Reply, "Reply…");
             y += 3;
         } else if !node.text.is_empty() {
             frame.put(1, y, "NOW", HEAD);
@@ -1575,14 +1668,7 @@ impl<'a> App<'a> {
         );
         let fx = split + 2;
         let fw = frame.width.saturating_sub(fx + 1);
-        let title = match (form.kind, form.adopt_pane.is_empty()) {
-            (Kind::Project, false) => "Project from this workspace",
-            (Kind::Project, true) => "New project",
-            (Kind::Coordinator, _) => "New coordinator",
-            (Kind::Thread, _) => "New thread",
-            (Kind::Workspace, _) => "New workspace",
-        };
-        frame.put(fx, 0, title, BOLD);
+        frame.put(fx, 0, form.title(), BOLD);
         let mut y = 2;
         for (i, field) in form.fields.iter().enumerate() {
             let focused = i == form.focus;
@@ -1618,12 +1704,25 @@ impl<'a> App<'a> {
                     label, shown, at, ..
                 } => {
                     frame.put(fx, y, label, label_style);
+                    // Options scroll so the chosen one stays on screen; `‹`
+                    // and `›` say more are hidden on that side.
+                    let width = |o: &String| term::width(o) + 3;
+                    let room = fw.saturating_sub(4);
+                    let mut start = 0;
+                    while start < *at && shown[start..=*at].iter().map(width).sum::<usize>() > room
+                    {
+                        start += 1;
+                    }
                     let mut x = fx;
-                    for (n, option) in shown.iter().enumerate() {
-                        let style = if n == *at { PRIMARY } else { term::CHIP };
-                        if x + option.chars().count() + 2 > fx + fw {
+                    if start > 0 {
+                        x = frame.put(x, y + 1, "‹", DIM) + 1;
+                    }
+                    for (n, option) in shown.iter().enumerate().skip(start) {
+                        if x + width(option) > fx + fw.saturating_sub(2) {
+                            frame.put(x, y + 1, "›", DIM);
                             break;
                         }
+                        let style = if n == *at { PRIMARY } else { term::CHIP };
                         x = frame.put(x, y + 1, &format!(" {option} "), style) + 1;
                     }
                     y += 2;
@@ -1723,10 +1822,7 @@ impl<'a> App<'a> {
     }
 
     fn new_node(form: &Form) -> ui_ops::NewNode {
-        let parent = match form.kind {
-            Kind::Thread => Self::form_value(form, "Under"),
-            _ => ROOT_ID.into(),
-        };
+        let parent = Self::form_value(form, "Under");
         ui_ops::NewNode {
             slug: Self::form_value(form, "Project"),
             parent: if parent.is_empty() {
@@ -1776,7 +1872,7 @@ impl<'a> App<'a> {
             .map(|p| {
                 p.coordinators
                     .iter()
-                    .map(|c| coordinator_name(p, &c.id))
+                    .map(|c| term::fit(&node_name(p, &c.id), 24))
                     .collect()
             })
             .unwrap_or_else(|| vec!["Coordinator".into()]);
@@ -1827,6 +1923,7 @@ impl<'a> App<'a> {
             Kind::Coordinator => vec![
                 Field::text("Title", "", "mobile redesign"),
                 self.project_choice(&slug),
+                self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "What this coordinator owns"),
                 Field::text("Repository", "", "optional: its own worktree and workspace"),
                 Self::harness_choice("Runs on", true, ""),
@@ -2110,10 +2207,7 @@ impl<'a> App<'a> {
                 frame.put(
                     x + 5,
                     y + 8,
-                    &format!(
-                        "tell coordinator {}",
-                        coordinator_name(project, &node.coordinator)
-                    ),
+                    &format!("tell coordinator {}", node_name(project, &node.coordinator)),
                     Style::PLAIN,
                 );
                 frame.put(x + 1, y + 10, " ↵ merge ", PRIMARY);
@@ -2169,17 +2263,90 @@ impl<'a> App<'a> {
 
     fn render(&mut self, width: usize, height: usize) -> Frame {
         let mut frame = Frame::new(width, height);
-        let (min_w, min_h) = match self.mode {
-            Mode::Popup => (40, 12),
-            Mode::Dock { .. } => (16, 6),
+        let (min_w, min_h, tabs) = match self.mode {
+            Mode::Popup => (40, 12, Tab::ROWS),
+            Mode::Dock { .. } => (16, 6, 0),
         };
+        self.buttons.clear();
         if width < min_w || height < min_h {
             frame.put(0, 0, "Too small; make this larger", DIM);
             self.rows.clear();
             return frame;
         }
+        let body = self.render_body(width, height - tabs);
+        frame.paste(tabs, &body);
+        for (y, _) in &mut self.rows {
+            *y += tabs;
+        }
+        for button in &mut self.buttons {
+            button.y += tabs;
+        }
+        if tabs > 0 {
+            self.draw_tabs(&mut frame);
+        }
+        // Keys go to the dialog or the text being typed, so clicks do too.
+        if self.modal() {
+            self.buttons.clear();
+        }
+        frame
+    }
+
+    /// A dialog or a field that takes every key is open.
+    fn modal(&self) -> bool {
+        match self.stack.last() {
+            Some(View::Settings { capture, .. }) => *capture,
+            Some(top) => top.overlay(),
+            None => false,
+        }
+    }
+
+    fn base_view(&self) -> &View {
         let base = self.stack.iter().rposition(|v| !v.overlay()).unwrap_or(0);
-        let view = self.stack[base].clone();
+        &self.stack[base]
+    }
+
+    /// The first row: the tabs, then the screen opened from one of them as
+    /// one more tab, and the key that cycles them.
+    fn draw_tabs(&mut self, frame: &mut Frame) {
+        let base = self.base_view().clone();
+        let active = base.tab();
+        let mut x = 1;
+        for tab in Tab::ALL {
+            let style = if active == Some(tab) { PRIMARY } else { DIM };
+            let end = frame.put(x, 0, &format!(" {} ", tab.label()), style);
+            self.buttons.push(Button {
+                y: 0,
+                x: x..end,
+                press: Press::Tab(tab),
+            });
+            x = end + 1;
+        }
+        if active.is_none() {
+            let name = match &base {
+                View::Tree { slug, .. } => self.project(slug).map(|p| p.name.clone()),
+                View::Detail { slug, id, .. } => self.project(slug).map(|p| node_name(p, id)),
+                View::Form(form) => Some(form.title().to_string()),
+                _ => None,
+            };
+            if let Some(name) = name {
+                x = frame.put(x, 0, "›", DIM) + 1;
+                x = frame.put(x, 0, &format!(" {} ", term::fit(&name, 32)), PRIMARY) + 1;
+            }
+        }
+        let keys = format!(
+            "{} / {}",
+            self.key_label(Action::NextTab),
+            self.key_label(Action::PrevTab)
+        );
+        if x + term::width(&keys) + 2 < frame.width {
+            frame.put_right(frame.width - 1, 0, &keys, DIM);
+        }
+        frame.rule(1);
+    }
+
+    fn render_body(&mut self, width: usize, height: usize) -> Frame {
+        let mut frame = Frame::new(width, height);
+        let view = self.base_view().clone();
         match &view {
             View::Launcher { sel } => self.draw_launcher(&mut frame, *sel),
             View::Tree { slug, sel, folded } => self.draw_tree(&mut frame, slug, *sel, folded),
@@ -2423,11 +2590,49 @@ impl<'a> App<'a> {
         self.stack.push(View::Form(form));
     }
 
+    /// Opens `tab` at its root and closes any screen opened from another tab.
+    /// The board shows the project in use, else the first one.
+    fn switch_tab(&mut self, tab: Tab) {
+        let launcher = match self.stack.first() {
+            Some(view @ View::Launcher { .. }) => view.clone(),
+            _ => View::Launcher { sel: 0 },
+        };
+        let root = match tab {
+            Tab::Projects => None,
+            Tab::Board => {
+                let slug = Some(self.current_slug())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| self.snap.projects.first().map(|p| p.slug.clone()));
+                let Some(slug) = slug else {
+                    self.message = "no projects yet; the board shows one project's threads".into();
+                    return;
+                };
+                Some(View::Board {
+                    slug,
+                    col: 0,
+                    row: 0,
+                    filter: 0,
+                })
+            }
+            Tab::Settings => Some(View::Settings {
+                sel: 0,
+                capture: false,
+            }),
+        };
+        self.stack = std::iter::once(launcher).chain(root).collect();
+    }
+
     fn current_slug(&self) -> String {
         for view in self.stack.iter().rev() {
             match view {
                 View::Tree { slug, .. } | View::Board { slug, .. } | View::Detail { slug, .. } => {
                     return slug.clone();
+                }
+                View::Form(form) => {
+                    let slug = Self::form_value(form, "Project");
+                    if !slug.is_empty() {
+                        return slug;
+                    }
                 }
                 _ => {}
             }
@@ -2436,12 +2641,7 @@ impl<'a> App<'a> {
             return slug.clone();
         }
         match self.selected_target() {
-            Some(
-                Target::Project(s)
-                | Target::Node(s, _)
-                | Target::NewCoordinator(s)
-                | Target::NeedsYou(s, _),
-            ) => s,
+            Some(Target::Project(s) | Target::Node(s, _) | Target::NeedsYou(s, _)) => s,
             _ => String::new(),
         }
     }
@@ -2503,7 +2703,6 @@ impl<'a> App<'a> {
                 }
             }
             Target::NewThread(slug) => self.dock_new_thread(&slug),
-            Target::NewCoordinator(slug) => self.new_form(Kind::Coordinator, &slug, ROOT_ID),
             Target::NewProject => self.new_form(Kind::Project, "", ""),
             Target::Adopt => self.adopt_current(),
             Target::Resolved(_, _) => {
@@ -2702,18 +2901,11 @@ impl<'a> App<'a> {
         self.on_action(action, &top);
     }
 
-    /// Digits jump on the launcher. Elsewhere they only answer from the
-    /// detail screen, where the question's own lines are on screen; the other
-    /// screens open the question first so no digit lands on a dialog the user
-    /// has not read.
+    /// Digits only answer from the detail screen, where the question's own
+    /// lines are on screen; the other screens open the selected agent's
+    /// question first so no digit lands on a dialog the user has not read.
     fn on_digit(&mut self, digit: char) {
-        let n = digit.to_digit(10).unwrap_or(1) as usize;
         match self.stack.last() {
-            Some(View::Launcher { .. }) => {
-                if let Some((slug, id)) = self.numbered().get(n - 1).cloned() {
-                    self.open_tree(&slug, Some(&id));
-                }
-            }
             Some(View::Confirm { .. } | View::Settings { .. } | View::Help) => {}
             Some(View::Detail { .. }) => self.answer(digit),
             _ => {
@@ -2812,57 +3004,26 @@ impl<'a> App<'a> {
             (Action::Open, View::Detail { .. }) => {}
             (Action::Open, _) => self.activate(),
             (Action::NewProject, _) => self.new_form(Kind::Project, "", ""),
-            (Action::NewCoordinator, _) => {
-                let slug = self.current_slug();
-                self.new_form(Kind::Coordinator, &slug, ROOT_ID);
-            }
             (Action::NewThread, View::Dock { .. }) => {
                 let slug = self.current_slug();
                 self.dock_new_thread(&slug);
             }
-            (Action::NewThread, _) => {
-                let slug = self.current_slug();
-                let parent = match self.selected_target() {
-                    Some(Target::Node(_, id)) => self
-                        .project(&slug)
-                        .and_then(|p| p.node(&id))
-                        .map(|n| {
-                            if n.role == "coordinator" {
-                                n.id.clone()
-                            } else {
-                                n.coordinator.clone()
-                            }
-                        })
-                        .unwrap_or_else(|| ROOT_ID.into()),
-                    _ => ROOT_ID.into(),
-                };
-                self.new_form(Kind::Thread, &slug, &parent);
-            }
-            (Action::Board, _) => {
-                let slug = self.current_slug();
-                let slug = if slug.is_empty() {
-                    self.snap
-                        .projects
-                        .first()
-                        .map(|p| p.slug.clone())
-                        .unwrap_or_default()
+            (Action::NewCoordinator | Action::NewThread, _) => {
+                let kind = if action == Action::NewThread {
+                    Kind::Thread
                 } else {
-                    slug
+                    Kind::Coordinator
                 };
-                if !slug.is_empty() {
-                    self.stack.push(View::Board {
-                        slug,
-                        col: 0,
-                        row: 0,
-                        filter: 0,
-                    });
-                }
+                let (slug, parent) = self
+                    .create_parent()
+                    .unwrap_or_else(|| (String::new(), ROOT_ID.into()));
+                self.new_form(kind, &slug, &parent);
             }
+            (Action::Board, _) => self.switch_tab(Tab::Board),
+            (Action::Settings, _) => self.switch_tab(Tab::Settings),
+            (Action::NextTab, _) => self.switch_tab(Tab::step(top.tab(), 1)),
+            (Action::PrevTab, _) => self.switch_tab(Tab::step(top.tab(), -1)),
             (Action::Merge, _) => self.start_merge(),
-            (Action::Settings, _) => self.stack.push(View::Settings {
-                sel: 0,
-                capture: false,
-            }),
             (Action::Search, _) => self.stack.push(View::Search {
                 text: self.search.clone(),
             }),
@@ -2987,7 +3148,8 @@ impl<'a> App<'a> {
                 let delta: isize = if action == Some(Action::Up) { -1 } else { 1 };
                 let next = (at as isize + delta).rem_euclid(Kind::ALL.len() as isize) as usize;
                 let slug = Self::form_value(form, "Project");
-                *form = self.form(Kind::ALL[next], &slug, ROOT_ID);
+                let parent = Self::form_value(form, "Under");
+                *form = self.form(Kind::ALL[next], &slug, &parent);
                 return;
             }
             _ => {}
@@ -3009,7 +3171,7 @@ impl<'a> App<'a> {
                 *label == "Project"
             }
         };
-        if project_changed && form.kind == Kind::Thread {
+        if project_changed {
             let slug = Self::form_value(form, "Project");
             let index = form
                 .fields
@@ -3021,7 +3183,24 @@ impl<'a> App<'a> {
         }
     }
 
-    fn on_mouse(&mut self, row: usize) {
+    fn on_mouse(&mut self, col: usize, row: usize) {
+        let press = self
+            .buttons
+            .iter()
+            .find(|b| b.y == row && b.x.contains(&col))
+            .map(|b| b.press);
+        if let Some(press) = press {
+            self.last_click = None;
+            self.message.clear();
+            match press {
+                Press::Tab(tab) => self.switch_tab(tab),
+                Press::Action(action) => {
+                    let top = self.stack.last().cloned().expect("never empty");
+                    self.on_action(action, &top);
+                }
+            }
+            return;
+        }
         let Some(index) = self.rows.iter().find(|(y, _)| *y == row).map(|(_, i)| *i) else {
             return;
         };
@@ -3116,6 +3295,7 @@ fn new_app<'a>(ctx: &'a Ctx<'a>, mode: Mode) -> App<'a> {
         pick: String::new(),
         current_workspace: current_workspace(ctx),
         rows: Vec::new(),
+        buttons: Vec::new(),
         last_click: None,
     }
 }
@@ -3142,7 +3322,7 @@ fn event_loop(app: &mut App) -> Result<()> {
             Ok(Input::Terminal(Event::Key(key))) => app.on_key(key),
             Ok(Input::Terminal(Event::Mouse(mouse))) => {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    app.on_mouse(mouse.row as usize);
+                    app.on_mouse(mouse.column as usize, mouse.row as usize);
                 }
             }
             Ok(Input::Terminal(Event::Resize(_, _))) => terminal.invalidate(),
@@ -3288,34 +3468,142 @@ mod tests {
         app.on_key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
     }
 
+    fn click(app: &mut App, press: impl Fn(Press) -> bool) {
+        let (x, y) = app
+            .buttons
+            .iter()
+            .find(|b| press(b.press))
+            .map(|b| (b.x.start, b.y))
+            .expect("the button is on screen");
+        app.on_mouse(x, y);
+    }
+
+    /// The parent and role the open New form would start the node with.
+    fn form_parent(app: &App) -> (String, NodeRole) {
+        let Some(View::Form(form)) = app.stack.last() else {
+            panic!("no form open: {:?}", app.stack.last());
+        };
+        let node = App::new_node(form);
+        (node.parent, node.role)
+    }
+
     #[test]
     fn launcher_puts_needs_you_first_and_nests_coordinators_under_projects() {
         with_app(|app| {
-            let text = app.render(84, 22).text();
+            let text = app.render(84, 24).text();
             let lines: Vec<&str> = text.lines().collect();
-            assert!(lines[2].contains("NEEDS YOU"), "{text}");
-            assert!(lines[3].contains("› ● billing ui"), "{text}");
+            assert!(lines[0].contains(" Projects   Board   Settings "), "{text}");
+            assert!(lines[4].contains("NEEDS YOU"), "{text}");
+            assert!(lines[5].contains("› ● billing ui"), "{text}");
             assert!(text.contains("Acme Billing Suite"));
-            assert!(text.contains("1 ├ ● Coordinator"), "{text}");
-            assert!(text.contains("2 └ ● mobile redesign"), "{text}");
-            assert!(text.contains("+ New coordinator in Acme Billing Suite"));
+            // Coordinators carry no number column.
+            assert!(lines[9].starts_with("    ├ ● Coordinator"), "{text}");
+            assert!(lines[10].starts_with("    └ ● mobile redesign"), "{text}");
             assert!(text.contains("WORKSPACES"));
-            assert!(lines[21].contains("↵ open · n new · 1-9 jump"), "{text}");
+            assert!(lines[23].contains("↵ open · / search"), "{text}");
+            assert!(!text.contains("1-9"), "{text}");
         });
     }
 
     #[test]
-    fn digits_jump_to_a_coordinator_and_escape_goes_back_then_closes() {
+    fn tabs_switch_by_key_and_click_and_escape_goes_back_then_closes() {
+        use crossterm::event::KeyCode;
         with_app(|app| {
-            press(app, crossterm::event::KeyCode::Char('2'));
-            assert!(matches!(app.stack.last(), Some(View::Tree { .. })));
+            press(app, KeyCode::Tab);
+            assert!(matches!(app.stack.last(), Some(View::Board { .. })));
+            press(app, KeyCode::Tab);
+            assert!(matches!(app.stack.last(), Some(View::Settings { .. })));
+            press(app, KeyCode::Tab);
+            assert!(matches!(app.stack[..], [View::Launcher { .. }]));
+            press(app, KeyCode::BackTab);
+            assert!(matches!(app.stack.last(), Some(View::Settings { .. })));
+
+            // A screen opened from a tab is drawn as one more tab, after the others.
+            app.stack.truncate(1);
+            app.open_tree("acme", Some("t-0001"));
             let text = app.render(90, 29).text();
+            assert!(text.contains("Settings  ›  Acme Billing Suite"), "{text}");
             assert!(text.contains("▾ ● mobile redesign"), "{text}");
-            assert!(text.contains("├─ ● billing ui"), "{text}");
-            press(app, crossterm::event::KeyCode::Esc);
-            assert!(matches!(app.stack.last(), Some(View::Launcher { .. })));
-            press(app, crossterm::event::KeyCode::Esc);
+            click(app, |p| matches!(p, Press::Tab(Tab::Board)));
+            assert!(matches!(app.stack.last(), Some(View::Board { .. })));
+            let text = app.render(90, 29).text();
+            assert!(text.contains("Acme Billing Suite · 3 threads"), "{text}");
+
+            press(app, KeyCode::Esc);
+            assert!(matches!(app.stack[..], [View::Launcher { .. }]));
+            press(app, KeyCode::Esc);
             assert!(app.close);
+        });
+    }
+
+    #[test]
+    fn new_coordinator_and_thread_go_under_the_selected_coordinator() {
+        use crossterm::event::KeyCode;
+        with_app(|app| {
+            // The selected needs-you thread sits under mobile redesign.
+            let text = app.render(90, 29).text();
+            assert!(text.contains("New under mobile redesign:"), "{text}");
+            assert!(text.contains("c coordinator   t thread"), "{text}");
+
+            let project_row = targets(&app.launcher_lines())
+                .iter()
+                .position(|t| *t == Target::Project("acme".into()))
+                .unwrap();
+            app.set_sel(project_row);
+            let text = app.render(90, 29).text();
+            assert!(text.contains("New under Acme Billing Suite:"), "{text}");
+            press(app, KeyCode::Char('c'));
+            assert_eq!(form_parent(app), ("root".into(), NodeRole::Coordinator));
+            press(app, KeyCode::Esc);
+
+            let mobile = targets(&app.launcher_lines())
+                .iter()
+                .position(|t| *t == Target::Node("acme".into(), "t-0001".into()))
+                .unwrap();
+            app.set_sel(mobile);
+            press(app, KeyCode::Char('c'));
+            let text = app.render(130, 29).text();
+            assert!(text.contains("Settings  ›  New coordinator"), "{text}");
+            assert!(
+                text.contains("--parent t-0001 --role coordinator"),
+                "{text}"
+            );
+            press(app, KeyCode::Esc);
+
+            app.render(90, 29);
+            click(app, |p| matches!(p, Press::Action(Action::NewThread)));
+            assert_eq!(form_parent(app), ("t-0001".into(), NodeRole::Worker));
+        });
+    }
+
+    #[test]
+    fn the_chosen_parent_stays_visible_among_many_coordinators() {
+        with_app(|app| {
+            let project = &mut app.snap.projects[0];
+            for n in 2..=8 {
+                let mut c = project.coordinators[1].clone();
+                c.id = format!("t-00{n}0");
+                c.title = format!("coordinator number {n} with a long title");
+                project.coordinators.push(c);
+            }
+            app.stack = vec![View::Form(app.form(Kind::Thread, "acme", "t-0080"))];
+            let text = app.render(80, 30).text();
+            assert!(text.contains("‹  coordinator number 8"), "{text}");
+            assert_eq!(form_parent(app).0, "t-0080");
+        });
+    }
+
+    #[test]
+    fn search_filters_the_list_it_is_drawn_over() {
+        with_app(|app| {
+            press(app, crossterm::event::KeyCode::Char('/'));
+            for c in "mobile".chars() {
+                press(app, crossterm::event::KeyCode::Char(c));
+            }
+            let text = app.render(84, 24).text();
+            assert!(text.contains("└ ● mobile redesign"), "{text}");
+            assert!(!text.contains("● Coordinator"), "{text}");
+            assert!(text.contains("/ mobile▏"), "{text}");
         });
     }
 
@@ -3367,13 +3655,18 @@ mod tests {
     #[test]
     fn user_keybindings_change_dispatch_and_hints() {
         with_app(|app| {
-            app.config.keys.set(Action::Board, "w").unwrap();
+            app.config.keys.set(Action::NewThread, "w").unwrap();
+            app.config.keys.set(Action::NextTab, "]").unwrap();
             let text = app.render(84, 22).text();
-            assert!(text.contains("w board"), "{text}");
-            press(app, crossterm::event::KeyCode::Char('b'));
+            assert!(text.contains("w thread"), "{text}");
+            assert!(text.contains("] / shift+tab"), "{text}");
+            press(app, crossterm::event::KeyCode::Char('t'));
             assert!(matches!(app.stack.last(), Some(View::Launcher { .. })));
-            press(app, crossterm::event::KeyCode::Char('w'));
+            press(app, crossterm::event::KeyCode::Char(']'));
             assert!(matches!(app.stack.last(), Some(View::Board { .. })));
+            press(app, crossterm::event::KeyCode::Esc);
+            press(app, crossterm::event::KeyCode::Char('w'));
+            assert!(matches!(app.stack.last(), Some(View::Form(_))));
         });
     }
 
@@ -3483,6 +3776,9 @@ mod tests {
                 text.contains("Turn workspace \"Developer\" into a project"),
                 "{text}"
             );
+            press(app, crossterm::event::KeyCode::Tab);
+            assert!(matches!(app.stack[..], [View::Launcher { .. }]));
+            assert!(app.message.contains("no projects yet"), "{}", app.message);
         });
     }
 }

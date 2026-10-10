@@ -349,6 +349,7 @@ pub fn create_node(ctx: &Ctx, form: &NewNode) -> Result<Thread> {
                         permission_profile: None,
                         raw_agent_args: Vec::new(),
                     },
+                    rules: String::new(),
                 },
             },
         )

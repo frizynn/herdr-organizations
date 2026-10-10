@@ -16,6 +16,7 @@ pub const ROOT_ID: &str = "root";
 pub const MAX_SCOPED_MEMORY_FILE_BYTES: usize = 8 * 1024;
 pub const MAX_SCOPED_MEMORY_TOTAL_BYTES: usize = 32_000;
 pub const MAX_SCOPED_MEMORY_FILES: usize = 64;
+pub const MAX_NODE_RULES_BYTES: usize = 8 * 1024;
 const MAX_MEMORY_NAMES_PER_DIRECTORY: usize = MAX_SCOPED_MEMORY_FILES;
 const MAX_MEMORY_OMISSION_DETAILS: usize = 16;
 
@@ -25,6 +26,9 @@ pub struct NodeRequest {
     pub role: NodeRole,
     pub can_spawn: Option<bool>,
     pub profile: ProfileOverrides,
+    /// Standing instructions for the node and its descendants, written to its
+    /// `INSTRUCTIONS.md`; empty keeps the placeholder.
+    pub rules: String,
 }
 
 impl Default for NodeRequest {
@@ -34,6 +38,7 @@ impl Default for NodeRequest {
             role: NodeRole::Worker,
             can_spawn: None,
             profile: ProfileOverrides::default(),
+            rules: String::new(),
         }
     }
 }
@@ -411,6 +416,7 @@ fn profile_for_record(
 }
 
 pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
+    check_rules_size(&args.request.rules)?;
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
     }
@@ -449,7 +455,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope) {
+    let nodes_created = match create_node_scope(&scope, &args.request.rules) {
         Ok(created) => created,
         Err(error) => {
             thread::remove_record_locked(project, &record.id);
@@ -473,7 +479,57 @@ pub fn node_scope_dir(project: &Project, id: &str) -> PathBuf {
     project.dir().join("nodes").join(id)
 }
 
-fn create_node_scope(scope: &Path) -> Result<bool> {
+fn check_rules_size(rules: &str) -> Result<()> {
+    if rules.len() > MAX_NODE_RULES_BYTES {
+        bail!("the rules are over {MAX_NODE_RULES_BYTES} bytes");
+    }
+    Ok(())
+}
+
+fn node_instructions(rules: &str) -> String {
+    match rules.trim() {
+        "" => "# Node instructions\n\nStanding instructions for this node and its descendants.\n"
+            .into(),
+        rules => format!("# Node instructions\n\n{rules}\n"),
+    }
+}
+
+/// The node's scope directory, `None` for a node created before scopes
+/// existed. A scope reached through a symbolic link is refused.
+fn existing_node_scope(project: &Project, id: &str) -> Result<Option<PathBuf>> {
+    let scope = node_scope_dir(project, id);
+    let exists =
+        optional_real_directory(&project.dir().join("nodes"))? && optional_real_directory(&scope)?;
+    Ok(exists.then_some(scope))
+}
+
+/// A node's standing instructions, as its next brief and its descendants'
+/// briefs read them.
+pub fn node_rules(project: &Project, id: &str) -> Result<String> {
+    thread::load(project, id)?;
+    match existing_node_scope(project, id)? {
+        Some(scope) => read_optional_text(&scope.join("INSTRUCTIONS.md"), true),
+        None => Ok(String::new()),
+    }
+}
+
+/// Replaces a node's standing instructions; a node without a scope gets one.
+/// A running agent sees them on its next brief or restart, never
+/// mid-conversation.
+pub fn set_node_rules(project: &Project, id: &str, rules: &str) -> Result<()> {
+    check_rules_size(rules)?;
+    let _lock = project.lock()?;
+    thread::load(project, id)?;
+    match existing_node_scope(project, id)? {
+        Some(scope) => project::write_atomic(
+            &scope.join("INSTRUCTIONS.md"),
+            node_instructions(rules).as_bytes(),
+        ),
+        None => create_node_scope(&node_scope_dir(project, id), rules).map(drop),
+    }
+}
+
+fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
     let nodes = scope.parent().context("node scope has no parent")?;
     let nodes_created = ensure_directory(nodes)?;
     if let Err(error) = std::fs::create_dir(scope) {
@@ -492,7 +548,7 @@ fn create_node_scope(scope: &Path) -> Result<bool> {
         })?;
         project::write_atomic(
             &scope.join("INSTRUCTIONS.md"),
-            b"# Node instructions\n\nStanding instructions for this node and its descendants.\n",
+            node_instructions(rules).as_bytes(),
         )?;
         project::write_atomic(&scope.join("MEMORY.md"), b"# Node memory\n")?;
         Ok(())
@@ -548,13 +604,10 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
         &mut memory_files,
     )?;
 
-    let nodes_dir = project.dir().join("nodes");
-    let nodes_dir_exists = optional_real_directory(&nodes_dir)?;
     for record in chain {
-        let scope = node_scope_dir(project, &record.id);
-        if !nodes_dir_exists || !optional_real_directory(&scope)? {
+        let Some(scope) = existing_node_scope(project, &record.id)? else {
             continue;
-        }
+        };
         let node_instructions = read_optional_text(&scope.join("INSTRUCTIONS.md"), true)?;
         if !node_instructions.trim().is_empty() {
             instructions.push_str(&format!(
@@ -883,6 +936,105 @@ mod tests {
             role,
             ..NodeRequest::default()
         }
+    }
+
+    fn create_with_rules(
+        project: &Project,
+        parent_id: &str,
+        role: NodeRole,
+        rules: &str,
+    ) -> Thread {
+        create_node(
+            project,
+            &CreateNode {
+                request: NodeRequest {
+                    rules: rules.into(),
+                    ..request(parent_id, role)
+                },
+                title: "Node".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rules_given_at_creation_reach_descendants_but_not_siblings() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let frontend = create_with_rules(
+            &project,
+            ROOT_ID,
+            NodeRole::Coordinator,
+            "  frontend rule  \n",
+        );
+        create_with_rules(&project, ROOT_ID, NodeRole::Worker, "backend rule");
+        let child = create_with_rules(&project, &frontend.id, NodeRole::Worker, "");
+
+        assert_eq!(
+            node_rules(&project, &frontend.id).unwrap(),
+            "# Node instructions\n\nfrontend rule\n"
+        );
+        assert!(
+            node_rules(&project, &child.id)
+                .unwrap()
+                .contains("Standing instructions")
+        );
+        let context = scoped_context(&project, &child).unwrap();
+        assert!(context.instructions.contains("frontend rule"));
+        assert!(!context.instructions.contains("backend rule"));
+    }
+
+    #[test]
+    fn rules_over_the_limit_create_nothing() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let error = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    rules: "x".repeat(MAX_NODE_RULES_BYTES + 1),
+                    ..request(ROOT_ID, NodeRole::Worker)
+                },
+                title: "Too many rules".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the rules are over 8192 bytes");
+        assert!(thread::list(&project).is_empty());
+        assert!(!project.dir().join("nodes").exists());
+    }
+
+    #[test]
+    fn set_node_rules_replaces_them_for_an_existing_node_only() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let node = create_with_rules(&project, ROOT_ID, NodeRole::Worker, "old");
+        set_node_rules(&project, &node.id, "  Keep reports short.  \n").unwrap();
+        assert_eq!(
+            node_rules(&project, &node.id).unwrap(),
+            "# Node instructions\n\nKeep reports short.\n"
+        );
+        assert!(set_node_rules(&project, "t-9999", "rules").is_err());
+        // A node from before scopes existed gets one.
+        std::fs::remove_dir_all(project.dir().join("nodes")).unwrap();
+        assert_eq!(node_rules(&project, &node.id).unwrap(), "");
+        set_node_rules(&project, &node.id, "late rules").unwrap();
+        assert!(
+            node_rules(&project, &node.id)
+                .unwrap()
+                .contains("late rules")
+        );
+        assert!(set_node_rules(&project, &node.id, &"x".repeat(MAX_NODE_RULES_BYTES + 1)).is_err());
     }
 
     #[test]
