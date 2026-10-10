@@ -64,6 +64,8 @@ pub enum Jump {
     Node { slug: String, id: String },
     /// Open the project's coordinator, as `open` does
     Coordinator { slug: String },
+    /// Stop the project's coordinator and start one on `profile`
+    Replace { slug: String, profile: String },
 }
 
 impl Jump {
@@ -72,6 +74,7 @@ impl Jump {
         match self {
             Jump::Node { slug, id } => vec!["jump", "node", slug, id],
             Jump::Coordinator { slug } => vec!["jump", "coordinator", slug],
+            Jump::Replace { slug, profile } => vec!["jump", "replace", slug, profile],
         }
     }
 
@@ -81,6 +84,7 @@ impl Jump {
             Jump::Coordinator { slug } => {
                 term::quiet(|| crate::actions::run_on_slug(ctx, "open", slug))
             }
+            Jump::Replace { slug, profile } => replace_coordinator(ctx, slug, profile).map(|_| ()),
         }
     }
 
