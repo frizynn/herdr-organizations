@@ -374,6 +374,13 @@ enum CoordinatorCommand {
         #[arg(long, value_name = "FILE")]
         text_file: String,
     },
+    /// Stop the project's running coordinator and start a new one on --profile
+    Replace {
+        slug: String,
+        /// The profile the new coordinator runs on (claude, codex, or one of yours)
+        #[arg(long)]
+        profile: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -986,6 +993,13 @@ pub fn run() -> Result<()> {
             CoordinatorCommand::Prompt { slug, text_file } => {
                 let text = read_text(&text_file)?;
                 coordinator::prompt(&ctx, &slug, &text)
+            }
+            CoordinatorCommand::Replace { slug, profile } => {
+                println!(
+                    "{}",
+                    crate::ui_ops::replace_coordinator(&ctx, &slug, &profile)?
+                );
+                Ok(())
             }
         },
         Command::Context { slug, peek } => coordinator::context(&ctx, &slug, peek),
