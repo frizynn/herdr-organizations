@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::runner::{Cmd, Runner};
 
 pub const GH_TIMEOUT: Duration = Duration::from_secs(10);
+const GH_MERGE_TIMEOUT: Duration = Duration::from_secs(60);
 const NAME_LIMIT: usize = 80;
 
 /// The `PR:` value of a report's first line, only when it is exactly
@@ -82,7 +83,9 @@ pub fn sanitize(name: &str) -> String {
         .to_string()
 }
 
-/// What is kept of a pull request. No bodies, no titles.
+/// What is kept of a pull request. No bodies, no titles. Fields after
+/// `commenters` were added later; a record without them reads as zero, so
+/// `head_oid` being empty marks a summary whose counts are unknown.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct Summary {
@@ -91,6 +94,129 @@ pub struct Summary {
     pub failing_checks: Vec<String>,
     pub comment_count: usize,
     pub commenters: Vec<String>,
+    pub checks: Checks,
+    pub additions: u64,
+    pub deletions: u64,
+    pub is_draft: bool,
+    pub mergeable: String,
+    pub head_oid: String,
+}
+
+impl Summary {
+    /// The fields an inbox item reports. Diff size, check progress and the
+    /// head commit change on every push and are stored without an item.
+    pub fn same_news(&self, other: &Summary) -> bool {
+        self.state == other.state
+            && self.review_decision == other.review_decision
+            && self.failing_checks == other.failing_checks
+            && self.comment_count == other.comment_count
+            && self.commenters == other.commenters
+    }
+}
+
+/// Status check results, counted per entry of the rollup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct Checks {
+    pub passed: usize,
+    pub pending: usize,
+    pub failed: usize,
+}
+
+impl Checks {
+    pub fn total(self) -> usize {
+        self.passed + self.pending + self.failed
+    }
+}
+
+/// Why a pull request may not be merged, or `None` when it is open, not a
+/// draft, approved, without conflicts, and every check finished green. No
+/// checks at all is not green: right after a push GitHub may not have
+/// registered them yet.
+pub fn merge_blocker(summary: &Summary) -> Option<String> {
+    let checks = summary.checks;
+    if summary.state != "OPEN" {
+        let state = if summary.state.is_empty() {
+            "unknown"
+        } else {
+            &summary.state
+        };
+        return Some(format!("it is not open (state {state})"));
+    }
+    if summary.is_draft {
+        return Some("it is a draft".into());
+    }
+    if summary.review_decision != "APPROVED" {
+        let review = if summary.review_decision.is_empty() {
+            "none"
+        } else {
+            &summary.review_decision
+        };
+        return Some(format!("it is not approved (review {review})"));
+    }
+    if summary.mergeable == "CONFLICTING" {
+        return Some("it has merge conflicts".into());
+    }
+    if checks.failed > 0 {
+        return Some(format!("{} check(s) failed", checks.failed));
+    }
+    if checks.pending > 0 {
+        return Some(format!("{} check(s) have not finished", checks.pending));
+    }
+    if checks.total() == 0 {
+        return Some("no checks are reported".into());
+    }
+    if !valid_oid(&summary.head_oid) {
+        return Some("its head commit is unknown".into());
+    }
+    None
+}
+
+fn valid_oid(oid: &str) -> bool {
+    oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MergeMethod {
+    #[default]
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl MergeMethod {
+    fn flag(self) -> &'static str {
+        match self {
+            MergeMethod::Squash => "--squash",
+            MergeMethod::Merge => "--merge",
+            MergeMethod::Rebase => "--rebase",
+        }
+    }
+}
+
+/// `gh pr merge`, pinned to the head commit that passed the guard: a push that
+/// lands after the check makes GitHub refuse the merge instead of merging
+/// unchecked code. The branch is not deleted; the thread's worktree uses it.
+pub fn merge(runner: &dyn Runner, url: &str, head_oid: &str, method: MergeMethod) -> Result<()> {
+    if !valid_pr_url(url) {
+        bail!("not a pull request URL");
+    }
+    if !valid_oid(head_oid) {
+        bail!("not a commit id");
+    }
+    let out = runner.run(&Cmd::new("gh", GH_MERGE_TIMEOUT).args([
+        "pr",
+        "merge",
+        method.flag(),
+        "--match-head-commit",
+        head_oid,
+        "--",
+        url,
+    ]))?;
+    if !out.success() {
+        bail!("gh pr merge: {}", sanitize(&out.error_text()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -108,8 +234,13 @@ struct GhView {
     status_check_rollup: Vec<GhCheck>,
     comments: Vec<GhComment>,
     head_ref_name: String,
+    head_ref_oid: String,
     head_repository: Option<GhRepo>,
     head_repository_owner: Option<GhOwner>,
+    additions: u64,
+    deletions: u64,
+    is_draft: bool,
+    mergeable: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -119,6 +250,31 @@ struct GhCheck {
     context: String,
     conclusion: String,
     state: String,
+}
+
+#[derive(PartialEq)]
+enum CheckResult {
+    Passed,
+    Pending,
+    Failed,
+}
+
+impl GhCheck {
+    /// A check run reports `conclusion` once it finished; a commit status
+    /// reports `state`.
+    fn result(&self) -> CheckResult {
+        let result = if self.conclusion.is_empty() {
+            &self.state
+        } else {
+            &self.conclusion
+        };
+        match result.to_ascii_uppercase().as_str() {
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" => CheckResult::Failed,
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckResult::Passed,
+            _ => CheckResult::Pending,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -167,25 +323,18 @@ pub fn reduce(json: &str, branch: &str, origin: &str) -> Result<Checked> {
         ));
     }
 
+    let mut checks = Checks::default();
+    for check in &view.status_check_rollup {
+        match check.result() {
+            CheckResult::Passed => checks.passed += 1,
+            CheckResult::Pending => checks.pending += 1,
+            CheckResult::Failed => checks.failed += 1,
+        }
+    }
     let mut failing: Vec<String> = view
         .status_check_rollup
         .iter()
-        .filter(|c| {
-            let result = if c.conclusion.is_empty() {
-                &c.state
-            } else {
-                &c.conclusion
-            };
-            matches!(
-                result.to_ascii_uppercase().as_str(),
-                "FAILURE"
-                    | "ERROR"
-                    | "TIMED_OUT"
-                    | "CANCELLED"
-                    | "ACTION_REQUIRED"
-                    | "STARTUP_FAILURE"
-            )
-        })
+        .filter(|c| c.result() == CheckResult::Failed)
         .map(|c| {
             sanitize(if c.name.is_empty() {
                 &c.context
@@ -213,6 +362,16 @@ pub fn reduce(json: &str, branch: &str, origin: &str) -> Result<Checked> {
         failing_checks: failing,
         comment_count: view.comments.len(),
         commenters,
+        checks,
+        additions: view.additions,
+        deletions: view.deletions,
+        is_draft: view.is_draft,
+        mergeable: sanitize(&view.mergeable).to_ascii_uppercase(),
+        head_oid: if valid_oid(&view.head_ref_oid) {
+            view.head_ref_oid
+        } else {
+            String::new()
+        },
     }))
 }
 
@@ -224,7 +383,7 @@ pub fn view(runner: &dyn Runner, url: &str) -> Result<String> {
         "pr",
         "view",
         "--json",
-        "state,reviewDecision,statusCheckRollup,comments,headRefName,headRepository,headRepositoryOwner",
+        "state,reviewDecision,statusCheckRollup,comments,headRefName,headRefOid,headRepository,headRepositoryOwner,additions,deletions,isDraft,mergeable",
         "--",
         url,
     ]))?;
@@ -366,6 +525,124 @@ mod tests {
             reduce(VIEW, "hp/demo/t-0001-x", "").unwrap(),
             Checked::Ignored(_)
         ));
+    }
+
+    #[test]
+    fn checks_are_counted_and_a_finished_green_approved_pull_request_is_mergeable() {
+        let json = r#"{"state":"OPEN","reviewDecision":"APPROVED","headRefName":"b",
+            "headRefOid":"0123456789abcdef0123456789abcdef01234567",
+            "headRepository":{"name":"app"},"headRepositoryOwner":{"login":"o"},
+            "additions":12,"deletions":3,"isDraft":false,"mergeable":"MERGEABLE",
+            "statusCheckRollup":[
+                {"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+                {"name":"docs","status":"COMPLETED","conclusion":"SKIPPED"},
+                {"name":"e2e","status":"IN_PROGRESS","conclusion":""},
+                {"context":"ci/legacy","state":"PENDING"},
+                {"name":"lint","conclusion":"FAILURE"}]}"#;
+        let Checked::Summary(mut summary) = reduce(json, "b", "https://github.com/o/app").unwrap()
+        else {
+            panic!("ignored")
+        };
+        assert_eq!(
+            summary.checks,
+            Checks {
+                passed: 2,
+                pending: 2,
+                failed: 1
+            }
+        );
+        assert_eq!((summary.additions, summary.deletions), (12, 3));
+        assert_eq!(summary.failing_checks, ["lint"]);
+        assert_eq!(
+            merge_blocker(&summary).as_deref(),
+            Some("1 check(s) failed")
+        );
+        summary.checks = Checks {
+            passed: 3,
+            pending: 0,
+            failed: 0,
+        };
+        assert_eq!(merge_blocker(&summary), None);
+
+        let blocked = |change: fn(&mut Summary)| {
+            let mut s = summary.clone();
+            change(&mut s);
+            merge_blocker(&s).expect("blocked")
+        };
+        assert!(blocked(|s| s.review_decision = "REVIEW_REQUIRED".into()).contains("not approved"));
+        assert!(blocked(|s| s.review_decision.clear()).contains("not approved"));
+        assert!(blocked(|s| s.state = "MERGED".into()).contains("not open"));
+        assert!(blocked(|s| s.is_draft = true).contains("draft"));
+        assert!(blocked(|s| s.mergeable = "CONFLICTING".into()).contains("conflicts"));
+        assert!(blocked(|s| s.checks.pending = 1).contains("not finished"));
+        assert!(blocked(|s| s.checks = Checks::default()).contains("no checks"));
+        assert!(blocked(|s| s.head_oid.clear()).contains("head commit"));
+    }
+
+    #[test]
+    fn only_news_fields_count_as_a_change() {
+        let base = Summary {
+            state: "OPEN".into(),
+            ..Summary::default()
+        };
+        let pushed = Summary {
+            additions: 40,
+            head_oid: "x".into(),
+            checks: Checks {
+                pending: 3,
+                ..Checks::default()
+            },
+            ..base.clone()
+        };
+        assert!(base.same_news(&pushed));
+        let reviewed = Summary {
+            review_decision: "APPROVED".into(),
+            ..base.clone()
+        };
+        assert!(!base.same_news(&reviewed));
+        // A record written before the counts existed still reads.
+        let legacy: Summary =
+            serde_json::from_str(r#"{"state":"OPEN","comment_count":2}"#).unwrap();
+        assert_eq!(legacy.checks, Checks::default());
+        assert!(legacy.head_oid.is_empty());
+    }
+
+    #[test]
+    fn gh_merge_is_pinned_to_the_checked_commit_and_refuses_bad_input() {
+        use crate::runner::fake::{FakeRunner, ok};
+        let runner = FakeRunner::new();
+        runner.on("gh pr merge", ok(""));
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        merge(
+            &runner,
+            "https://github.com/o/r/pull/7",
+            oid,
+            MergeMethod::Rebase,
+        )
+        .unwrap();
+        assert_eq!(
+            runner.calls.borrow()[0].args,
+            [
+                "pr",
+                "merge",
+                "--rebase",
+                "--match-head-commit",
+                oid,
+                "--",
+                "https://github.com/o/r/pull/7"
+            ]
+        );
+        assert!(merge(&runner, "--admin", oid, MergeMethod::Squash).is_err());
+        assert!(
+            merge(
+                &runner,
+                "https://github.com/o/r/pull/7",
+                "--admin",
+                MergeMethod::Squash
+            )
+            .is_err()
+        );
+        assert_eq!(runner.calls.borrow().len(), 1);
     }
 
     #[test]

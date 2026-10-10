@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Write as _};
 
 use anyhow::{Result, bail};
+use serde::Serialize;
 
 use crate::paths::Ctx;
 use crate::project::{self, Project, Status};
@@ -95,6 +96,76 @@ pub fn pick(ctx: &Ctx) -> Result<String> {
         Some(slug) => Ok(slug.clone()),
         None => bail!("no project number {}", line.trim()),
     }
+}
+
+/// Thread counts per group, in display order, skipping empty groups.
+pub fn group_counts(rows: &[Row]) -> Vec<(Group, usize)> {
+    Group::DISPLAY_ORDER
+        .into_iter()
+        .map(|group| (group, rows.iter().filter(|r| r.group == group).count()))
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// One project in the `--json` contract.
+#[derive(Serialize)]
+pub struct ProjectJson {
+    pub slug: String,
+    pub name: String,
+    pub goal: String,
+    pub status: Status,
+    pub dir: String,
+    /// Group token -> number of threads, for groups with at least one.
+    pub counts: std::collections::BTreeMap<&'static str, usize>,
+}
+
+pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
+    let settings = project
+        .read_project_md()
+        .map(|(s, _)| s)
+        .unwrap_or_default();
+    ProjectJson {
+        slug: project.slug.clone(),
+        name: project::display_name(&settings.name, &project.slug),
+        goal: settings.goal,
+        status: project.status(),
+        dir: project.dir().to_string_lossy().into_owned(),
+        counts: group_counts(rows)
+            .into_iter()
+            .map(|(group, n)| (group.token(), n))
+            .collect(),
+    }
+}
+
+/// `overview --json`: never asks on a terminal. Without a slug it is the
+/// current workspace's project, else every project that is not archived.
+pub fn run_json(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
+    let slugs = match slug {
+        Some(slug) => {
+            project::validate_slug(slug)?;
+            vec![slug.to_string()]
+        }
+        None => {
+            let workspace = ctx.env.var("HERDR_WORKSPACE_ID").unwrap_or("");
+            let socket = ctx.env.var("HERDR_SOCKET_PATH").unwrap_or("");
+            match project_for_workspace(ctx, workspace, socket) {
+                Some(slug) => vec![slug],
+                None => visible_slugs(ctx),
+            }
+        }
+    };
+    let mut projects = Vec::new();
+    for slug in slugs {
+        let project = Project::load(&ctx.root, &slug)?;
+        let rows = threads::rows(ctx, &project);
+        let mut value = serde_json::to_value(project_json(&project, &rows))?;
+        value["threads"] = serde_json::to_value(threads::threads_json(&project, &rows))?;
+        projects.push(value);
+    }
+    threads::print_json(&serde_json::json!({
+        "schema_version": threads::JSON_SCHEMA_VERSION,
+        "projects": projects,
+    }))
 }
 
 /// Threads grouped by state, in the one display order.

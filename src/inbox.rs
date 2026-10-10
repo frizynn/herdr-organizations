@@ -195,6 +195,45 @@ pub fn done(project: &Project, ids: &[String], all: bool) -> Result<usize> {
     Ok(moved)
 }
 
+/// `inbox list`: unhandled items, oldest first. Reads only: nothing is marked
+/// seen or moved.
+pub fn print_list(project: &Project, json: bool) -> Result<()> {
+    let items = unhandled(project);
+    if json {
+        let seen = seen(project);
+        let items: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.id,
+                    "kind": item.kind,
+                    "subject": item.subject,
+                    "created": item.created,
+                    "summary": item.summary,
+                    "body": item.body,
+                    "seen": seen.contains(&item.id),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+                "project": project.slug,
+                "items": items,
+            })
+        );
+        return Ok(());
+    }
+    for item in items {
+        println!(
+            "{}\t{}\t{}\t{}",
+            item.id, item.kind, item.subject, item.summary
+        );
+    }
+    Ok(())
+}
+
 fn inline_body(body: &str) -> (String, bool) {
     let mut chars = body.chars();
     let text: String = chars.by_ref().take(MAX_INLINE_BODY_CHARS).collect();

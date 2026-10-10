@@ -106,6 +106,12 @@ pub struct Thread {
     pub pr_state: String,
     pub pr_review: String,
     pub resolved_reason: String,
+    /// Opt-in: the ticker prompts the agent when its pull request has failing
+    /// checks or review comments.
+    pub auto_fix_ci: bool,
+    /// Opt-in: the ticker merges the pull request once it passes the same
+    /// guard as `thread merge`. Set with `thread set`; nothing sets it on its own.
+    pub auto_merge: bool,
 }
 
 impl Thread {

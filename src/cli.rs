@@ -10,9 +10,9 @@ use crate::organizations::NodeRequest;
 use crate::paths::{self, Ctx, Env, SessionFlags};
 use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
-use crate::thread::NodeRole;
+use crate::thread::{self, NodeRole};
 use crate::threads::{self, ResolveArgs, StartArgs};
-use crate::{actions, adopt, doctor, inbox, lifecycle, overview, routine, ticker};
+use crate::{actions, adopt, doctor, inbox, lifecycle, overview, pr, routine, steps, ticker};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = crate::VERSION, about = "Recursive organizations for herdr")]
@@ -54,12 +54,18 @@ enum Command {
         /// A repository, as PATH or PATH@MACHINE; repeatable
         #[arg(long = "repo", value_name = "PATH[@MACHINE]")]
         repos: Vec<String>,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
     },
     /// List projects
     List {
         /// Include archived projects
         #[arg(long)]
         all: bool,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
     },
     /// Open a project: its workspace, coordinator tab and coordinator agent
     Open {
@@ -84,8 +90,11 @@ enum Command {
     Overview {
         slug: Option<String>,
         /// Wait for Enter before exiting (only when on a terminal; used by the popup)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         wait: bool,
+        /// Print the versioned JSON contract (docs/json.md); never asks for a project
+        #[arg(long)]
+        json: bool,
     },
     /// Show only one project's panes in the sidebar, sorted by attention
     Focus { slug: Option<String> },
@@ -172,6 +181,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum InboxCommand {
+    /// List unhandled items without archiving or marking them seen
+    List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Print and archive one bounded batch of new events
     Consume { slug: String },
     /// Move handled items to inbox/done/
@@ -215,7 +231,12 @@ enum ThreadCommand {
         text_file: String,
     },
     /// List threads with live state and group
-    List { slug: String },
+    List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one thread's record
     Show { slug: String, id: String },
     /// Record an existing local agent pane as a thread of this project
@@ -231,6 +252,31 @@ enum ThreadCommand {
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
+    /// Merge the thread's pull request: only when it is open, approved and every check passed
+    Merge {
+        slug: String,
+        id: String,
+        #[arg(long, value_enum, default_value_t = CliMergeMethod::Squash)]
+        method: CliMergeMethod,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn the per-thread pull request automation on or off
+    #[command(group = clap::ArgGroup::new("flag").required(true).multiple(true))]
+    Set {
+        slug: String,
+        id: String,
+        /// Prompt the agent when its pull request has failing checks or review comments
+        #[arg(long, value_enum, group = "flag")]
+        auto_fix_ci: Option<Toggle>,
+        /// Merge the pull request once it is approved and every check passed
+        #[arg(long, value_enum, group = "flag")]
+        auto_merge: Option<Toggle>,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve a thread (final copy first), or reopen a resolved one
     Resolve {
         slug: String,
@@ -250,6 +296,35 @@ enum ThreadCommand {
         #[arg(long, requires = "remove_worktree")]
         discard_uncopied: bool,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum CliMergeMethod {
+    Squash,
+    Merge,
+    Rebase,
+}
+
+impl From<CliMergeMethod> for pr::MergeMethod {
+    fn from(value: CliMergeMethod) -> Self {
+        match value {
+            CliMergeMethod::Squash => pr::MergeMethod::Squash,
+            CliMergeMethod::Merge => pr::MergeMethod::Merge,
+            CliMergeMethod::Rebase => pr::MergeMethod::Rebase,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum Toggle {
+    On,
+    Off,
+}
+
+impl Toggle {
+    fn on(self) -> bool {
+        matches!(self, Toggle::On)
+    }
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -321,7 +396,12 @@ enum NodeCommand {
         text_file: String,
     },
     /// List nodes with live state, role and parent
-    List { slug: String },
+    List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one node's record
     Show { slug: String, id: String },
     /// Record that the user has seen the current report
@@ -397,42 +477,49 @@ pub fn run() -> Result<()> {
     };
 
     match cli.command {
-        Command::New { name, goal, repos } => {
+        Command::New {
+            name,
+            goal,
+            repos,
+            json,
+        } => {
             let repos = repos
                 .iter()
                 .map(|arg| project::parse_repo_arg(arg))
                 .collect();
             let project = project::create(&ctx.root, &name, &goal, repos)?;
-            println!("created `{}` at {}", project.slug, project.dir().display());
-            println!(
-                "next: {} open {}",
+            let next = format!(
+                "{} open {}",
                 coordinator::current_prefix(&ctx.root)?,
                 project.slug
             );
+            if json {
+                return threads::print_json(&serde_json::json!({
+                    "schema_version": threads::JSON_SCHEMA_VERSION,
+                    "project": overview::project_json(&project, &[]),
+                    "next": next,
+                }));
+            }
+            println!("created `{}` at {}", project.slug, project.dir().display());
+            println!("next: {next}");
             Ok(())
         }
-        Command::List { all } => {
+        Command::List { all, json } => {
+            let mut projects = Vec::new();
             for slug in project::list_slugs(&ctx.root) {
                 let project = Project::load(&ctx.root, &slug)?;
                 let status = project.status();
                 if status == Status::Archived && !all {
                     continue;
                 }
-                let mut counts = std::collections::BTreeMap::new();
-                for row in threads::rows(&ctx, &project) {
-                    *counts
-                        .entry(row.group.rank())
-                        .or_insert((row.group.label(), 0)) = (
-                        row.group.label(),
-                        counts
-                            .get(&row.group.rank())
-                            .map_or(0, |c: &(&str, usize)| c.1)
-                            + 1,
-                    );
+                let rows = threads::rows(&ctx, &project);
+                if json {
+                    projects.push(overview::project_json(&project, &rows));
+                    continue;
                 }
-                let summary: Vec<String> = counts
-                    .values()
-                    .map(|(label, n)| format!("{label}: {n}"))
+                let summary: Vec<String> = overview::group_counts(&rows)
+                    .into_iter()
+                    .map(|(group, n)| format!("{}: {n}", group.label()))
                     .collect();
                 println!(
                     "{slug}\t{status}\t{}",
@@ -442,6 +529,12 @@ pub fn run() -> Result<()> {
                         summary.join(", ")
                     }
                 );
+            }
+            if json {
+                threads::print_json(&serde_json::json!({
+                    "schema_version": threads::JSON_SCHEMA_VERSION,
+                    "projects": projects,
+                }))?;
             }
             Ok(())
         }
@@ -460,10 +553,19 @@ pub fn run() -> Result<()> {
             },
         ),
         Command::Context { slug, peek } => coordinator::context(&ctx, &slug, peek),
-        Command::Overview { slug, wait } => overview::run(&ctx, slug.as_deref(), wait),
+        Command::Overview { slug, wait, json } => {
+            if json {
+                overview::run_json(&ctx, slug.as_deref())
+            } else {
+                overview::run(&ctx, slug.as_deref(), wait)
+            }
+        }
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),
         Command::Unfocus { session } => overview::unfocus(&ctx, &session.into()),
         Command::Inbox { command } => match command {
+            InboxCommand::List { slug, json } => {
+                inbox::print_list(&Project::load(&ctx.root, &slug)?, json)
+            }
             InboxCommand::Consume { slug } => {
                 let project = Project::load(&ctx.root, &slug)?;
                 let stdout = std::io::stdout();
@@ -541,7 +643,76 @@ pub fn run() -> Result<()> {
                 );
                 Ok(())
             }
-            ThreadCommand::List { slug } => threads::print_list(&ctx, &slug),
+            ThreadCommand::List { slug, json } => {
+                if json {
+                    threads::print_list_json(&ctx, &slug)
+                } else {
+                    threads::print_list(&ctx, &slug)
+                }
+            }
+            ThreadCommand::Merge {
+                slug,
+                id,
+                method,
+                json,
+            } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                let record = thread::load(&project, &id)?;
+                steps::merge_pull_request(&ctx, &project, &id, method.into())?;
+                // The merge already happened; a missing item must not report failure.
+                if let Err(error) = inbox::write(
+                    &project,
+                    "pr",
+                    &id,
+                    &format!(
+                        "{id} \"{}\": pull request {} was merged with `thread merge`",
+                        record.title, record.pr
+                    ),
+                    "",
+                ) {
+                    eprintln!("merged, but the inbox item was not written: {error:#}");
+                }
+                if json {
+                    return threads::print_json(&serde_json::json!({
+                        "schema_version": threads::JSON_SCHEMA_VERSION,
+                        "id": id,
+                        "pr": record.pr,
+                        "merged": true,
+                    }));
+                }
+                println!("{id}: merged {}", record.pr);
+                Ok(())
+            }
+            ThreadCommand::Set {
+                slug,
+                id,
+                auto_fix_ci,
+                auto_merge,
+                json,
+            } => {
+                let record = threads::set_flags(
+                    &ctx,
+                    &slug,
+                    &id,
+                    auto_fix_ci.map(Toggle::on),
+                    auto_merge.map(Toggle::on),
+                )?;
+                if json {
+                    return threads::print_json(&serde_json::json!({
+                        "schema_version": threads::JSON_SCHEMA_VERSION,
+                        "id": record.id,
+                        "auto_fix_ci": record.auto_fix_ci,
+                        "auto_merge": record.auto_merge,
+                    }));
+                }
+                let word = |on: bool| if on { "on" } else { "off" };
+                println!(
+                    "{id}: auto-fix-ci {}, auto-merge {}",
+                    word(record.auto_fix_ci),
+                    word(record.auto_merge)
+                );
+                Ok(())
+            }
             ThreadCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
             ThreadCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
             ThreadCommand::Resolve {
@@ -654,7 +825,13 @@ pub fn run() -> Result<()> {
                 println!("sent to {id} (agent was {state})");
                 Ok(())
             }
-            NodeCommand::List { slug } => threads::print_node_list(&ctx, &slug),
+            NodeCommand::List { slug, json } => {
+                if json {
+                    threads::print_node_list_json(&ctx, &slug)
+                } else {
+                    threads::print_node_list(&ctx, &slug)
+                }
+            }
             NodeCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
             NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
             NodeCommand::Resolve {

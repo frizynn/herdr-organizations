@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::organizations::{self, CreateNode, NodeRequest};
@@ -12,7 +13,11 @@ use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::runner::{Cmd, Runner};
 use crate::thread::{self, CopyOutcome, Group, Kind, Live, Status, Thread};
-use crate::{coordinator, remote, ticker};
+use crate::{coordinator, pr, remote, steps, ticker};
+
+/// The version of every `--json` document; see docs/json.md. Adding a field
+/// keeps it; renaming, removing or changing the meaning of one bumps it.
+pub const JSON_SCHEMA_VERSION: u32 = 1;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1001,6 +1006,200 @@ fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
         group,
         note,
     }
+}
+
+/// One thread in the `--json` contract.
+#[derive(Serialize)]
+pub struct ThreadJson {
+    pub id: String,
+    pub title: String,
+    pub parent_id: String,
+    pub role: thread::NodeRole,
+    pub can_spawn: bool,
+    pub status: Status,
+    pub kind: Kind,
+    pub group: &'static str,
+    pub group_label: &'static str,
+    pub rank: u8,
+    pub note: String,
+    pub agent: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub agent_name: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub machine: String,
+    pub cwd: String,
+    pub repo: String,
+    pub branch: String,
+    pub base: String,
+    pub worktree_path: String,
+    pub has_report: bool,
+    pub report_unacked: bool,
+    pub created: String,
+    pub updated: String,
+    pub last_state: String,
+    pub last_state_change: String,
+    pub error: String,
+    pub resolved_reason: String,
+    pub auto_fix_ci: bool,
+    pub auto_merge: bool,
+    pub pr: Option<PrJson>,
+}
+
+/// A thread's pull request as the ticker last saw it (every two minutes).
+/// Counts are `null` until the ticker has read them.
+#[derive(Serialize)]
+pub struct PrJson {
+    pub url: String,
+    pub state: String,
+    pub review: String,
+    pub checks: Option<pr::Checks>,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub failing: Vec<String>,
+    pub comment_count: Option<usize>,
+    pub draft: Option<bool>,
+    pub mergeable: Option<String>,
+    /// `null` when ready to merge, else why `thread merge` would refuse.
+    pub merge_blocker: Option<String>,
+}
+
+pub fn thread_json(row: &Row, prs: &std::collections::BTreeMap<String, pr::Summary>) -> ThreadJson {
+    let t = &row.thread;
+    let pr = (!t.pr.is_empty()).then(|| {
+        // A summary stored before the counts existed has no head commit.
+        let summary = prs.get(&t.id).filter(|s| !s.head_oid.is_empty());
+        PrJson {
+            url: t.pr.clone(),
+            state: t.pr_state.clone(),
+            review: t.pr_review.clone(),
+            checks: summary.map(|s| s.checks),
+            additions: summary.map(|s| s.additions),
+            deletions: summary.map(|s| s.deletions),
+            failing: prs
+                .get(&t.id)
+                .map(|s| s.failing_checks.clone())
+                .unwrap_or_default(),
+            comment_count: prs.get(&t.id).map(|s| s.comment_count),
+            draft: summary.map(|s| s.is_draft),
+            mergeable: summary.map(|s| s.mergeable.clone()),
+            merge_blocker: match summary {
+                _ if t.status != Status::Open => Some("the thread is not open".into()),
+                Some(s) => pr::merge_blocker(s),
+                None => Some("the ticker has not read this pull request yet".into()),
+            },
+        }
+    });
+    ThreadJson {
+        id: t.id.clone(),
+        title: t.title.clone(),
+        parent_id: organizations::parent_id(t).to_string(),
+        role: t.role,
+        can_spawn: t.can_spawn,
+        status: t.status,
+        kind: t.kind,
+        group: row.group.token(),
+        group_label: row.group.label(),
+        rank: row.group.rank(),
+        note: row.note.clone(),
+        agent: t.agent.clone(),
+        model: t.model.clone(),
+        reasoning_effort: t.reasoning_effort.clone(),
+        agent_name: t.agent_name.clone(),
+        workspace_id: t.workspace_id.clone(),
+        tab_id: t.tab_id.clone(),
+        pane_id: t.pane_id.clone(),
+        machine: t.machine.clone(),
+        cwd: t.cwd.clone(),
+        repo: t.repo.clone(),
+        branch: t.branch.clone(),
+        base: t.base.clone(),
+        worktree_path: t.worktree_path.clone(),
+        has_report: !t.report_hash.is_empty(),
+        report_unacked: !t.report_hash.is_empty() && t.report_hash != t.acked_report_hash,
+        created: t.created.clone(),
+        updated: t.updated.clone(),
+        last_state: t.last_state.clone(),
+        last_state_change: t.last_state_change.clone(),
+        error: t.error.clone(),
+        resolved_reason: t.resolved_reason.clone(),
+        auto_fix_ci: t.auto_fix_ci,
+        auto_merge: t.auto_merge,
+        pr,
+    }
+}
+
+/// Every thread of a project in the `--json` contract, in id order.
+pub fn threads_json(project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
+    let prs = steps::load_state(project).prs;
+    rows.iter().map(|row| thread_json(row, &prs)).collect()
+}
+
+pub fn print_json(value: &impl Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string(value)?);
+    Ok(())
+}
+
+pub fn print_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let rows = rows(ctx, &project);
+    print_json(&serde_json::json!({
+        "schema_version": JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "threads": threads_json(&project, &rows),
+    }))
+}
+
+#[derive(Serialize)]
+struct NodeJson {
+    #[serde(flatten)]
+    thread: ThreadJson,
+    depth: usize,
+    tree_order: usize,
+}
+
+pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let entries = organizations::tree(&project)?;
+    let rows = rows(ctx, &project);
+    let prs = steps::load_state(&project).prs;
+    let nodes: Vec<NodeJson> = entries
+        .iter()
+        .filter_map(|entry| {
+            let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
+            Some(NodeJson {
+                thread: thread_json(row, &prs),
+                depth: entry.depth,
+                tree_order: entry.tree_order,
+            })
+        })
+        .collect();
+    print_json(&serde_json::json!({
+        "schema_version": JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "nodes": nodes,
+    }))
+}
+
+/// `thread set`: the per-thread pull request flags. `None` leaves a flag as is.
+pub fn set_flags(
+    ctx: &Ctx,
+    slug: &str,
+    id: &str,
+    auto_fix_ci: Option<bool>,
+    auto_merge: Option<bool>,
+) -> Result<Thread> {
+    let project = Project::load(&ctx.root, slug)?;
+    thread::update(&project, id, |t| {
+        if let Some(on) = auto_fix_ci {
+            t.auto_fix_ci = on;
+        }
+        if let Some(on) = auto_merge {
+            t.auto_merge = on;
+        }
+    })
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str) -> Result<()> {
