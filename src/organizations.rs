@@ -494,27 +494,39 @@ fn node_instructions(rules: &str) -> String {
     }
 }
 
+/// The node's scope directory, `None` for a node created before scopes
+/// existed. A scope reached through a symbolic link is refused.
+fn existing_node_scope(project: &Project, id: &str) -> Result<Option<PathBuf>> {
+    let scope = node_scope_dir(project, id);
+    let exists =
+        optional_real_directory(&project.dir().join("nodes"))? && optional_real_directory(&scope)?;
+    Ok(exists.then_some(scope))
+}
+
 /// A node's standing instructions, as its next brief and its descendants'
 /// briefs read them.
 pub fn node_rules(project: &Project, id: &str) -> Result<String> {
     thread::load(project, id)?;
-    read_optional_text(&node_scope_dir(project, id).join("INSTRUCTIONS.md"), true)
+    match existing_node_scope(project, id)? {
+        Some(scope) => read_optional_text(&scope.join("INSTRUCTIONS.md"), true),
+        None => Ok(String::new()),
+    }
 }
 
-/// Replaces a node's standing instructions. A running agent sees them on its
-/// next brief or restart, never mid-conversation.
+/// Replaces a node's standing instructions; a node without a scope gets one.
+/// A running agent sees them on its next brief or restart, never
+/// mid-conversation.
 pub fn set_node_rules(project: &Project, id: &str, rules: &str) -> Result<()> {
     check_rules_size(rules)?;
     let _lock = project.lock()?;
     thread::load(project, id)?;
-    let scope = node_scope_dir(project, id);
-    if !std::fs::symlink_metadata(&scope).is_ok_and(|m| m.file_type().is_dir()) {
-        bail!("{} must be a regular directory", scope.display());
+    match existing_node_scope(project, id)? {
+        Some(scope) => project::write_atomic(
+            &scope.join("INSTRUCTIONS.md"),
+            node_instructions(rules).as_bytes(),
+        ),
+        None => create_node_scope(&node_scope_dir(project, id), rules).map(drop),
     }
-    project::write_atomic(
-        &scope.join("INSTRUCTIONS.md"),
-        node_instructions(rules).as_bytes(),
-    )
 }
 
 fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
@@ -592,13 +604,10 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
         &mut memory_files,
     )?;
 
-    let nodes_dir = project.dir().join("nodes");
-    let nodes_dir_exists = optional_real_directory(&nodes_dir)?;
     for record in chain {
-        let scope = node_scope_dir(project, &record.id);
-        if !nodes_dir_exists || !optional_real_directory(&scope)? {
+        let Some(scope) = existing_node_scope(project, &record.id)? else {
             continue;
-        }
+        };
         let node_instructions = read_optional_text(&scope.join("INSTRUCTIONS.md"), true)?;
         if !node_instructions.trim().is_empty() {
             instructions.push_str(&format!(
@@ -1016,6 +1025,15 @@ mod tests {
             "# Node instructions\n\nKeep reports short.\n"
         );
         assert!(set_node_rules(&project, "t-9999", "rules").is_err());
+        // A node from before scopes existed gets one.
+        std::fs::remove_dir_all(project.dir().join("nodes")).unwrap();
+        assert_eq!(node_rules(&project, &node.id).unwrap(), "");
+        set_node_rules(&project, &node.id, "late rules").unwrap();
+        assert!(
+            node_rules(&project, &node.id)
+                .unwrap()
+                .contains("late rules")
+        );
         assert!(set_node_rules(&project, &node.id, &"x".repeat(MAX_NODE_RULES_BYTES + 1)).is_err());
     }
 

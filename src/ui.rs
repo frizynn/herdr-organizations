@@ -161,6 +161,8 @@ enum Tab {
 
 impl Tab {
     const ALL: [Tab; 3] = [Tab::Projects, Tab::Board, Tab::Settings];
+    /// The tab row and the rule under it.
+    const ROWS: usize = 2;
 
     fn label(self) -> &'static str {
         match self {
@@ -168,6 +170,18 @@ impl Tab {
             Tab::Board => "Board",
             Tab::Settings => "Settings",
         }
+    }
+
+    /// The tab `delta` steps from `from`; `None`, a screen opened from a
+    /// tab, is drawn after the last one.
+    fn step(from: Option<Tab>, delta: isize) -> Tab {
+        let len = Tab::ALL.len() as isize;
+        let at = match from {
+            Some(tab) => Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0) as isize + delta,
+            None if delta > 0 => 0,
+            None => len - 1,
+        };
+        Tab::ALL[at.rem_euclid(len) as usize]
     }
 }
 
@@ -303,7 +317,7 @@ impl View {
     /// The tab this screen is the root of; `None` for a screen opened from one.
     fn tab(&self) -> Option<Tab> {
         match self {
-            View::Launcher { .. } | View::Search { .. } => Some(Tab::Projects),
+            View::Launcher { .. } => Some(Tab::Projects),
             View::Board { .. } => Some(Tab::Board),
             View::Settings { .. } => Some(Tab::Settings),
             _ => None,
@@ -2250,7 +2264,7 @@ impl<'a> App<'a> {
     fn render(&mut self, width: usize, height: usize) -> Frame {
         let mut frame = Frame::new(width, height);
         let (min_w, min_h, tabs) = match self.mode {
-            Mode::Popup => (40, 12, 2),
+            Mode::Popup => (40, 12, Tab::ROWS),
             Mode::Dock { .. } => (16, 6, 0),
         };
         self.buttons.clear();
@@ -3007,19 +3021,8 @@ impl<'a> App<'a> {
             }
             (Action::Board, _) => self.switch_tab(Tab::Board),
             (Action::Settings, _) => self.switch_tab(Tab::Settings),
-            (Action::NextTab | Action::PrevTab, _) => {
-                let delta = if action == Action::NextTab { 1 } else { -1 };
-                let next = match top.tab() {
-                    Some(tab) => {
-                        let at = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0) as isize;
-                        Tab::ALL[(at + delta).rem_euclid(Tab::ALL.len() as isize) as usize]
-                    }
-                    // The open screen is drawn after the last tab.
-                    None if delta > 0 => Tab::ALL[0],
-                    None => Tab::ALL[Tab::ALL.len() - 1],
-                };
-                self.switch_tab(next);
-            }
+            (Action::NextTab, _) => self.switch_tab(Tab::step(top.tab(), 1)),
+            (Action::PrevTab, _) => self.switch_tab(Tab::step(top.tab(), -1)),
             (Action::Merge, _) => self.start_merge(),
             (Action::Search, _) => self.stack.push(View::Search {
                 text: self.search.clone(),
