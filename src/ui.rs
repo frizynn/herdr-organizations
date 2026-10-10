@@ -132,6 +132,8 @@ enum Kind {
     Coordinator,
     Thread,
     Workspace,
+    /// Not offered under New: stops the project coordinator and starts another.
+    Replace,
 }
 
 impl Kind {
@@ -148,6 +150,7 @@ impl Kind {
             Kind::Coordinator => ("Coordinator", "inside a project"),
             Kind::Thread => ("Thread", "one agent, one task"),
             Kind::Workspace => ("Workspace", "folder, no coordinator"),
+            Kind::Replace => ("Replace coordinator", "stop it, start a new one"),
         }
     }
 }
@@ -244,6 +247,7 @@ impl Form {
             (Kind::Coordinator, _) => "New coordinator",
             (Kind::Thread, _) => "New thread",
             (Kind::Workspace, _) => "New workspace",
+            (Kind::Replace, _) => "Replace the coordinator",
         }
     }
 }
@@ -1196,9 +1200,12 @@ impl<'a> App<'a> {
                 }
                 if open {
                     pairs.extend(self.hint(&[(Action::GoToPane, "go to agent")]));
-                    if id != ROOT_ID {
-                        pairs.extend(self.hint(&[(Action::Close, "close")]));
-                    }
+                    let close = if id == ROOT_ID {
+                        "replace coordinator"
+                    } else {
+                        "close"
+                    };
+                    pairs.extend(self.hint(&[(Action::Close, close)]));
                 }
                 pairs
             }
@@ -1660,8 +1667,13 @@ impl<'a> App<'a> {
         if !items.is_empty() {
             pairs.extend(self.hint(&[(Action::Done, "done")]));
         }
-        if node.status != Status::Done && node.id != ROOT_ID {
-            pairs.extend(self.hint(&[(Action::Close, "close")]));
+        if node.status != Status::Done {
+            let close = if node.id == ROOT_ID {
+                "replace coordinator"
+            } else {
+                "close"
+            };
+            pairs.extend(self.hint(&[(Action::Close, close)]));
         }
         pairs.extend(self.hint(&[(Action::Back, "back")]));
         frame.hint(frame.height - 1, &pairs);
@@ -1846,8 +1858,15 @@ impl<'a> App<'a> {
         for y in 0..frame.height.saturating_sub(3) {
             frame.put(split, y, "│", GREY);
         }
-        frame.put(1, 0, "CREATE", HEAD);
-        for (i, kind) in Kind::ALL.iter().enumerate() {
+        let replacing = form.kind == Kind::Replace;
+        let verb = if replacing { "replace" } else { "create" };
+        frame.put(1, 0, if replacing { "COORDINATOR" } else { "CREATE" }, HEAD);
+        let kinds: &[Kind] = if form.kind == Kind::Replace {
+            &[Kind::Replace]
+        } else {
+            &Kind::ALL
+        };
+        for (i, kind) in kinds.iter().enumerate() {
             let y = 1 + i * 3;
             let (name, sub) = kind.label();
             if *kind == form.kind {
@@ -1860,14 +1879,16 @@ impl<'a> App<'a> {
             }
             frame.put(3, y + 1, sub, DIM);
         }
-        frame.put(1, frame.height.saturating_sub(5), "Saved in", DIM);
-        let root = self.ctx.root.display().to_string().replace(&home(), "~");
-        frame.put(
-            1,
-            frame.height.saturating_sub(4),
-            &term::fit(&root, split - 2),
-            DIM,
-        );
+        if !replacing {
+            frame.put(1, frame.height.saturating_sub(5), "Saved in", DIM);
+            let root = self.ctx.root.display().to_string().replace(&home(), "~");
+            frame.put(
+                1,
+                frame.height.saturating_sub(4),
+                &term::fit(&root, split - 2),
+                DIM,
+            );
+        }
         let fx = split + 2;
         let fw = frame.width.saturating_sub(fx + 1);
         frame.put(fx, 0, form.title(), BOLD);
@@ -1940,18 +1961,17 @@ impl<'a> App<'a> {
         frame.put(fx, py, &term::fit(&preview, fw), DIM);
         let by = py + 1;
         frame.put_right(fx + fw - 11, by, " esc cancel ", term::CHIP);
-        frame.put_right(fx + fw, by, " ↵ create ", PRIMARY);
-        frame.hint(
-            frame.height - 1,
-            &[
-                (self.key_label(Action::NextField), "next field"),
-                (self.key_label(Action::PrevField), "back"),
-                ("←→".into(), "choose"),
-                ("↑↓".into(), "what to create"),
-                ("↵".into(), "create"),
-                ("esc".into(), "cancel"),
-            ],
-        );
+        frame.put_right(fx + fw, by, &format!(" ↵ {verb} "), PRIMARY);
+        let mut pairs = vec![
+            (self.key_label(Action::NextField), "next field"),
+            (self.key_label(Action::PrevField), "back"),
+            ("←→".into(), "choose"),
+        ];
+        if !replacing {
+            pairs.push(("↑↓".into(), "what to create"));
+        }
+        pairs.extend([("↵".into(), verb), ("esc".into(), "cancel")]);
+        frame.hint(frame.height - 1, &pairs);
         self.rows.clear();
     }
 
@@ -2055,6 +2075,11 @@ impl<'a> App<'a> {
                 Self::form_value(form, "Folder"),
                 Self::form_value(form, "Label")
             ),
+            Kind::Replace => format!(
+                "stops the running coordinator · $ herdr-organizations open {} --profile {} --new",
+                Self::form_value(form, "Project"),
+                Self::form_value(form, "New one runs on")
+            ),
         }
     }
 
@@ -2146,6 +2171,16 @@ impl<'a> App<'a> {
                 Field::text("Folder", "", "~/dev/app"),
                 Field::text("Label", "", "app"),
             ],
+            Kind::Replace => {
+                let current = self
+                    .project(&slug)
+                    .map(|p| p.coordinators[0].harness.clone())
+                    .unwrap_or_default();
+                vec![
+                    self.project_choice(&slug),
+                    Self::harness_choice("New one runs on", false, &current),
+                ]
+            }
         };
         Form {
             kind,
@@ -2181,6 +2216,11 @@ impl<'a> App<'a> {
                 &Self::form_value(form, "Label"),
             )
             .map(|_| "workspace created".to_string()),
+            Kind::Replace => ui_ops::replace_coordinator(
+                self.ctx,
+                &Self::form_value(form, "Project"),
+                &Self::form_value(form, "New one runs on"),
+            ),
         };
         match result {
             Ok(message) => {
@@ -2819,9 +2859,12 @@ impl<'a> App<'a> {
             .chain(&project.threads)
             .filter(|n| n.coordinator == id && n.id != id && n.status != Status::Done)
             .count();
-        self.message = if id == ROOT_ID {
-            "the project's coordinator stays; pause the project to stop it".into()
-        } else if node.status == Status::Done {
+        if id == ROOT_ID {
+            let form = self.form(Kind::Replace, &slug, "");
+            self.stack.push(View::Form(form));
+            return;
+        }
+        self.message = if node.status == Status::Done {
             format!("{} is already resolved", node.title)
         } else if open_children > 0 {
             format!(
@@ -3428,7 +3471,9 @@ impl<'a> App<'a> {
                 form.focus = (form.focus + form.fields.len() - 1) % form.fields.len();
                 return;
             }
-            Some(Action::Up | Action::Down) if !printable && form.adopt_pane.is_empty() => {
+            Some(Action::Up | Action::Down)
+                if !printable && form.adopt_pane.is_empty() && form.kind != Kind::Replace =>
+            {
                 let at = Kind::ALL.iter().position(|k| *k == form.kind).unwrap_or(0);
                 let delta: isize = if action == Some(Action::Up) { -1 } else { 1 };
                 let next = (at as isize + delta).rem_euclid(Kind::ALL.len() as isize) as usize;
@@ -4001,9 +4046,23 @@ mod tests {
                     .unwrap();
                 app.stack = vec![View::Launcher { sel: at }];
             };
+            // The project coordinator is replaced, never just closed.
             select(app, ROOT_ID);
             press(app, crossterm::event::KeyCode::Char('x'));
-            assert!(app.message.contains("pause the project"), "{}", app.message);
+            let Some(View::Form(form)) = app.stack.last().cloned() else {
+                panic!("x on the coordinator opens the replace form");
+            };
+            assert_eq!(form.kind, Kind::Replace);
+            assert!(
+                app.preview(&form)
+                    .contains("open acme --profile codex --new")
+            );
+            let text = app.render(84, 24).text();
+            assert!(text.contains("Replace coordinator"), "{text}");
+            assert!(!text.contains("New project"), "{text}");
+            press(app, crossterm::event::KeyCode::Down);
+            assert!(matches!(app.stack.last(), Some(View::Form(f)) if f.kind == Kind::Replace));
+            press(app, crossterm::event::KeyCode::Esc);
 
             select(app, "t-0001");
             press(app, crossterm::event::KeyCode::Char('x'));
