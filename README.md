@@ -39,7 +39,7 @@ Plan and implement the billing API. Delegate bounded implementation tasks to chi
 TASK
 ```
 
-A node's profile is `--profile`, else its parent's, else the project default for its role, and must be on that role's allow-list (`profile list`). `--model`, `--reasoning-effort`, `--permission-profile` and `--raw-agent-arg` add node flags on top; descendants inherit omitted ones from their parent. Use `--no-spawn` for a coordinator that must remain a leaf. Permission profiles validate the harness argv; they are not OS isolation. `thread start` remains a backward-compatible way to start a worker directly under the project root.
+A node's profile is `--profile`, else its parent's, else the project default for its role, and must be on that role's allow-list (`profile list`). `--model`, `--reasoning-effort`, `--permission-profile` and `--raw-agent-arg` add node flags on top; descendants inherit omitted ones from their parent. Use `--no-spawn` for a coordinator that must remain a leaf. `--rules-file <file>` gives the node standing instructions that its descendants inherit; `node rules <slug> <id>` prints them and `--text-file <file>` replaces them. Permission profiles validate the harness argv; they are not OS isolation. `thread start` remains a backward-compatible way to start a worker directly under the project root.
 
 ## Organizations popup, sidebar tokens and dock
 

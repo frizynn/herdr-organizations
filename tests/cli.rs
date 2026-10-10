@@ -268,3 +268,57 @@ fn node_start_rejects_a_missing_parent_before_creating_state_or_starting_the_tic
     assert!(!root.join("demo/nodes").exists());
     assert!(!root.join(".ticker.lock").exists());
 }
+
+#[test]
+fn node_start_refuses_rules_from_standard_input_before_creating_anything() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
+    let task = home.path().join("task.md");
+    std::fs::write(&task, "A task").unwrap();
+    let output = hp(
+        home.path(),
+        &[
+            "--root",
+            root_arg,
+            "node",
+            "start",
+            "demo",
+            "--title",
+            "Child",
+            "--task-file",
+            task.to_str().unwrap(),
+            "--rules-file",
+            "-",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--rules-file does not read standard input")
+    );
+    assert!(!root.join("demo/nodes").exists());
+    assert!(!root.join(".ticker.lock").exists());
+}
+
+#[test]
+fn node_rules_of_an_unknown_node_is_an_error() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
+    let output = hp(
+        home.path(),
+        &["--root", root_arg, "node", "rules", "demo", "t-0001"],
+    );
+    assert!(!output.status.success());
+}
