@@ -2121,18 +2121,50 @@ impl<'a> App<'a> {
         Field::choice("Under", ids, names, at)
     }
 
-    /// The templates of `role` the project can start a node from, after "none".
-    fn template_choice(&self, slug: &str, role: NodeRole) -> Field {
-        let project = Some(slug).filter(|s| !s.is_empty());
-        let templates = term::quiet(|| crate::templates::list(self.ctx, project))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|t| t.spec.role == role);
+    /// Puts a Template choice before "Runs on" with the templates of the
+    /// node's role in its project, after "none". With none it takes the
+    /// field out: the form does not scroll, so an idle row would push the
+    /// last fields off a short popup.
+    fn refresh_template(&self, form: &mut Form) {
+        form.fields.retain(|f| {
+            !matches!(
+                f,
+                Field::Choice {
+                    label: "Template",
+                    ..
+                }
+            )
+        });
+        let Some(at) = form.fields.iter().position(|f| {
+            matches!(
+                f,
+                Field::Choice {
+                    label: "Runs on",
+                    ..
+                }
+            )
+        }) else {
+            return;
+        };
+        let slug = Self::form_value(form, "Project");
+        let role = Self::new_node(form).role;
+        let project = Some(slug.as_str()).filter(|s| !s.is_empty());
         let (names, shown): (Vec<String>, Vec<String>) =
-            std::iter::once((String::new(), "none".into()))
-                .chain(templates.map(|t| (t.name.clone(), t.name)))
+            term::quiet(|| crate::templates::list(self.ctx, project))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| t.spec.role == role)
+                .map(|t| (t.name.clone(), t.name))
                 .unzip();
-        Field::choice("Template", names, shown, 0)
+        if !names.is_empty() {
+            let field = Field::choice(
+                "Template",
+                [vec![String::new()], names].concat(),
+                [vec!["none".into()], shown].concat(),
+                0,
+            );
+            form.fields.insert(at, field);
+        }
     }
 
     fn harness_choice(label: &'static str, inherit: bool, current: &str) -> Field {
@@ -2181,7 +2213,6 @@ impl<'a> App<'a> {
                 self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "What this coordinator owns"),
                 Field::text("Repository", "", "optional: its own worktree and workspace"),
-                self.template_choice(&slug, NodeRole::Coordinator),
                 Self::harness_choice("Runs on", true, ""),
                 Field::text("Model", "", "inherit"),
                 Field::choice("Effort", efforts, effort_names, 0),
@@ -2192,7 +2223,6 @@ impl<'a> App<'a> {
                 self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "One bounded task"),
                 Field::text("Repository", "", "optional: a worktree; empty is a tab"),
-                self.template_choice(&slug, NodeRole::Worker),
                 Self::harness_choice("Runs on", true, ""),
                 Field::text("Model", "", "inherit"),
                 Field::choice("Effort", efforts, effort_names, 0),
@@ -2212,13 +2242,15 @@ impl<'a> App<'a> {
                 ]
             }
         };
-        Form {
+        let mut form = Form {
             kind,
             fields,
             focus: 0,
             adopt_pane: String::new(),
             adopt_cwd: String::new(),
-        }
+        };
+        self.refresh_template(&mut form);
+        form
     }
 
     fn submit(&mut self, form: &Form) -> bool {
@@ -3573,18 +3605,14 @@ impl<'a> App<'a> {
         };
         if project_changed {
             let slug = Self::form_value(form, "Project");
-            let role = Self::new_node(form).role;
-            for field in &mut form.fields {
-                match field {
-                    Field::Choice { label: "Under", .. } => {
-                        *field = self.coordinator_choice(&slug, ROOT_ID);
-                    }
-                    Field::Choice {
-                        label: "Template", ..
-                    } => *field = self.template_choice(&slug, role),
-                    _ => {}
-                }
+            let index = form
+                .fields
+                .iter()
+                .position(|f| matches!(f, Field::Choice { label: "Under", .. }));
+            if let Some(index) = index {
+                form.fields[index] = self.coordinator_choice(&slug, ROOT_ID);
             }
+            self.refresh_template(form);
         }
     }
 
@@ -4270,8 +4298,26 @@ mod tests {
     #[test]
     fn the_new_thread_form_offers_the_templates_of_its_role() {
         use crossterm::event::KeyCode;
+        let template_field = |app: &App| {
+            let Some(View::Form(form)) = app.stack.last() else {
+                panic!("no form open");
+            };
+            form.fields.iter().position(|f| {
+                matches!(
+                    f,
+                    Field::Choice {
+                        label: "Template",
+                        ..
+                    }
+                )
+            })
+        };
         with_app(|app| {
             crate::project::create(&app.ctx.root, "acme", "", vec![]).unwrap();
+            // Without templates the form has no Template row.
+            app.new_form(Kind::Thread, "acme", "root");
+            assert_eq!(template_field(app), None);
+            app.stack.pop();
             let dir = app.ctx.config_dir.join("templates");
             for (name, role) in [("reviewer", "worker"), ("lead", "coordinator")] {
                 std::fs::create_dir_all(dir.join(name)).unwrap();
@@ -4282,22 +4328,10 @@ mod tests {
                 .unwrap();
             }
             app.new_form(Kind::Thread, "acme", "root");
+            let at = template_field(app).unwrap();
             let Some(View::Form(form)) = app.stack.last_mut() else {
                 panic!("no form open");
             };
-            let at = form
-                .fields
-                .iter()
-                .position(|f| {
-                    matches!(
-                        f,
-                        Field::Choice {
-                            label: "Template",
-                            ..
-                        }
-                    )
-                })
-                .unwrap();
             assert!(
                 matches!(&form.fields[at], Field::Choice { shown, .. } if shown == &["none", "reviewer"]),
                 "{:?}",
