@@ -23,6 +23,7 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   HANDOFF.md              compact objective, decisions, active work and next action; the coordinator's
   MEMORY.md, memory/      project memory; the coordinator's
   nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md
+  templates/<name>/       the project's node templates: TEMPLATE.toml, RULES.md, MEMORY.md, memory/
   TASKS.md                the task list, each task with optional indented notes; the coordinator's
   routines/<name>.md      routines, including pr-followup.md; the coordinator's
   uploads/                files you give the threads
@@ -37,6 +38,7 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
 ~/.herdr-projects/.organizations-state.json      the popup's view model, written by the ticker
 ~/.config/herdr-projects/tui.toml                popup and dock keybindings and view settings
 ~/.config/herdr-projects/config.toml             yours: root, profiles, safety tables, machines
+~/.config/herdr-projects/templates/<name>/       global node templates, laid out as a project's
 ~/.config/herdr-projects/owned.json              what `configure` changed, for `unconfigure`
 ~/.config/herdr-projects/approved-routines.json  written only by `routine approve`
 ```
@@ -62,7 +64,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `thread list/show [--json]`, `thread ack`, `thread adopt` | Look at threads. `--json` prints the versioned document of [docs/json.md](json.md). |
 | `thread resolve [--keep-worktree \| --close-view] [--discard-uncopied] [--skip-copy] [--reopen]` | Final copy home, then clean up. `--close-view` keeps the worktree and branch, closes the thread's tab or workspace first, and resolves nothing when it cannot close it. |
 | `thread merge [--method squash\|merge\|rebase] [--json]`, `thread set [--auto-fix-ci on\|off] [--auto-merge on\|off] [--json]` | Merge a thread's pull request only when it is open, approved, conflict-free and every check passed, pinned to the checked head commit; and the per-thread pull request automation. Both refuse from an agent pane of the project. Auto-fix leaves events an enabled `pr` routine covers to that routine. |
-| `node start <project> --parent root\|<id> --role worker\|coordinator --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] --task-file F` | A node in the tree (`node create` is an alias). `thread start` is the same for a worker under `root`. |
+| `node start <project> --parent root\|<id> [--role worker\|coordinator] [--template NAME] --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] [--rules-file F] --task-file F` | A node in the tree (`node create` is an alias); `--role` defaults to the template's, else `worker`. `thread start` is the same for a worker under `root`. |
+| `template save <project> <id> --name N [--global] [--description D] [--force]`, `template list [--project P] [--json]`, `template show <name> [--project P] [--json]`, `template delete <name> [--project P]` | [Templates](#templates). |
 | `node restart [--profile P]`, `node prompt`, `node list [--json]`, `node show [--json]`, `node ack`, `node resolve [--keep-worktree \| --close-view]` | Hierarchy-aware lifecycle; `node list` prints the tree in stable preorder. |
 | `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
 | `list [--json]`, `new ... --json`, `overview [project] [--json]` | The project documents of [docs/json.md](json.md). |
@@ -110,6 +113,14 @@ The **projects** action (or `popup`) opens it, scoped to the current workspace's
 ## Node flags
 
 A node's profile is `--profile` (or `--harness KIND`, the built-in profile of that kind), else its parent node's, else the project's default for its role: `thread_profile` for a worker, `coordinator_profile` for a coordinator node. It is checked against that role's allow-list at creation and at every launch. On top of the profile a node can carry `--model`, `--reasoning-effort` (the same flags as a profile's), `--permission-profile` and repeatable `--raw-agent-arg`; children inherit them, raw arguments only while the harness stays the same, and `thread restart --profile` clears them. A node's model and effort replace its profile's. Codex permission profiles are `read-only`, `workspace-write` and `full-access`; Claude Code's are `default`, `plan`, `accept-edits` and `bypass-permissions`; other harnesses take raw arguments only. Conflicting permission, sandbox or approval flags in raw, profile or project arguments are refused before placement, and a node with its own permission profile gets no yolo flags. These flags validate argv; they are not OS isolation.
+
+## Templates
+
+A template is a node saved to start others from: its role, spawn permission, profile name, rules (`RULES.md`, from its `INSTRUCTIONS.md`) and memory (`MEMORY.md` and `memory/*.md`). `template save <project> <id> --name N` writes it under the project, and `--global` under `~/.config/herdr-projects/templates/` for every project. Saving over an existing one needs `--force`, which keeps its creation time. Memory that a brief would omit (over 8 KiB per file, 32,000 bytes or 64 files) is refused, so a copy never drops a file silently.
+
+`node start --template N` looks in the project first, then the global templates. It gives the node what the command left unset: the role unless `--role` is given, the spawn permission while the role is the template's, the profile unless `--profile` or `--harness` is given, and the rules unless a non-empty `--rules-file` is given. The memory is always copied into the new node's scope, where it reaches the node and its descendants like any node memory. Later changes to the template or to the node it came from do not reach nodes already started; save again to refresh it. The profile is checked against the role's allow-list as any `--profile` is.
+
+A template keeps the profile by name only. Node flags (`--model`, `--reasoning-effort`, `--permission-profile`, `--raw-agent-arg`) are not saved: a launch setup worth reusing belongs in a [profile](#agent-profiles). `template list --project P` shows the project's own over global ones of the same name, and `template delete` removes exactly the scope it names (the project's with `--project`, else the global one). The popup's New coordinator and New thread forms have a Template choice with the templates of their role.
 
 ## Safety settings
 

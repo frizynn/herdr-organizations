@@ -25,6 +25,8 @@ Every document starts with `"schema_version": 1`.
 | `inbox list <slug> --json` | `{schema_version, project, items: [Item]}` |
 | `thread set <slug> <id> [--auto-fix-ci on/off] [--auto-merge on/off] --json` | `{schema_version, id, auto_fix_ci, auto_merge}` |
 | `thread merge <slug> <id> [--method squash/merge/rebase] --json` | `{schema_version, id, pr, merged: true}` |
+| `template list [--project slug] --json` | `[Template]`, a bare array (see [Template](#template)) |
+| `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
 
@@ -109,6 +111,30 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
 | `body` | string | Empty except for `routine` items. |
 | `seen` | bool | `context` has already shown the item. |
+
+## Template
+
+`template list --json` prints a bare array with no `schema_version`, the one document without the wrapper, because web clients already read that shape. With `--project` it lists the project's own templates over global ones of the same name, sorted by name. Fields follow the same versioning rules.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | Lower-case letters, digits and hyphens. |
+| `scope` | `"global"` or `"project"` | |
+| `project` | string or `null` | The project's slug, `null` for a global template. |
+| `description` | string | |
+| `role` | `"worker"` or `"coordinator"` | What `node start --template` creates unless `--role` is given. |
+| `can_spawn` | bool | |
+| `profile` | string | The profile name a node from it starts with; empty to inherit. |
+| `harness`, `model`, `reasoning_effort` | string | That profile's, read from config.toml now; empty when the profile is unset or gone. |
+| `permission_profile` | string | Always empty. Templates keep no per-node flags; the field stays for readers of the first draft of this document. |
+| `rules_chars` | number | Characters of the rules, trimmed. |
+| `memory_chars` | number | Characters of `MEMORY.md` and `memory/*.md`; a bare heading counts as none. |
+| `updated` | string | RFC 3339 timestamp of the last save. |
+| `dir` | string | Absolute path of the template folder. |
+
+`template show --json` adds `rules` (text), `memory` (the `MEMORY.md` text, empty for none) and `memory_files` (`[{name, text}]` for `memory/*.md`).
+
+`node start` prints one JSON line that is not part of this contract. It includes `template`, the name given with `--template` or empty.
 
 ## Pull request actions
 
