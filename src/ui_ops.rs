@@ -405,7 +405,8 @@ pub fn create_node(ctx: &Ctx, form: &NewNode) -> Result<Thread> {
         },
     };
     if let Some(name) = blank(&form.template) {
-        crate::templates::resolve(ctx, Some(&form.slug), &name)?.fill(&mut start, true)?;
+        crate::templates::resolve(ctx, Some(&form.slug), &name)?
+            .fill(&mut start, Some(form.role))?;
     }
     term::quiet(|| threads::start(ctx, &form.slug, start))
 }

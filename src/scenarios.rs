@@ -489,7 +489,7 @@ fn a_node_started_from_a_template_gets_its_role_profile_rules_and_memory() {
     let mut from_template = args("Checkout", crate::organizations::NodeRequest::default());
     crate::templates::resolve(&ctx, Some("demo"), "frontend")
         .unwrap()
-        .fill(&mut from_template, false)
+        .fill(&mut from_template, None)
         .unwrap();
     let node = threads::start(&ctx, "demo", from_template).unwrap();
     assert_eq!(node.role, crate::thread::NodeRole::Coordinator);

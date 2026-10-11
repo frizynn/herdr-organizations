@@ -44,6 +44,20 @@ impl Scope {
     fn of(slug: &str) -> Scope {
         Scope::Project(slug.to_string())
     }
+
+    fn word(&self) -> &'static str {
+        match self {
+            Scope::Global => "global",
+            Scope::Project(_) => "project",
+        }
+    }
+
+    fn slug(&self) -> Option<&str> {
+        match self {
+            Scope::Global => None,
+            Scope::Project(slug) => Some(slug),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,8 +126,10 @@ fn load(dir: &Path, name: &str, scope: Scope) -> Result<Template> {
     if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
         bail!("{} must be a regular directory", dir.display());
     }
-    let text =
-        read_file(&dir.join(SPEC))?.with_context(|| format!("{} has no {SPEC}", dir.display()))?;
+    let text = organizations::read_optional_text(&dir.join(SPEC), true)?;
+    if text.trim().is_empty() {
+        bail!("{} has no {SPEC}", dir.display());
+    }
     let spec = toml::from_str(&text).with_context(|| format!("{SPEC} does not parse"))?;
     Ok(Template {
         name: name.to_string(),
@@ -123,36 +139,22 @@ fn load(dir: &Path, name: &str, scope: Scope) -> Result<Template> {
     })
 }
 
-/// A regular file's text, `None` when it does not exist; a symbolic link is refused.
-fn read_file(path: &Path) -> Result<Option<String>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => std::fs::read_to_string(path)
-            .map(Some)
-            .with_context(|| format!("could not read {}", path.display())),
-        Ok(_) => bail!("{} must be a regular file", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("could not inspect {}", path.display())),
-    }
-}
-
 impl Template {
     pub fn rules(&self) -> Result<String> {
-        Ok(read_file(&self.dir.join(RULES))?.unwrap_or_default())
+        organizations::read_optional_text(&self.dir.join(RULES), true)
     }
 
     pub fn memory(&self) -> Result<Memory> {
         organizations::read_memory(&self.dir, &format!("template {}", self.name))
     }
 
-    /// Gives a new node what its caller left unset: the role (unless
-    /// `role_given`), its spawn permission while the role is the template's,
-    /// the profile (unless `--profile` or `--harness` chose one), the rules
+    /// Gives a new node what its caller left unset: the role unless `role`
+    /// chose one, its spawn permission while the role is the template's, the
+    /// profile (unless `--profile` or `--harness` chose one), the rules
     /// (unless given) and the memory it starts with.
-    pub fn fill(&self, args: &mut StartArgs, role_given: bool) -> Result<()> {
+    pub fn fill(&self, args: &mut StartArgs, role: Option<NodeRole>) -> Result<()> {
         let node = &mut args.node;
-        if !role_given {
-            node.role = self.spec.role;
-        }
+        node.role = role.unwrap_or(self.spec.role);
         if node.can_spawn.is_none() && node.role == self.spec.role {
             node.can_spawn = Some(self.spec.can_spawn);
         }
@@ -171,30 +173,104 @@ impl Template {
     /// and `reasoning_effort` are the named profile's, empty when it is
     /// unset or gone.
     pub fn json(&self, profiles: &crate::profiles::Config) -> Result<serde_json::Value> {
-        let profile = profiles.get(&self.spec.profile);
-        let field = |pick: fn(&crate::profiles::Entry) -> &String| {
-            profile
-                .as_ref()
-                .map(|p| pick(&p.entry).clone())
-                .unwrap_or_default()
-        };
+        let entry = profiles
+            .get(&self.spec.profile)
+            .map(|p| p.entry)
+            .unwrap_or_default();
         Ok(serde_json::json!({
             "name": self.name,
-            "scope": match self.scope { Scope::Global => "global", Scope::Project(_) => "project" },
-            "project": match &self.scope { Scope::Global => None, Scope::Project(slug) => Some(slug) },
+            "scope": self.scope.word(),
+            "project": self.scope.slug(),
             "description": self.spec.description,
             "role": self.spec.role,
             "can_spawn": self.spec.can_spawn,
             "profile": self.spec.profile,
-            "harness": field(|e| &e.agent),
-            "model": field(|e| &e.model),
-            "reasoning_effort": field(|e| &e.effort),
+            "harness": entry.agent,
+            "model": entry.model,
+            "reasoning_effort": entry.effort,
             "permission_profile": "",
             "rules_chars": self.rules()?.trim().chars().count(),
             "memory_chars": self.memory()?.chars(),
             "updated": self.spec.updated,
             "dir": self.dir.to_string_lossy(),
         }))
+    }
+
+    /// `template show --json`: the list entry with the rules and memory.
+    pub fn show_json(&self, profiles: &crate::profiles::Config) -> Result<serde_json::Value> {
+        let mut template = self.json(profiles)?;
+        let memory = self.memory()?;
+        template["rules"] = self.rules()?.into();
+        template["memory"] = memory.index.into();
+        template["memory_files"] = memory
+            .files
+            .into_iter()
+            .map(|(name, text)| serde_json::json!({ "name": name, "text": text }))
+            .collect();
+        Ok(serde_json::json!({
+            "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+            "template": template,
+        }))
+    }
+
+    fn profile_shown(&self) -> &str {
+        match self.spec.profile.as_str() {
+            "" => "inherited",
+            profile => profile,
+        }
+    }
+
+    /// One `template list` line: name, scope, role, profile, description.
+    pub fn line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}",
+            self.name,
+            self.scope.word(),
+            self.spec.role.as_str(),
+            self.profile_shown(),
+            self.spec.description
+        )
+    }
+
+    /// `template show`: the template, its rules and its memory.
+    pub fn show_text(&self) -> Result<String> {
+        let spec = &self.spec;
+        let mut text = format!(
+            "{} ({}{})\nrole: {}{}\nprofile: {}\n",
+            self.name,
+            self.scope.word(),
+            self.scope
+                .slug()
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default(),
+            spec.role.as_str(),
+            match (spec.role, spec.can_spawn) {
+                (NodeRole::Coordinator, false) => ", cannot spawn",
+                _ => "",
+            },
+            self.profile_shown(),
+        );
+        if !spec.description.is_empty() {
+            text.push_str(&format!("description: {}\n", spec.description));
+        }
+        text.push_str(&format!("dir: {}\n\n## Rules\n\n", self.dir.display()));
+        let rules = self.rules()?;
+        text.push_str(if rules.trim().is_empty() {
+            "(none)\n"
+        } else {
+            &rules
+        });
+        let memory = self.memory()?;
+        text.push_str("\n## Memory\n\n");
+        text.push_str(if memory.index.trim().is_empty() {
+            "(none)\n"
+        } else {
+            &memory.index
+        });
+        for (name, body) in &memory.files {
+            text.push_str(&format!("\n### memory/{name}\n\n{body}"));
+        }
+        Ok(text)
     }
 }
 
@@ -282,58 +358,13 @@ pub fn delete(ctx: &Ctx, project: Option<&str>, name: &str) -> Result<()> {
     if std::fs::symlink_metadata(&dir).is_err() {
         bail!(
             "there is no {} template `{name}`",
-            match scope {
-                Scope::Global => "global".to_string(),
-                Scope::Project(slug) => format!("`{slug}`"),
-            }
+            scope
+                .slug()
+                .map_or("global".to_string(), |slug| format!("`{slug}`"))
         );
     }
     load(&dir, name, scope)?;
     std::fs::remove_dir_all(&dir).with_context(|| format!("could not delete {}", dir.display()))
-}
-
-/// `template show`: the template, its rules and its memory.
-pub fn show_text(template: &Template) -> Result<String> {
-    let spec = &template.spec;
-    let mut text = format!(
-        "{} ({})\nrole: {}{}\nprofile: {}\n",
-        template.name,
-        match &template.scope {
-            Scope::Global => "global".to_string(),
-            Scope::Project(slug) => format!("project {slug}"),
-        },
-        spec.role.as_str(),
-        match (spec.role, spec.can_spawn) {
-            (NodeRole::Coordinator, false) => ", cannot spawn",
-            _ => "",
-        },
-        if spec.profile.is_empty() {
-            "inherited"
-        } else {
-            &spec.profile
-        },
-    );
-    if !spec.description.is_empty() {
-        text.push_str(&format!("description: {}\n", spec.description));
-    }
-    text.push_str(&format!("dir: {}\n\n## Rules\n\n", template.dir.display()));
-    let rules = template.rules()?;
-    text.push_str(if rules.trim().is_empty() {
-        "(none)\n"
-    } else {
-        &rules
-    });
-    let memory = template.memory()?;
-    text.push_str("\n## Memory\n\n");
-    text.push_str(if memory.index.trim().is_empty() {
-        "(none)\n"
-    } else {
-        &memory.index
-    });
-    for (name, body) in &memory.files {
-        text.push_str(&format!("\n### memory/{name}\n\n{body}"));
-    }
-    Ok(text)
 }
 
 #[cfg(test)]
@@ -414,7 +445,7 @@ mod tests {
         let mut args = start_args();
         resolve(&ctx, Some("demo"), "frontend")
             .unwrap()
-            .fill(&mut args, false)
+            .fill(&mut args, None)
             .unwrap();
         assert_eq!(args.profile.as_deref(), Some("deep"));
         assert_eq!(args.node.role, NodeRole::Coordinator);
@@ -440,7 +471,7 @@ mod tests {
         args.node.role = NodeRole::Worker;
         args.node.profile.harness = Some("claude".into());
         args.node.rules = "Own rules.".into();
-        template.fill(&mut args, true).unwrap();
+        template.fill(&mut args, Some(NodeRole::Worker)).unwrap();
         assert_eq!(args.node.role, NodeRole::Worker);
         // A worker does not take a coordinator's spawn permission.
         assert_eq!(args.node.can_spawn, None);
@@ -450,7 +481,7 @@ mod tests {
 
         let mut args = start_args();
         args.profile = Some("luna".into());
-        template.fill(&mut args, false).unwrap();
+        template.fill(&mut args, None).unwrap();
         assert_eq!(args.profile.as_deref(), Some("luna"));
     }
 

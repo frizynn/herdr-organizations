@@ -594,9 +594,7 @@ pub fn read_memory(dir: &Path, label: &str) -> Result<Memory> {
         &mut budget,
     )?
     .unwrap_or_default();
-    let prefix = format!("{label}/memory");
-    let mut files = Vec::new();
-    read_memory_files(&dir.join("memory"), &prefix, &mut budget, &mut files)?;
+    let files = read_memory_files(&dir.join("memory"), &format!("{label}/memory"), &mut budget)?;
     if budget.omitted_count > 0 {
         bail!(
             "{label} memory is over the limits a brief reads: {}",
@@ -608,10 +606,6 @@ pub fn read_memory(dir: &Path, label: &str) -> Result<Memory> {
     } else {
         index
     };
-    let files = files
-        .into_iter()
-        .map(|(path, text)| (path[prefix.len() + 1..].to_string(), text))
-        .collect();
     Ok(Memory { index, files })
 }
 
@@ -693,13 +687,11 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
     {
         memory_index.push_str(root_memory.trim());
     }
-    let mut memory_files = Vec::new();
-    read_memory_files(
-        &project.dir().join("memory"),
+    let mut memory_files: Vec<_> = labeled(
         "memory",
-        &mut budget,
-        &mut memory_files,
-    )?;
+        read_memory_files(&project.dir().join("memory"), "memory", &mut budget)?,
+    )
+    .collect();
 
     for record in chain {
         let Some(scope) = existing_node_scope(project, &record.id)? else {
@@ -724,12 +716,9 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
                 node_memory.trim()
             ));
         }
-        read_memory_files(
-            &scope.join("memory"),
-            &format!("nodes/{}/memory", record.id),
-            &mut budget,
-            &mut memory_files,
-        )?;
+        let prefix = format!("nodes/{}/memory", record.id);
+        let files = read_memory_files(&scope.join("memory"), &prefix, &mut budget)?;
+        memory_files.extend(labeled(&prefix, files));
     }
     let omissions = budget.omission_markdown();
     if !omissions.is_empty() {
@@ -751,7 +740,7 @@ fn optional_real_directory(path: &Path) -> Result<bool> {
     }
 }
 
-fn read_optional_text(path: &Path, refuse_symlink: bool) -> Result<String> {
+pub fn read_optional_text(path: &Path, refuse_symlink: bool) -> Result<String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
             read_regular_file(path).with_context(|| format!("could not read {}", path.display()))
@@ -926,16 +915,28 @@ fn read_scoped_memory_file(
         .with_context(|| format!("scoped memory file {} is not UTF-8", path.display()))
 }
 
+/// Memory files under their display path, `<prefix>/<name>`.
+fn labeled(
+    prefix: &str,
+    files: Vec<(String, String)>,
+) -> impl Iterator<Item = (String, String)> + '_ {
+    files
+        .into_iter()
+        .map(move |(name, text)| (scoped_memory_label(prefix, &name), text))
+}
+
+/// The sorted `*.md` files of a memory directory as (file name, text),
+/// within `budget`; `prefix` labels what it omits.
 fn read_memory_files(
     memory_dir: &Path,
     prefix: &str,
     budget: &mut ScopedMemoryBudget,
-    output: &mut Vec<(String, String)>,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
+    let mut output = Vec::new();
     match std::fs::symlink_metadata(memory_dir) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => bail!("{} must be a regular directory", memory_dir.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(output),
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("could not inspect {}", memory_dir.display()));
@@ -945,7 +946,7 @@ fn read_memory_files(
         budget.omit(format!(
             "{prefix}/*.md: not read because the scoped file-count limit was reached"
         ));
-        return Ok(());
+        return Ok(output);
     }
 
     let mut names = BTreeSet::new();
@@ -977,7 +978,7 @@ fn read_memory_files(
         if let Some(contents) =
             read_scoped_memory_file(&memory_dir.join(&name), &display_path, budget)?
         {
-            output.push((display_path, contents));
+            output.push((name, contents));
         }
     }
     if discovered > MAX_MEMORY_NAMES_PER_DIRECTORY {
@@ -986,7 +987,7 @@ fn read_memory_files(
             discovered - MAX_MEMORY_NAMES_PER_DIRECTORY
         ));
     }
-    Ok(())
+    Ok(output)
 }
 
 pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> String {
@@ -1063,9 +1064,13 @@ mod tests {
     fn memory_given_at_creation_reaches_descendants_but_not_siblings() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
+        // A name a brief labels differently is copied as it is.
         let memory = Memory {
             index: "# Node memory\n\n- Use pnpm.\n".into(),
-            files: vec![("stack.md".into(), "React 19.\n".into())],
+            files: vec![
+                ("it`s.md".into(), "Quoted.\n".into()),
+                ("stack.md".into(), "React 19.\n".into()),
+            ],
         };
         let seeded = create_node(
             &project,
@@ -1103,6 +1108,11 @@ mod tests {
             context
                 .memory_files
                 .contains(&("nodes/t-0001/memory/stack.md".into(), "React 19.\n".into()))
+        );
+        assert!(
+            context
+                .memory_files
+                .contains(&("nodes/t-0001/memory/it's.md".into(), "Quoted.\n".into()))
         );
         let context = scoped_context(&project, &sibling).unwrap();
         assert!(!context.memory_index.contains("Use pnpm."));

@@ -1352,8 +1352,7 @@ pub fn run() -> Result<()> {
                     },
                 };
                 if let Some(name) = &template {
-                    crate::templates::resolve(&ctx, Some(&slug), name)?
-                        .fill(&mut start, role.is_some())?;
+                    crate::templates::resolve(&ctx, Some(&slug), name)?.fill(&mut start, role)?;
                 }
                 let node = threads::start(&ctx, &slug, start)?;
                 println!(
@@ -1563,22 +1562,8 @@ pub fn run() -> Result<()> {
                         .collect::<Result<Vec<_>>>()?;
                     println!("{}", serde_json::Value::Array(rows));
                 } else {
-                    for t in &templates {
-                        println!(
-                            "{}\t{}\t{}\t{}\t{}",
-                            t.name,
-                            match &t.scope {
-                                crate::templates::Scope::Global => "global",
-                                crate::templates::Scope::Project(_) => "project",
-                            },
-                            t.spec.role.as_str(),
-                            if t.spec.profile.is_empty() {
-                                "inherited"
-                            } else {
-                                &t.spec.profile
-                            },
-                            t.spec.description
-                        );
+                    for template in &templates {
+                        println!("{}", template.line());
                     }
                 }
                 Ok(())
@@ -1590,21 +1575,10 @@ pub fn run() -> Result<()> {
             } => {
                 let template = crate::templates::resolve(&ctx, project.as_deref(), &name)?;
                 if json {
-                    let mut row = template.json(&crate::profiles::load(&ctx.config_dir)?)?;
-                    let memory = template.memory()?;
-                    row["rules"] = template.rules()?.into();
-                    row["memory"] = memory.index.into();
-                    row["memory_files"] = memory
-                        .files
-                        .into_iter()
-                        .map(|(name, text)| serde_json::json!({ "name": name, "text": text }))
-                        .collect();
-                    println!(
-                        "{}",
-                        serde_json::json!({ "schema_version": threads::JSON_SCHEMA_VERSION, "template": row })
-                    );
+                    let profiles = crate::profiles::load(&ctx.config_dir)?;
+                    println!("{}", template.show_json(&profiles)?);
                 } else {
-                    print!("{}", crate::templates::show_text(&template)?);
+                    print!("{}", template.show_text()?);
                 }
                 Ok(())
             }

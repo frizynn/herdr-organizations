@@ -2149,21 +2149,17 @@ impl<'a> App<'a> {
         let slug = Self::form_value(form, "Project");
         let role = Self::new_node(form).role;
         let project = Some(slug.as_str()).filter(|s| !s.is_empty());
-        let (names, shown): (Vec<String>, Vec<String>) =
-            term::quiet(|| crate::templates::list(self.ctx, project))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|t| t.spec.role == role)
-                .map(|t| (t.name.clone(), t.name))
-                .unzip();
+        let names: Vec<String> = term::quiet(|| crate::templates::list(self.ctx, project))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.spec.role == role)
+            .map(|t| t.name)
+            .collect();
         if !names.is_empty() {
-            let field = Field::choice(
-                "Template",
-                [vec![String::new()], names].concat(),
-                [vec!["none".into()], shown].concat(),
-                0,
-            );
-            form.fields.insert(at, field);
+            let options = [vec![String::new()], names.clone()].concat();
+            let shown = [vec!["none".into()], names].concat();
+            form.fields
+                .insert(at, Field::choice("Template", options, shown, 0));
         }
     }
 
