@@ -368,3 +368,162 @@ fn jump_waits_for_the_popup_to_exit_and_reports_a_failure_as_a_notification() {
         "{calls}"
     );
 }
+
+/// Project `demo` with worker node `t-0001` on profile `ghost`, with rules
+/// and memory in its scope.
+fn node_fixture(home: &Path) -> std::path::PathBuf {
+    let root = home.join("root");
+    assert!(
+        hp(home, &["--root", root.to_str().unwrap(), "new", "Demo"])
+            .status
+            .success()
+    );
+    let demo = root.join("demo");
+    std::fs::write(
+        demo.join("threads/t-0001.toml"),
+        "id = \"t-0001\"\ntitle = \"Review\"\nstatus = \"open\"\nkind = \"tab\"\nagent = \"claude\"\nprofile = \"ghost\"\n",
+    )
+    .unwrap();
+    let scope = demo.join("nodes/t-0001");
+    std::fs::create_dir_all(scope.join("memory")).unwrap();
+    std::fs::write(
+        scope.join("INSTRUCTIONS.md"),
+        "# Node instructions\n\nCite the line you mean.\n",
+    )
+    .unwrap();
+    std::fs::write(scope.join("MEMORY.md"), "# Node memory\n\n- CI is slow.\n").unwrap();
+    std::fs::write(scope.join("memory/ci.md"), "Retry once.\n").unwrap();
+    root
+}
+
+#[test]
+fn template_commands_save_list_show_and_delete_a_node_template() {
+    let home = tempfile::tempdir().unwrap();
+    let root = node_fixture(home.path());
+    let run = |args: &[&str]| {
+        let mut all = vec!["--root", root.to_str().unwrap()];
+        all.extend_from_slice(args);
+        hp(home.path(), &all)
+    };
+    let text = |output: std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    text(run(&[
+        "template", "save", "demo", "t-0001", "--name", "reviewer",
+    ]));
+    let shown = text(run(&["template", "show", "reviewer", "--project", "demo"]));
+    assert!(
+        shown.starts_with("reviewer (project demo)\nrole: worker\nprofile: ghost\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("## Rules\n\nCite the line you mean.\n"),
+        "{shown}"
+    );
+    assert!(shown.contains("- CI is slow."), "{shown}");
+    assert!(
+        shown.contains("### memory/ci.md\n\nRetry once.\n"),
+        "{shown}"
+    );
+
+    let again = run(&["template", "save", "demo", "t-0001", "--name", "reviewer"]);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force replaces it"));
+    text(run(&[
+        "template", "save", "demo", "t-0001", "--name", "reviewer", "--force",
+    ]));
+    text(run(&[
+        "template",
+        "save",
+        "demo",
+        "t-0001",
+        "--name",
+        "reviewer",
+        "--global",
+        "--description",
+        "Careful reviews",
+    ]));
+    assert!(
+        home.path()
+            .join(".config/herdr-projects/templates/reviewer/TEMPLATE.toml")
+            .is_file()
+    );
+
+    assert_eq!(
+        text(run(&["template", "list", "--project", "demo"])),
+        "reviewer\tproject\tworker\tghost\t\n"
+    );
+    text(run(&[
+        "template",
+        "delete",
+        "reviewer",
+        "--project",
+        "demo",
+    ]));
+    assert_eq!(
+        text(run(&["template", "list", "--project", "demo"])),
+        "reviewer\tglobal\tworker\tghost\tCareful reviews\n"
+    );
+    let gone = run(&["template", "delete", "reviewer", "--project", "demo"]);
+    assert!(!gone.status.success());
+    text(run(&["template", "delete", "reviewer"]));
+    assert_eq!(text(run(&["template", "list"])), "");
+}
+
+#[test]
+fn node_start_applies_a_template_in_the_form_nenu_sends() {
+    let home = tempfile::tempdir().unwrap();
+    let root = node_fixture(home.path());
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(
+            home.path(),
+            &[
+                "--root", root_arg, "template", "save", "demo", "t-0001", "--name", "reviewer"
+            ],
+        )
+        .status
+        .success()
+    );
+    let start = |template: &str| {
+        let task = home.path().join("task.md");
+        std::fs::write(&task, "A task").unwrap();
+        hp(
+            home.path(),
+            &[
+                "--root",
+                root_arg,
+                "node",
+                "start",
+                "demo",
+                template,
+                "--parent=root",
+                "--title=Child",
+                "--task-file",
+                task.to_str().unwrap(),
+            ],
+        )
+    };
+
+    // The template's profile is applied, and refused before anything starts.
+    let output = start("--template=reviewer");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("there is no profile `ghost`"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = start("--template=nope");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("there is no template `nope`; `template list --project demo` shows them")
+    );
+    assert!(!root.join("demo/threads/t-0002.toml").exists());
+    assert!(!root.join(".ticker.lock").exists());
+}

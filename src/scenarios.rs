@@ -433,6 +433,95 @@ fn recursive_node_start_retry_keeps_sibling_records_unchanged() {
 }
 
 #[test]
+fn a_node_started_from_a_template_gets_its_role_profile_rules_and_memory() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+    let tabs = Rc::new(RefCell::new(1usize));
+    let next = tabs.clone();
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("tab create"),
+        move |_| {
+            *next.borrow_mut() += 1;
+            let n = *next.borrow();
+            Ok(ok(&format!(
+                r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t{n}","pane_id":"w1:p{n}"}}}}}}"#
+            )))
+        },
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    let ctx = world.ctx();
+    std::fs::create_dir_all(&ctx.config_dir).unwrap();
+    std::fs::write(
+        ctx.config_dir.join("config.toml"),
+        "[profiles.deep]\nagent = \"codex\"\nmodel = \"gpt-5.5\"\neffort = \"high\"\n",
+    )
+    .unwrap();
+    let args = |title: &str, node: crate::organizations::NodeRequest| StartArgs {
+        title: title.into(),
+        repo: None,
+        machine: None,
+        profile: None,
+        kind: None,
+        base: None,
+        task: "Do it.".into(),
+        node,
+    };
+
+    let mut first = args(
+        "Frontend",
+        crate::organizations::NodeRequest {
+            role: crate::thread::NodeRole::Coordinator,
+            rules: "Keep changes accessible.".into(),
+            ..crate::organizations::NodeRequest::default()
+        },
+    );
+    first.profile = Some("deep".into());
+    let source = threads::start(&ctx, "demo", first).unwrap();
+    let scope = crate::organizations::node_scope_dir(&project, &source.id);
+    std::fs::write(scope.join("MEMORY.md"), "# Node memory\n\n- Use pnpm.\n").unwrap();
+    std::fs::write(scope.join("memory/stack.md"), "React 19.\n").unwrap();
+    crate::templates::save(&ctx, "demo", &source.id, "frontend", false, "", false).unwrap();
+
+    // What Nenu sends: the template and no role or profile.
+    let mut from_template = args("Checkout", crate::organizations::NodeRequest::default());
+    crate::templates::resolve(&ctx, Some("demo"), "frontend")
+        .unwrap()
+        .fill(&mut from_template, None)
+        .unwrap();
+    let node = threads::start(&ctx, "demo", from_template).unwrap();
+    assert_eq!(node.role, crate::thread::NodeRole::Coordinator);
+    assert!(node.can_spawn);
+    assert_eq!(
+        (node.profile.as_str(), node.agent.as_str()),
+        ("deep", "codex")
+    );
+    assert_eq!(
+        crate::organizations::node_rules(&project, &node.id).unwrap(),
+        "# Node instructions\n\nKeep changes accessible.\n"
+    );
+    let context = crate::organizations::scoped_context(&project, &node).unwrap();
+    assert!(context.memory_index.contains(&format!(
+        "## Node {} memory\n\n# Node memory\n\n- Use pnpm.",
+        node.id
+    )));
+    assert!(context.memory_files.contains(&(
+        format!("nodes/{}/memory/stack.md", node.id),
+        "React 19.\n".into()
+    )));
+    // Memory is copied: later changes to the source node stay there.
+    std::fs::write(scope.join("memory/stack.md"), "Vue.\n").unwrap();
+    assert_eq!(
+        crate::organizations::node_memory(&project, &node.id)
+            .unwrap()
+            .files,
+        [("stack.md".to_string(), "React 19.\n".to_string())]
+    );
+}
+
+#[test]
 fn invalid_harness_profile_fails_before_ticker_or_node_creation() {
     let world = World::new();
     let project = world.project("demo", "a.sock");

@@ -148,6 +148,11 @@ enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// Node templates: a node's role, profile, rules and memory, to start other nodes from
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
     /// Routines: scheduled prompts and watched commands
     Routine {
         #[command(subcommand)]
@@ -555,9 +560,12 @@ struct NodeStartArgs {
     /// Parent node id, or `root` for a direct child of the project
     #[arg(long, default_value = "root")]
     parent: String,
-    /// Coordinators can create children; workers cannot
-    #[arg(long, value_enum, default_value_t = NodeRole::Worker)]
-    role: NodeRole,
+    /// Coordinators can create children; workers cannot (default: the template's, else worker)
+    #[arg(long, value_enum)]
+    role: Option<NodeRole>,
+    /// Start from a template: its role, profile, rules and memory; the flags given here win
+    #[arg(long, value_name = "NAME")]
+    template: Option<String>,
     /// Explicitly grant a coordinator permission to create children
     #[arg(long, conflicts_with = "no_spawn")]
     can_spawn: bool,
@@ -591,9 +599,51 @@ struct NodeStartArgs {
     /// The task; `-` reads standard input
     #[arg(long, value_name = "FILE")]
     task_file: String,
-    /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB)
+    /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB); they replace a template's
     #[arg(long, value_name = "FILE")]
     rules_file: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum TemplateCommand {
+    /// Save a node as a template: its role, profile name, rules and memory
+    Save {
+        slug: String,
+        id: String,
+        #[arg(long)]
+        name: String,
+        /// Keep it in the config folder for every project, not in this project
+        #[arg(long)]
+        global: bool,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Replace a template of that name
+        #[arg(long)]
+        force: bool,
+    },
+    /// List the global templates, and with --project that project's own over them
+    List {
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Print the JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a template with its rules and memory: the project's own, else the global one
+    Show {
+        name: String,
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Print the JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a project's template, or a global one without --project
+    Delete {
+        name: String,
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1257,6 +1307,7 @@ pub fn run() -> Result<()> {
                     base,
                     task_file,
                     rules_file,
+                    template,
                 } = *args;
                 let kind = kind
                     .as_deref()
@@ -1277,33 +1328,33 @@ pub fn run() -> Result<()> {
                 } else {
                     None
                 };
-                let node = NodeRequest {
-                    parent_id: parent,
-                    role,
-                    can_spawn,
-                    profile: ProfileOverrides {
-                        harness,
-                        model,
-                        reasoning_effort,
-                        permission_profile,
-                        raw_agent_args,
+                let mut start = StartArgs {
+                    title,
+                    repo,
+                    machine,
+                    profile,
+                    kind,
+                    base,
+                    task,
+                    node: NodeRequest {
+                        parent_id: parent,
+                        role: role.unwrap_or_default(),
+                        can_spawn,
+                        profile: ProfileOverrides {
+                            harness,
+                            model,
+                            reasoning_effort,
+                            permission_profile,
+                            raw_agent_args,
+                        },
+                        rules,
+                        memory: Default::default(),
                     },
-                    rules,
                 };
-                let node = threads::start(
-                    &ctx,
-                    &slug,
-                    StartArgs {
-                        title,
-                        repo,
-                        machine,
-                        profile,
-                        kind,
-                        base,
-                        task,
-                        node,
-                    },
-                )?;
+                if let Some(name) = &template {
+                    crate::templates::resolve(&ctx, Some(&slug), name)?.fill(&mut start, role)?;
+                }
+                let node = threads::start(&ctx, &slug, start)?;
                 println!(
                     "{}",
                     serde_json::json!({
@@ -1319,6 +1370,7 @@ pub fn run() -> Result<()> {
                         "model": node.model,
                         "reasoning_effort": node.reasoning_effort,
                         "permission_profile": node.permission_profile,
+                        "template": template.unwrap_or_default(),
                     })
                 );
                 Ok(())
@@ -1483,6 +1535,59 @@ pub fn run() -> Result<()> {
             jump.after_popup(&ctx);
             Ok(())
         }
+        Command::Template { command } => match command {
+            TemplateCommand::Save {
+                slug,
+                id,
+                name,
+                global,
+                description,
+                force,
+            } => {
+                let template =
+                    crate::templates::save(&ctx, &slug, &id, &name, global, &description, force)?;
+                println!(
+                    "saved template `{name}` in {} from {id}",
+                    template.dir.display()
+                );
+                Ok(())
+            }
+            TemplateCommand::List { project, json } => {
+                let templates = crate::templates::list(&ctx, project.as_deref())?;
+                if json {
+                    let profiles = crate::profiles::load(&ctx.config_dir)?;
+                    let rows = templates
+                        .iter()
+                        .map(|t| t.json(&profiles))
+                        .collect::<Result<Vec<_>>>()?;
+                    println!("{}", serde_json::Value::Array(rows));
+                } else {
+                    for template in &templates {
+                        println!("{}", template.line());
+                    }
+                }
+                Ok(())
+            }
+            TemplateCommand::Show {
+                name,
+                project,
+                json,
+            } => {
+                let template = crate::templates::resolve(&ctx, project.as_deref(), &name)?;
+                if json {
+                    let profiles = crate::profiles::load(&ctx.config_dir)?;
+                    println!("{}", template.show_json(&profiles)?);
+                } else {
+                    print!("{}", template.show_text()?);
+                }
+                Ok(())
+            }
+            TemplateCommand::Delete { name, project } => {
+                crate::templates::delete(&ctx, project.as_deref(), &name)?;
+                println!("deleted template `{name}`");
+                Ok(())
+            }
+        },
         Command::Profile { command } => {
             if let ProfileCommand::Resolve { name } = &command {
                 println!("{}", crate::profiles::resolve_json(&ctx, name.as_deref())?);
