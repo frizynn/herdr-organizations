@@ -29,6 +29,8 @@ pub struct NodeRequest {
     /// Standing instructions for the node and its descendants, written to its
     /// `INSTRUCTIONS.md`; empty keeps the placeholder.
     pub rules: String,
+    /// What the node's memory starts with, as a template carries it.
+    pub memory: Memory,
 }
 
 impl Default for NodeRequest {
@@ -39,7 +41,29 @@ impl Default for NodeRequest {
             can_spawn: None,
             profile: ProfileOverrides::default(),
             rules: String::new(),
+            memory: Memory::default(),
         }
+    }
+}
+
+/// A memory scope's files: `MEMORY.md` and `memory/*.md`, as a node scope and
+/// a template keep them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Memory {
+    /// `MEMORY.md`; empty for none, which a node scope writes as its heading.
+    pub index: String,
+    /// `memory/<name>` and its text, in name order.
+    pub files: Vec<(String, String)>,
+}
+
+impl Memory {
+    pub fn chars(&self) -> usize {
+        self.index.chars().count()
+            + self
+                .files
+                .iter()
+                .map(|(_, text)| text.chars().count())
+                .sum::<usize>()
     }
 }
 
@@ -455,7 +479,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope, &args.request.rules) {
+    let nodes_created = match create_node_scope(&scope, &args.request.rules, &args.request.memory) {
         Ok(created) => created,
         Err(error) => {
             thread::remove_record_locked(project, &record.id);
@@ -486,11 +510,29 @@ fn check_rules_size(rules: &str) -> Result<()> {
     Ok(())
 }
 
+const INSTRUCTIONS_HEADING: &str = "# Node instructions";
+const INSTRUCTIONS_PLACEHOLDER: &str = "Standing instructions for this node and its descendants.";
+const MEMORY_HEADING: &str = "# Node memory";
+
 fn node_instructions(rules: &str) -> String {
     match rules.trim() {
-        "" => "# Node instructions\n\nStanding instructions for this node and its descendants.\n"
-            .into(),
-        rules => format!("# Node instructions\n\n{rules}\n"),
+        "" => format!("{INSTRUCTIONS_HEADING}\n\n{INSTRUCTIONS_PLACEHOLDER}\n"),
+        rules => format!("{INSTRUCTIONS_HEADING}\n\n{rules}\n"),
+    }
+}
+
+/// The rules an `INSTRUCTIONS.md` holds, without the heading
+/// `node_instructions` adds; empty for the placeholder.
+pub fn instruction_rules(instructions: &str) -> &str {
+    let text = instructions.trim();
+    let rules = text
+        .strip_prefix(INSTRUCTIONS_HEADING)
+        .unwrap_or(text)
+        .trim();
+    if rules == INSTRUCTIONS_PLACEHOLDER {
+        ""
+    } else {
+        rules
     }
 }
 
@@ -525,11 +567,73 @@ pub fn set_node_rules(project: &Project, id: &str, rules: &str) -> Result<()> {
             &scope.join("INSTRUCTIONS.md"),
             node_instructions(rules).as_bytes(),
         ),
-        None => create_node_scope(&node_scope_dir(project, id), rules).map(drop),
+        None => {
+            create_node_scope(&node_scope_dir(project, id), rules, &Memory::default()).map(drop)
+        }
     }
 }
 
-fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
+/// A node's memory, as `read_memory` reads it; none for a node created
+/// before scopes existed.
+pub fn node_memory(project: &Project, id: &str) -> Result<Memory> {
+    thread::load(project, id)?;
+    match existing_node_scope(project, id)? {
+        Some(scope) => read_memory(&scope, &format!("nodes/{id}")),
+        None => Ok(Memory::default()),
+    }
+}
+
+/// The memory a scope directory holds, within the limits of scoped context.
+/// What a brief would omit is refused here, so a copy never loses a file
+/// silently. The bare heading of a new node's `MEMORY.md` reads as none.
+pub fn read_memory(dir: &Path, label: &str) -> Result<Memory> {
+    let mut budget = ScopedMemoryBudget::new();
+    let index = read_scoped_memory_file(
+        &dir.join("MEMORY.md"),
+        &format!("{label}/MEMORY.md"),
+        &mut budget,
+    )?
+    .unwrap_or_default();
+    let prefix = format!("{label}/memory");
+    let mut files = Vec::new();
+    read_memory_files(&dir.join("memory"), &prefix, &mut budget, &mut files)?;
+    if budget.omitted_count > 0 {
+        bail!(
+            "{label} memory is over the limits a brief reads: {}",
+            budget.omissions.join("; ")
+        );
+    }
+    let index = if index.trim() == MEMORY_HEADING {
+        String::new()
+    } else {
+        index
+    };
+    let files = files
+        .into_iter()
+        .map(|(path, text)| (path[prefix.len() + 1..].to_string(), text))
+        .collect();
+    Ok(Memory { index, files })
+}
+
+/// Writes `memory` into a new scope directory: `MEMORY.md` (the heading
+/// alone when it has no index) and `memory/`.
+pub fn write_memory(dir: &Path, memory: &Memory) -> Result<()> {
+    let memory_dir = dir.join("memory");
+    std::fs::create_dir(&memory_dir)
+        .with_context(|| format!("could not create {}", memory_dir.display()))?;
+    let index = if memory.index.trim().is_empty() {
+        format!("{MEMORY_HEADING}\n")
+    } else {
+        memory.index.clone()
+    };
+    project::write_atomic(&dir.join("MEMORY.md"), index.as_bytes())?;
+    for (name, text) in &memory.files {
+        project::write_atomic(&memory_dir.join(name), text.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn create_node_scope(scope: &Path, rules: &str, memory: &Memory) -> Result<bool> {
     let nodes = scope.parent().context("node scope has no parent")?;
     let nodes_created = ensure_directory(nodes)?;
     if let Err(error) = std::fs::create_dir(scope) {
@@ -540,18 +644,11 @@ fn create_node_scope(scope: &Path, rules: &str) -> Result<bool> {
             .with_context(|| format!("could not create node scope {}", scope.display()));
     }
     let result = (|| -> Result<()> {
-        std::fs::create_dir(scope.join("memory")).with_context(|| {
-            format!(
-                "could not create node memory directory in {}",
-                scope.display()
-            )
-        })?;
         project::write_atomic(
             &scope.join("INSTRUCTIONS.md"),
             node_instructions(rules).as_bytes(),
         )?;
-        project::write_atomic(&scope.join("MEMORY.md"), b"# Node memory\n")?;
-        Ok(())
+        write_memory(scope, memory)
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(scope);
@@ -960,6 +1057,66 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn memory_given_at_creation_reaches_descendants_but_not_siblings() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let memory = Memory {
+            index: "# Node memory\n\n- Use pnpm.\n".into(),
+            files: vec![("stack.md".into(), "React 19.\n".into())],
+        };
+        let seeded = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    memory: memory.clone(),
+                    ..request(ROOT_ID, NodeRole::Coordinator)
+                },
+                title: "Frontend".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap();
+        let sibling = create_with_rules(&project, ROOT_ID, NodeRole::Worker, "");
+        let child = create_with_rules(&project, &seeded.id, NodeRole::Worker, "");
+
+        assert_eq!(node_memory(&project, &seeded.id).unwrap(), memory);
+        // A node without seeded memory has the bare heading, which reads as none.
+        assert_eq!(
+            std::fs::read_to_string(node_scope_dir(&project, &sibling.id).join("MEMORY.md"))
+                .unwrap(),
+            "# Node memory\n"
+        );
+        assert_eq!(
+            node_memory(&project, &sibling.id).unwrap(),
+            Memory::default()
+        );
+        let context = scoped_context(&project, &child).unwrap();
+        assert!(context.memory_index.contains("Use pnpm."));
+        assert!(
+            context
+                .memory_files
+                .contains(&("nodes/t-0001/memory/stack.md".into(), "React 19.\n".into()))
+        );
+        let context = scoped_context(&project, &sibling).unwrap();
+        assert!(!context.memory_index.contains("Use pnpm."));
+        assert!(context.memory_files.is_empty());
+    }
+
+    #[test]
+    fn instruction_rules_undo_the_heading_and_the_placeholder() {
+        assert_eq!(
+            instruction_rules(&node_instructions("  keep it short \n")),
+            "keep it short"
+        );
+        assert_eq!(instruction_rules(&node_instructions("")), "");
+        assert_eq!(instruction_rules("written by hand"), "written by hand");
     }
 
     #[test]

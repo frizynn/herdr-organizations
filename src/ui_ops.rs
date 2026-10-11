@@ -371,6 +371,8 @@ pub struct NewNode {
     pub harness: String,
     pub model: String,
     pub effort: String,
+    /// A template of the node's role; empty for none.
+    pub template: String,
 }
 
 pub fn create_node(ctx: &Ctx, form: &NewNode) -> Result<Thread> {
@@ -380,34 +382,32 @@ pub fn create_node(ctx: &Ctx, form: &NewNode) -> Result<Thread> {
     } else {
         form.task.clone()
     };
-    term::quiet(|| {
-        threads::start(
-            ctx,
-            &form.slug,
-            threads::StartArgs {
-                title: form.title.trim().to_string(),
-                repo: blank(&form.repo),
-                machine: None,
-                profile: None,
-                kind: None,
-                base: None,
-                task,
-                node: NodeRequest {
-                    parent_id: form.parent.clone(),
-                    role: form.role,
-                    can_spawn: None,
-                    profile: agent_profile::ProfileOverrides {
-                        harness: blank(&form.harness),
-                        model: blank(&form.model),
-                        reasoning_effort: blank(&form.effort),
-                        permission_profile: None,
-                        raw_agent_args: Vec::new(),
-                    },
-                    rules: String::new(),
-                },
+    let mut start = threads::StartArgs {
+        title: form.title.trim().to_string(),
+        repo: blank(&form.repo),
+        machine: None,
+        profile: None,
+        kind: None,
+        base: None,
+        task,
+        node: NodeRequest {
+            parent_id: form.parent.clone(),
+            role: form.role,
+            can_spawn: None,
+            profile: agent_profile::ProfileOverrides {
+                harness: blank(&form.harness),
+                model: blank(&form.model),
+                reasoning_effort: blank(&form.effort),
+                permission_profile: None,
+                raw_agent_args: Vec::new(),
             },
-        )
-    })
+            ..NodeRequest::default()
+        },
+    };
+    if let Some(name) = blank(&form.template) {
+        crate::templates::resolve(ctx, Some(&form.slug), &name)?.fill(&mut start, true)?;
+    }
+    term::quiet(|| threads::start(ctx, &form.slug, start))
 }
 
 pub fn create_workspace(ctx: &Ctx, folder: &str, label: &str) -> Result<()> {
@@ -461,6 +461,7 @@ pub fn preview_node(form: &NewNode) -> String {
         form.title
     );
     for (flag, value) in [
+        ("--template", &form.template),
         ("--repo", &form.repo),
         ("--harness", &form.harness),
         ("--model", &form.model),

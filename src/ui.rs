@@ -2076,6 +2076,7 @@ impl<'a> App<'a> {
             harness: Self::form_value(form, "Runs on"),
             model: Self::form_value(form, "Model"),
             effort: Self::form_value(form, "Effort"),
+            template: Self::form_value(form, "Template"),
         }
     }
 
@@ -2118,6 +2119,20 @@ impl<'a> App<'a> {
             .unwrap_or_else(|| vec!["Coordinator".into()]);
         let at = ids.iter().position(|i| i == parent).unwrap_or(0);
         Field::choice("Under", ids, names, at)
+    }
+
+    /// The templates of `role` the project can start a node from, after "none".
+    fn template_choice(&self, slug: &str, role: NodeRole) -> Field {
+        let project = Some(slug).filter(|s| !s.is_empty());
+        let templates = term::quiet(|| crate::templates::list(self.ctx, project))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.spec.role == role);
+        let (names, shown): (Vec<String>, Vec<String>) =
+            std::iter::once((String::new(), "none".into()))
+                .chain(templates.map(|t| (t.name.clone(), t.name)))
+                .unzip();
+        Field::choice("Template", names, shown, 0)
     }
 
     fn harness_choice(label: &'static str, inherit: bool, current: &str) -> Field {
@@ -2166,6 +2181,7 @@ impl<'a> App<'a> {
                 self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "What this coordinator owns"),
                 Field::text("Repository", "", "optional: its own worktree and workspace"),
+                self.template_choice(&slug, NodeRole::Coordinator),
                 Self::harness_choice("Runs on", true, ""),
                 Field::text("Model", "", "inherit"),
                 Field::choice("Effort", efforts, effort_names, 0),
@@ -2176,6 +2192,7 @@ impl<'a> App<'a> {
                 self.coordinator_choice(&slug, parent),
                 Field::text("Task", "", "One bounded task"),
                 Field::text("Repository", "", "optional: a worktree; empty is a tab"),
+                self.template_choice(&slug, NodeRole::Worker),
                 Self::harness_choice("Runs on", true, ""),
                 Field::text("Model", "", "inherit"),
                 Field::choice("Effort", efforts, effort_names, 0),
@@ -3556,12 +3573,17 @@ impl<'a> App<'a> {
         };
         if project_changed {
             let slug = Self::form_value(form, "Project");
-            let index = form
-                .fields
-                .iter()
-                .position(|f| matches!(f, Field::Choice { label: "Under", .. }));
-            if let Some(index) = index {
-                form.fields[index] = self.coordinator_choice(&slug, ROOT_ID);
+            let role = Self::new_node(form).role;
+            for field in &mut form.fields {
+                match field {
+                    Field::Choice { label: "Under", .. } => {
+                        *field = self.coordinator_choice(&slug, ROOT_ID);
+                    }
+                    Field::Choice {
+                        label: "Template", ..
+                    } => *field = self.template_choice(&slug, role),
+                    _ => {}
+                }
             }
         }
     }
@@ -4242,6 +4264,64 @@ mod tests {
             }
             press(app, crossterm::event::KeyCode::Right);
             assert_eq!(app.focused_node().unwrap().1, "t-0003");
+        });
+    }
+
+    #[test]
+    fn the_new_thread_form_offers_the_templates_of_its_role() {
+        use crossterm::event::KeyCode;
+        with_app(|app| {
+            crate::project::create(&app.ctx.root, "acme", "", vec![]).unwrap();
+            let dir = app.ctx.config_dir.join("templates");
+            for (name, role) in [("reviewer", "worker"), ("lead", "coordinator")] {
+                std::fs::create_dir_all(dir.join(name)).unwrap();
+                std::fs::write(
+                    dir.join(name).join("TEMPLATE.toml"),
+                    format!("role = \"{role}\"\n"),
+                )
+                .unwrap();
+            }
+            app.new_form(Kind::Thread, "acme", "root");
+            let Some(View::Form(form)) = app.stack.last_mut() else {
+                panic!("no form open");
+            };
+            let at = form
+                .fields
+                .iter()
+                .position(|f| {
+                    matches!(
+                        f,
+                        Field::Choice {
+                            label: "Template",
+                            ..
+                        }
+                    )
+                })
+                .unwrap();
+            assert!(
+                matches!(&form.fields[at], Field::Choice { shown, .. } if shown == &["none", "reviewer"]),
+                "{:?}",
+                form.fields[at]
+            );
+            form.focus = at;
+            press(app, KeyCode::Right);
+            let text = app.render(160, 40).text();
+            assert!(text.contains("reviewer"), "{text}");
+            assert!(text.contains("--template reviewer"), "{text}");
+            let Some(View::Form(form)) = app.stack.last() else {
+                panic!("no form open");
+            };
+            assert_eq!(App::new_node(form).template, "reviewer");
+
+            // The coordinator form offers the coordinator's.
+            press(app, KeyCode::Up);
+            let Some(View::Form(form)) = app.stack.last() else {
+                panic!("no form open");
+            };
+            assert_eq!(form.kind, Kind::Coordinator);
+            assert!(form.fields.iter().any(
+                |f| matches!(f, Field::Choice { label: "Template", shown, .. } if shown == &["none", "lead"])
+            ));
         });
     }
 

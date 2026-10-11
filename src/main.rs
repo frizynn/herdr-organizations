@@ -41,6 +41,7 @@ mod state;
 mod steps;
 mod sweep;
 mod tasks;
+mod templates;
 mod term;
 mod thread;
 mod threads;
