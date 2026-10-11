@@ -390,3 +390,64 @@ fn a_pull_request_the_ticker_has_not_read_has_no_invented_numbers() {
         })
     );
 }
+
+#[test]
+fn template_list_json_is_the_bare_array_web_clients_read() {
+    let fixture = fixture();
+    let scope = Path::new(&fixture.dir()).join("nodes/t-0001");
+    std::fs::create_dir_all(scope.join("memory")).unwrap();
+    std::fs::write(
+        scope.join("INSTRUCTIONS.md"),
+        "# Node instructions\n\nShip small PRs.\n",
+    )
+    .unwrap();
+    let memory = "# Node memory\n\n- Use pnpm.\n";
+    std::fs::write(scope.join("MEMORY.md"), memory).unwrap();
+    fixture.text(&[
+        "template",
+        "save",
+        "demo",
+        "t-0001",
+        "--name",
+        "checkout",
+        "--description",
+        "Checkout lead",
+    ]);
+
+    let listed = fixture.json(&["template", "list", "--project", "demo", "--json"]);
+    let row = json!({
+        "name": "checkout",
+        "scope": "project",
+        "project": "demo",
+        "description": "Checkout lead",
+        "role": "coordinator",
+        "can_spawn": true,
+        "profile": "codex",
+        "harness": "codex",
+        "model": "",
+        "reasoning_effort": "",
+        "permission_profile": "",
+        "rules_chars": "Ship small PRs.".len(),
+        "memory_chars": memory.len(),
+        "updated": listed[0]["updated"],
+        "dir": format!("{}/templates/checkout", fixture.dir()),
+    });
+    assert_eq!(listed, json!([row]));
+    assert!(listed[0]["updated"].as_str().unwrap().ends_with('Z'));
+
+    let mut shown = row;
+    shown["rules"] = "Ship small PRs.\n".into();
+    shown["memory"] = memory.into();
+    shown["memory_files"] = json!([]);
+    assert_eq!(
+        fixture.json(&[
+            "template",
+            "show",
+            "checkout",
+            "--project",
+            "demo",
+            "--json"
+        ]),
+        json!({"schema_version": 1, "template": shown})
+    );
+}
