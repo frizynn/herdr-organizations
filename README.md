@@ -1,66 +1,214 @@
 # Herdr Organizations
 
-Herdr Organizations adds recursive coordinator and worker hierarchies to [Herdr](https://herdr.dev). It is a superset of [Herdr Projects](https://github.com/eliasstravik/herdr-projects) 0.2.34: every command, setting and project file of that release keeps working, with the few changes listed in [Moving from Herdr Projects 0.2.34](docs/getting-started.md#moving-from-herdr-projects-0234), and the organization features sit on top. A project is the virtual root. Local coordinators can create coordinator or worker children at any depth, while workers are leaves. Remote workers remain supported. A remote coordinator with child-spawn permission is refused until a remote CLI bridge is available.
+Herdr Organizations is a [Herdr](https://herdr.dev) plugin that runs a software project as a small team of coding agents. You talk to one coordinator agent. It plans the work, hands each piece to its own agent in its own pane, usually on its own git worktree, and shows you in one place what needs you.
 
-Project instructions and memory flow from the root through a node's ancestors and into that node. Siblings and descendants are excluded. Node creation stores its parent, role, spawn permission, harness profile and task alongside the existing thread lifecycle record.
+It is for people who already run Claude Code, Codex or another agent CLI inside Herdr and want several of them working on one goal without watching every pane. It runs locally on macOS and Linux. It needs no hosted service and no API key of its own.
 
-## Start here
+It is a fork of [Herdr Projects](https://github.com/eliasstravik/herdr-projects) by Elias Stravik. Everything Herdr Projects 0.2.34 does still works, with the few changes listed in [Moving from Herdr Projects 0.2.34](docs/getting-started.md#moving-from-herdr-projects-0234). This fork adds nested coordinators, scoped memory, node templates, an organization popup and a versioned JSON contract that other tools, such as [Nenu](https://github.com/frizynn/nenu), read.
 
-- [Getting started](docs/getting-started.md)
-- [Operations and hierarchy reference](docs/operations.md)
-- [Architecture and design decisions](docs/architecture.md)
-- [Manual validation](docs/manual-test.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
+## How it works
 
-## Quick example
+```text
+you ── chat ──> root coordinator          plans and delegates, never edits code
+                  │
+                  ├── t-0001 worker        own worktree and branch, opens a pull request
+                  ├── t-0002 coordinator   plans a subproject and starts its own children
+                  │     ├── t-0003 worker
+                  │     └── t-0004 worker
+                  └── t-0005 worker        a tab in the project workspace, no repository
 
-```sh
-cargo build --release --locked
-target/release/herdr-organizations configure   # sidebar rows, popup key, progress hooks, /autoproject skill
-target/release/herdr-organizations new "Billing" --repo ~/dev/billing
-target/release/herdr-organizations open billing
+ticker (one background process)
+  watches Herdr events and pull requests ──> inbox, groups, "needs you"
 ```
 
-In the root coordinator pane, describe the outcome. After planning, it can create a coordinator for a large subproject or a worker for a bounded task. The CLI shape is:
+| Piece | What it is |
+| --- | --- |
+| Project | A folder, `~/.herdr-projects/<slug>/`. It holds the goal and settings (`PROJECT.md`), the task list (`TASKS.md`), memory, routines and a record for every thread. |
+| Coordinator | An ordinary agent started in the project folder. `AGENTS.md` tells it that it is the coordinator, and the bundled skill tells it how to work. It talks with you and starts threads. It does not edit code. |
+| Thread, or node | One agent with one task. A worker finishes its task and writes a report that ends with a `## Next` list. A coordinator node plans a larger piece and starts children under itself. A code thread works in its own git worktree on a branch named `hp/<project>/<id>-<title>`. |
+| Memory | `PROJECT.md`, `MEMORY.md` and `memory/` at the root, and `nodes/<id>/` for each node. A node's brief includes the root's context and its ancestors' scopes, never its siblings' or its descendants'. `HANDOFF.md` keeps the coordinator's current objective and next action across restarts. |
+| Ticker | The one background process. It wakes on Herdr events, reconciles at least once a minute, reads each open pull request with `gh` at most every two minutes, copies reports home and leaves inbox items for the coordinator. |
+| What needs you | Every thread is in exactly one group. In order they are waiting on you, ready for review, landing, working, idle and resolved. The popup, Herdr's sidebar, `overview` and `overview --json` show the same groups in that order. |
+| Profiles and templates | A profile is a named launch setup of harness, model, effort and extra flags. A template is a saved node (role, profile name, rules and memory) to start other nodes from. |
 
-```sh
-target/release/herdr-organizations node start billing \
-  --parent root \
-  --role coordinator \
-  --title "Billing API" \
-  --repo ~/dev/billing \
-  --profile codex \
-  --model gpt-5.6 \
-  --reasoning-effort high \
-  --permission-profile workspace-write \
-  --task-file - <<'TASK'
-Plan and implement the billing API. Delegate bounded implementation tasks to children beneath your own node id.
+The plugin code routes no messages and makes no decisions. The coordinator is an agent following a skill. The binary does the mechanics, one deterministic subcommand at a time. Files are the record, so a missed prompt loses nothing. [Operations](docs/operations.md#how-it-works) explains each part in detail.
+
+## Install
+
+You need:
+
+- macOS or Linux, and Herdr 0.9.1 or newer. Both the client and the running server must be 0.9.1 or newer (`herdr status`).
+- Rust and Cargo 1.89 or newer, and a C compiler. The plugin always builds from source. This fork publishes no prebuilt binaries.
+- Git, and an agent CLI that Herdr can start, such as `claude`, `codex`, `opencode`, `gemini` or `cursor`.
+- Optional. `gh`, signed in, to follow and merge pull requests. `ssh` and `rsync` for threads on other machines.
+
+The plugin id is `herdr-projects`, so this plugin replaces an installed Herdr Projects. If you have Herdr Projects installed, follow [Moving from Herdr Projects 0.2.34](docs/getting-started.md#moving-from-herdr-projects-0234) instead. It backs up your projects and stops the old ticker first.
+
+Otherwise, install it from GitHub:
+
+```bash
+herdr plugin install frizynn/herdr-organizations
+```
+
+Herdr's plugin marketplace does not list this repository, because the marketplace leaves out forks. Installing by name works as shown.
+
+To work from a checkout instead, clone it to a folder that stays put and link it:
+
+```bash
+git clone https://github.com/frizynn/herdr-organizations ~/src/herdr-organizations
+cd ~/src/herdr-organizations && sh scripts/install.sh && herdr plugin link .
+```
+
+The build step, `scripts/install.sh`, runs `cargo build --release --locked`. It builds `herdr-organizations` and a `herdr-projects` compatibility binary, which is the same program, and links both into `~/.local/bin`. If that folder is not on your `PATH`, add it and check the setup:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+herdr-organizations doctor
+```
+
+Then run `configure` once:
+
+```bash
+herdr-organizations configure --dry-run   # show what it would change
+herdr-organizations configure
+herdr-organizations sidebar install       # optional, adds the organization counts to Herdr's sidebar
+```
+
+`configure` adds sidebar rows, a tab bar entry and the popup key `prefix+a` to Herdr's config. It installs progress hooks for Claude Code, Codex, Droid, Gemini CLI and Copilot CLI, and links the bundled `autoproject` skill for Claude Code and Codex. `herdr-organizations unconfigure` removes exactly what it added. Reload Herdr's config afterwards (`prefix+shift+r` by default).
+
+## Your first project
+
+1. From a shell pane inside Herdr, create a project and open its coordinator:
+
+   ```bash
+   herdr-organizations new "Billing" --goal "Ship the new billing page" --repo ~/dev/app
+   herdr-organizations open billing
+   ```
+
+   `new` creates `~/.herdr-projects/billing/`. `open` starts your agent in that folder, in the pane you typed it in. You can also press `prefix+a` and then `n` to use the New form of the popup.
+
+2. Tell the coordinator what you want, for example "Add a billing page with an API endpoint, the page itself and end-to-end tests." It restates the goal, proposes threads and waits until you name the ones to start, or say "all".
+
+3. Watch the work. Press `prefix+a` to open the Organizations popup. Threads that wait on you come first. A thread that finishes writes a report with a `## Next` list, and the coordinator summarizes it for you.
+
+4. Review and merge. When a thread's pull request is approved and every check passed, merge it from the popup (`m`), from your own terminal with `herdr-organizations thread merge billing t-0001`, or from Nenu. Once the pull request is merged and the thread's agent is done, the thread is resolved and its worktree and branch are removed. Its report stays in the project folder.
+
+[Getting started](docs/getting-started.md) walks through the same steps with more detail, including trust dialogs and the sidebar.
+
+## Daily use
+
+Most of the time you talk to the coordinator and glance at the popup. Everything else is the same CLI that the coordinator runs.
+
+| Surface | What you do there |
+| --- | --- |
+| Coordinator pane | Ask for work, answer questions, change goals, tasks, memory and settings in chat. |
+| Organizations popup (`prefix+a`) | See what needs you across projects, the project tree, a board of all threads, thread detail and settings. Start projects, coordinators and threads. Merge an approved pull request. |
+| Projects popup (action **projects**) | Tasks, inbox, routines, profiles, safety settings and memory, scoped to the current project. |
+| Herdr's sidebar | Agents grouped by project, with lines such as `needs you · ~55%` or `review · PR #4`. |
+| [Nenu](https://github.com/frizynn/nenu) | The same projects, threads and pull requests from a phone or browser. |
+
+Commands you are likely to use yourself:
+
+| Command | What it does |
+| --- | --- |
+| `herdr-organizations list` | List projects. |
+| `herdr-organizations open <slug>` | Start the project's coordinator, or focus it if one is running. |
+| `herdr-organizations overview [<slug>]` | Threads grouped by what needs you. |
+| `herdr-organizations node list <slug>` | The organization tree, with role, parent and live state. |
+| `herdr-organizations thread show <slug> <id>` | One thread's record, group, note and Next list. |
+| `herdr-organizations thread read <slug> <id>` | What a thread's pane shows now, such as a question or a permission prompt. |
+| `herdr-organizations thread merge <slug> <id>` | Merge the thread's pull request, only if it is open, approved, free of conflicts and every check passed. |
+| `herdr-organizations thread set <slug> <id> --auto-merge on` | Merge automatically once those same conditions hold. `--auto-fix-ci on` prompts the thread about failing checks and review comments. |
+| `herdr-organizations thread resolve <slug> <id>` | Copy the report home, then remove the worktree, the merged branch and the tab. |
+| `herdr-organizations coordinator replace <slug> --profile <name>` | Stop the project's coordinator and start a new one on another profile. |
+| `herdr-organizations template save <slug> <id> --name <name>` | Save a node as a template to start others from. |
+| `herdr-organizations doctor --fix` | Check the setup and repair the plugin's own files. |
+
+The coordinator starts nodes with `node start`. You can run it yourself too:
+
+```bash
+herdr-organizations node start billing --parent root --role coordinator \
+  --title "Billing API" --repo ~/dev/app --task-file - <<'TASK'
+Plan the billing API. Delegate implementation tasks to children under your own node id.
 TASK
 ```
 
-A node's profile is `--profile`, else its parent's, else the project default for its role, and must be on that role's allow-list (`profile list`). `--model`, `--reasoning-effort`, `--permission-profile` and `--raw-agent-arg` add node flags on top; descendants inherit omitted ones from their parent. Use `--no-spawn` for a coordinator that must remain a leaf. `--rules-file <file>` gives the node standing instructions that its descendants inherit; `node rules <slug> <id>` prints them and `--text-file <file>` replaces them. Permission profiles validate the harness argv; they are not OS isolation. `thread start` remains a backward-compatible way to start a worker directly under the project root.
+[Operations](docs/operations.md#commands) lists every command and flag.
 
-A node worth repeating can become a template. `template save billing t-0004 --name api-lead` keeps its role, spawn permission, profile name, rules and memory under the project (`--global` keeps it for every project), and `node start billing --template api-lead --title ... --task-file -` starts a node from it. The flags given to `node start` win, and the memory is copied into the new node. A template stores the profile by name only, so a model or effort worth reusing belongs in a profile (`profile add`). `template list`, `show` and `delete` manage them, and the popup's New coordinator and New thread forms offer the templates of their role. See [Templates](docs/operations.md#templates).
+## Configuration
 
-## Organizations popup, sidebar tokens and dock
+| What | Where it lives | How to change it |
+| --- | --- | --- |
+| Project settings (name, goal, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
+| Agent profiles, and which ones a project may use | `~/.config/herdr-projects/config.toml` | The Projects popup, or `profile add`, `profile allow` and `profile default` at a terminal |
+| Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
+| Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
+| Sidebar rows and the popup key | `~/.config/herdr/config.toml` | `configure` and `sidebar install` |
+| Projects root | `~/.herdr-projects` by default | `--root`, `HERDR_PROJECTS_ROOT`, or `config.toml` |
 
-**Herdr Organizations: launcher** (also the popup key `configure` binds, `prefix+a` by default) opens the Organizations TUI: needs-you across all coordinators, projects with several coordinators nested, a New form for projects, coordinators, threads and workspaces, the project tree, a four-column threads board, thread detail, an in-popup merge confirmation and settings. The process exists only while the popup is open. It reads the state file the ticker writes and never polls Herdr.
+A profile looks like this in `config.toml`:
 
-The ticker is the one resident process. It listens to Herdr events instead of polling, reconciles once a minute, and reports display tokens that Herdr draws in its own sidebar: per coordinator workspace `●need ●working ●review` counts, per agent `$org_task`, and "needs you" in place of "blocked". `herdr-organizations sidebar install` adds the rows that render them without touching your rows or the sidebar headers. An optional dock split shows one coordinator next to its agents from the same state file.
+```toml
+[profiles.deep]
+agent = "codex"
+model = "gpt-5.5"
+effort = "high"
+description = "Hard debugging and design"
+```
 
-The first row holds the tabs Projects, Board and Settings, clickable or cycled with Tab. Keybindings default to the design (`n` new project, `c` coordinator, `t` thread, both under the selected coordinator, `b` board, `m` merge, `s` settings, `/` search, `1`-`9` answer from a thread's detail) and are editable in Settings or `~/.config/herdr-projects/tui.toml`. See [Getting started](docs/getting-started.md#the-organizations-popup).
+Every Herdr agent kind is also a built-in profile of the same name, so `codex` or `claude` work with no config at all. Profiles, allow-lists and safety settings live only in `config.toml`, and the `profile` and `safety` commands that change them refuse to run without a person at a terminal.
 
-The upstream sidebar grouping stays: `configure` writes rows that group agents and spaces by project with a bold head row and a `$hp_sub` line, and the tab bar shows `projects: N need you`. Pane metadata adds node depth, parent, role, tree order and `$org_task`. Existing overview, focus, open, inbox, routines, remote machines and reports continue to use the project root and thread records.
+The safety settings are soft. Agents keep the shell and permissions of their own harness. `can_spawn` and permission profiles are checks in the CLI, not a sandbox. Read [what the safety settings do and don't stop](docs/operations.md#what-the-safety-settings-do-and-dont-stop) and the [security policy](SECURITY.md) before you turn on yolo mode.
 
-Root coordination is event-driven. Every turn loads the organized project digest (`context`); the ticker's `[hp inbox]` nudge waits for an idle coordinator with an empty input box. `inbox consume` prints and archives one bounded batch for clients that want it. `HANDOFF.md` carries compact objective, decisions, active work and next action across Codex or Claude replacements without copying chat transcripts or reports.
+## The JSON contract, and Nenu
 
-## Herdr Projects features included
+Other programs read Herdr Organizations through `--json` output, never through its files. Each document is one JSON object on one line that carries `"schema_version": 1`. The one exception is `template list --json`, which prints a bare array. Adding a field keeps the version. Renaming or removing a field, or changing what it means, raises it. The files inside a project folder are internal and can change without notice.
 
-Everything Herdr Projects 0.2.34 does: agent profiles and allow-lists (`profile`), tasks with owners on profiles and machines (`assignable`, `thread start --from-task`), progress self-reports from every harness (`report`, `progress`, the hooks `configure` installs), thread `read`/`keys`/`next`/`brief`/`stop`, `--kind tab|checkout`, cleanup on resolve and after a merge, `sweep`, `rename`, `set`, `open-url`, `open-file`, yolo mode and trust screens (`safety`), `doctor --fix`, `update` (once this fork publishes release tags), the Projects popup (action **projects**, or `popup`) and the bundled `/autoproject` skill.
+```bash
+herdr-organizations overview --json
+```
 
-## Compatibility
+| Command | Prints |
+| --- | --- |
+| `list --json` | Projects |
+| `new <name> --json` | The new project |
+| `overview [<slug>] --json` | Projects, each with its threads, groups and pull requests |
+| `thread list <slug> --json`, `thread show <slug> <id> --json`, `node list <slug> --json`, `node show <slug> <id> --json` | Threads or nodes |
+| `inbox list <slug> --json` | Inbox items, without marking them seen |
+| `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json` | The result of a pull request action |
+| `template list --json`, `template show <name> --json` | Templates |
 
-The primary package, repository and binary are `herdr-organizations`. Cargo also builds the `herdr-projects` compatibility binary. The plugin id remains `herdr-projects`, while its visible name is **Herdr Organizations**. To replace an installed Herdr Projects, follow [Moving from Herdr Projects 0.2.34](docs/getting-started.md#moving-from-herdr-projects-0234): it backs up, stops the old ticker and uninstalls its registration before linking this checkout. The build step always compiles from source: this fork publishes no prebuilt binaries. Hooks, the tab bar command and `AGENTS.md` keep naming the `herdr-projects` binary, so entries written by upstream keep working. Existing projects remain under `~/.herdr-projects/`, and settings remain under `~/.config/herdr-projects/`. Legacy thread records load as worker nodes below `root`. Loading does not rewrite them. The CLI accepts the existing `HERDR_PROJECTS_ROOT` environment variable and configuration format.
+[docs/json.md](docs/json.md) defines every field.
 
-This fork retains the upstream MIT license and attribution. See [NOTICE](NOTICE).
+[Nenu](https://github.com/frizynn/nenu) is a self-hosted phone and web workbench for Herdr, from the same maintainer. With Herdr Organizations installed, Nenu shows each project as its coordinator's chat with **Threads** and **PRs** tabs, and draws the organization tree the way the Organizations popup draws it. It reads `overview --json`. Actions you take in Nenu run this CLI. `node start` starts a thread or a coordinator, `coordinator replace` swaps the coordinator, `node resolve --close-view` closes a node, and `thread merge` and `thread set` act on pull requests. A merge from Nenu passes the same checks as a merge from your terminal. Nenu finds the binary on its `PATH` and honors `HERDR_PROJECTS_ROOT`. See [Nenu's README](https://github.com/frizynn/nenu#readme) to install it.
+
+## Relation to Herdr Projects, and license
+
+Herdr Organizations started as a fork of [Herdr Projects](https://github.com/eliasstravik/herdr-projects) and includes its 0.2.34 release. These parts come from upstream and work as they did there: projects as folders, the coordinator skill, threads in worktrees, agent profiles and allow-lists, tasks with owners, progress reports and hooks, routines, pull request follow-up, cleanup on resolve and merge, `sweep`, `rename`, safety settings and yolo mode, remote machines over SSH, the Projects popup and the `/autoproject` skill.
+
+This fork adds, as the git history shows:
+
+- recursive nodes, so a coordinator can start its own coordinators and workers, with instructions and memory scoped to each branch of the tree (`node start`, `node rules`)
+- the versioned `--json` contract and guarded pull request actions (`thread merge`, `thread set`)
+- an event-driven ticker, the Organizations popup, the optional dock and organization counts in Herdr's sidebar
+- `coordinator replace`, node templates (`template`) and a History view of resolved work
+
+For compatibility, the plugin id stays `herdr-projects`. Projects stay in `~/.herdr-projects/`, settings in `~/.config/herdr-projects/`, and `HERDR_PROJECTS_ROOT` still works. Projects written by Herdr Projects 0.2.34 load as they are, and their threads show as workers under the root. `herdr-organizations update` needs release tags, which this fork does not publish yet, so update by pulling and rebuilding ([Updating](docs/getting-started.md#updating)).
+
+Herdr Organizations is released under the MIT license, as Herdr Projects is. [LICENSE](LICENSE) keeps the upstream copyright, and [NOTICE](NOTICE) records the fork.
+
+## Documentation and links
+
+| Page | What it covers |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Install, first project, the popup, moving from Herdr Projects, updating, removing |
+| [Operations](docs/operations.md) | How it works, where files live, every command, groups, profiles, templates, safety, routines, cleanup, other machines |
+| [Architecture](docs/architecture.md) | Design decisions, node records, scoped context, the popup and ticker |
+| [JSON contract](docs/json.md) | Every `--json` document and field |
+| [Manual validation](docs/manual-test.md) | Checks that need a real Herdr client |
+| [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md) | Development gates and the security model |
+
+- Herdr: https://herdr.dev
+- Herdr plugin documentation: https://herdr.dev/docs/plugins/
+- Nenu: https://github.com/frizynn/nenu
+- Herdr Projects, the upstream: https://github.com/eliasstravik/herdr-projects

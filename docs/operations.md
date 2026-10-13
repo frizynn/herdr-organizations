@@ -58,6 +58,7 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `context <project> [--peek]` | The digest the coordinator reads every turn. |
 | `assignable <project> [--refresh] [--check OWNER]` | Who TASKS.md tasks may be assigned to (see [Task owners](#task-owners)); `--check` refuses an owner that is not valid. |
 | `coordinator prompt <project> --text-file F` | A sentence to the coordinator (the popup's task keys use it). |
+| `coordinator replace <project> --profile P` | Stop the project's running coordinator and start a new one on profile `P`. The popup's `x` on the project coordinator does the same. |
 | `thread start <project> --title T [--repo PATH] [--kind worktree\|tab\|checkout] [--profile P] [--machine M] [--base REF] --task-file F [--from-task TITLE]` | New thread; `-` reads the task from standard input. `--kind` is the placement; `--profile` is the agent, one the project allows. `--from-task` adds a TASKS.md task's notes and takes `--profile` and `--machine` from its owner. |
 | `thread prompt`, `thread next [--line N \| --add TEXT]`, `thread stop`, `thread restart [--profile P]` | Steer a thread. Prompts are recorded in its task file. |
 | `thread read [--lines N]`, `thread keys [KEY]... [--text T]`, `thread brief` | Answer a thread's pane without going there: print what it shows (a trust dialog, a question menu, a permission prompt), then type text and press keys (`up`, `down`, `enter`, `esc`, `tab`, a digit). `thread keys` refuses a trust screen when `trust_screens` is `user`. `thread brief` sends a brief the ticker has not delivered yet (the ticker waits for a settled, empty input box, counts a brief sent only once the agent starts working, never types it twice, and after three unconfirmed tries leaves an inbox item). |
@@ -67,6 +68,7 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `node start <project> --parent root\|<id> [--role worker\|coordinator] [--template NAME] --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] [--rules-file F] --task-file F` | A node in the tree (`node create` is an alias); `--role` defaults to the template's, else `worker`. `thread start` is the same for a worker under `root`. |
 | `template save <project> <id> --name N [--global] [--description D] [--force]`, `template list [--project P] [--json]`, `template show <name> [--project P] [--json]`, `template delete <name> [--project P]` | [Templates](#templates). |
 | `node restart [--profile P]`, `node prompt`, `node list [--json]`, `node show [--json]`, `node ack`, `node resolve [--keep-worktree \| --close-view]` | Hierarchy-aware lifecycle; `node list` prints the tree in stable preorder. |
+| `node rules <project> <id> [--text-file F]` | Print a node's standing instructions, or replace them. The node and its descendants read them on their next brief or restart. |
 | `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
 | `list [--json]`, `new ... --json`, `overview [project] [--json]` | The project documents of [docs/json.md](json.md). |
 | `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
@@ -158,7 +160,7 @@ A change reaches agents launched after it. Running agents keep the flags they st
 
 ## Agent profiles
 
-A profile is a named launch setup: a harness (any Herdr agent kind), a model, a reasoning effort, extra arguments and a one-line description. The coordinator only ever chooses a profile by name (`thread start --profile deep`, `open --profile claude`), and `context` lists the ones it may use with their descriptions, so it can pick one per task. It can never pass a launch flag itself: `--agent-arg` is gone. Yolo mode still adds the harness's skip-permissions flag on top of a profile's arguments.
+A profile is a named launch setup: a harness (any Herdr agent kind), a model, a reasoning effort, extra arguments and a one-line description. The coordinator only ever chooses a profile by name (`thread start --profile deep`, `open --profile claude`), and `context` lists the ones it may use with their descriptions, so it can pick one per task. `thread start` takes no launch flags (`--agent-arg` is gone). `node start` accepts the [node flags](#node-flags) on top of an allowed profile, and refuses permission or sandbox flags that conflict with a selected permission profile. Yolo mode still adds the harness's skip-permissions flag on top of a profile's arguments.
 
 ```toml
 [profiles.luna]
