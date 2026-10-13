@@ -2,11 +2,13 @@
 
 Other programs, such as a web client, read Herdr Organizations through `--json`. Only these documents are a contract. The files under a project folder (`PROJECT.md`, `threads/*.toml`, `inbox/*.md`, `.state/*.json`, including `.state/ticker.json`) are internal and can change without notice. A reader that uses them directly does so at its own risk.
 
+[Nenu](https://github.com/frizynn/nenu) is one such reader. It reads `overview --json` and `template list --json`, and runs `new --json`, `thread merge --json` and `thread set --json` when a person asks for that action. It treats an unknown `schema_version` like a missing contract, so keep the version honest.
+
 Each document is a single JSON object printed on one line of standard output. A failing command prints its error to standard error and exits non-zero, and prints nothing on standard output.
 
 ## Versioning
 
-Every document starts with `"schema_version": 1`.
+Every document carries `"schema_version": 1`, except the bare array of `template list --json` (see [Template](#template)).
 
 - Adding a field, or a new value for an enumerated field, does not change the version. Readers ignore fields they do not know.
 - Renaming or removing a field, or changing what a field means, increments the version.
