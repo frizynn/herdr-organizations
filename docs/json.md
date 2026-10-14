@@ -29,6 +29,9 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `thread merge <slug> <id> [--method squash/merge/rebase] --json` | `{schema_version, id, pr, merged: true}` |
 | `template list [--project slug] --json` | `[Template]`, a bare array (see [Template](#template)) |
 | `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
+| `project show <slug> --json` | `{schema_version, project: Project + the fields of [Project detail](#project-detail)}` |
+| `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
+| `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
 
@@ -46,6 +49,24 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `status` | `"active"`, `"paused"` or `"archived"` | |
 | `dir` | string | Absolute path of the project folder. |
 | `counts` | object | Group token to number of threads. Groups with no threads are left out. |
+| `icon` | string | The glyph name the user picked, empty when none was picked. |
+| `tone` | string | The colour name the user picked, empty when none was picked. |
+
+`set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
+
+## Project detail
+
+`project show` adds the project's settings and what its threads start from. The texts are the whole files as they are on disk. A thread's brief reads memory within limits (8 KiB per file, 32,000 bytes and 64 files, see [architecture](architecture.md)), so a file shown here can be one a brief leaves out.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `instructions` | string | `PROJECT.md` after its settings: the project's standing instructions. |
+| `memory` | string | `MEMORY.md`, empty when there is none. |
+| `memory_files` | `[{name, text}]` | `memory/*.md` in name order. Symbolic links and hidden files are left out. |
+| `repos` | `[{path, machine}]` | `machine` is empty for this machine. `path` is as it is on that machine. |
+| `coordinator_profile`, `thread_profile` | string | The default profiles. |
+| `max_parallel_threads`, `auto_resolve_days` | number | |
+| `nudge`, `mute` | bool | |
 
 ## Thread
 
@@ -113,6 +134,56 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
 | `body` | string | Empty except for `routine` items. |
 | `seen` | bool | `context` has already shown the item. |
+
+## Task
+
+`task list` reads `TASKS.md` in file order. `tasks` is empty when the file is missing or has no task line.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `list` | string | The `## ` heading above the task, empty above the first heading. |
+| `title` | string | |
+| `owner` | object | Who the task is assigned to, see below. |
+| `thread` | string | The id of the thread running it, empty when none. |
+| `description` | string | The notes indented under the task line, without the indent. |
+
+| Owner field | Type | Meaning |
+| --- | --- | --- |
+| `kind` | `"unassigned"`, `"me"`, `"agent"` or `"person"` | `me` is the user. A bare name that is no profile on this machine, or any other text, is a person. |
+| `profile` | string | An agent's profile. Empty when its machine's coordinator picks one (`(@m1)`), and for an old `(agent → t-0007)`, which runs on the project's `thread_profile`. |
+| `machine` | string | An agent's machine, empty for this machine. |
+| `name` | string | A person's name as written, empty for the other kinds. |
+
+Only the coordinator writes `TASKS.md`. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
+
+```sh
+herdr-organizations coordinator prompt acme --text-file - <<'EOF'
+(from the web client) Please mark as done the task "Fix login" in TASKS.md.
+EOF
+```
+
+`coordinator prompt` fails when the project's session is not reachable or no coordinator can take a prompt, and it prints text, not JSON.
+
+## Routine
+
+`routine list` lists `routines/*.md` in name order. `routine_commands` is whether the project lets routine commands run (`routine_commands` in config.toml, see `safety show`). `broken` lists the routine files that do not parse, with `file` (`routines/<name>.md`) and `error`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | The file name without `.md`. |
+| `trigger` | `"schedule"` or `"pr"` | |
+| `schedule` | string | As written, such as `every 30m` or `daily 09:00` (local time). Empty for `pr`. |
+| `events` | [string] | For `pr`, the pull request events it fires on: all of `opened`, `checks-failed`, `review` and `merged` when the file names none. Empty for `schedule`. |
+| `enabled` | bool | |
+| `command` | string | The command a scheduled routine runs, empty for a routine that only prompts. |
+| `command_status` | `"none"`, `"commands-off"`, `"approved"` or `"unapproved"` | Whether that command runs: there is no command; `routine_commands` is false; it is approved; it is not approved, or was edited since. |
+| `prompt` | string | The body. |
+| `last_run` | string | RFC 3339. When the ticker last ran it, or first saw it, because a routine does not fire the moment its file appears. Empty before that, and for `pr`. |
+| `next_run` | string | RFC 3339. When it is next due; a time at or before now means the next tick runs it. Before the ticker has seen it, one interval from now. Empty for `pr` and for a disabled routine. |
+| `skipped_unhandled` | number | Due runs that added no inbox item because the routine's last item was still unhandled, since the last one that did. |
+| `skipped_no_coordinator` | number | Due runs that did nothing because no coordinator was running, since the last one that ran. |
+
+`routine toggle <slug> <name> --on/--off` enables or disables one and prints text. Approving a command is a person's step at a terminal (`routine approve`), not something a client can do.
 
 ## Template
 
