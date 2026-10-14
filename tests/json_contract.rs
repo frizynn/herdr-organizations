@@ -256,7 +256,9 @@ fn project(fixture: &Fixture) -> Value {
         "goal": "Ship it",
         "status": "active",
         "dir": fixture.dir(),
-        "counts": {"ready-for-review": 1, "resolved": 1}
+        "counts": {"ready-for-review": 1, "resolved": 1},
+        "icon": "",
+        "tone": ""
     })
 }
 
@@ -313,7 +315,9 @@ fn project_list_overview_and_new_share_the_project_shape() {
                 "goal": "",
                 "status": "active",
                 "dir": format!("{}/other", fixture.root),
-                "counts": {}
+                "counts": {},
+                "icon": "",
+                "tone": ""
             },
             "next": format!("{BIN} --root {} open other", fixture.root)
         })
@@ -449,5 +453,260 @@ fn template_list_json_is_the_bare_array_web_clients_read() {
             "--json"
         ]),
         json!({"schema_version": 1, "template": shown})
+    );
+}
+
+fn write(fixture: &Fixture, file: &str, text: &str) {
+    let path = Path::new(&fixture.dir()).join(file);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn project_show_json_is_the_project_with_what_every_thread_receives() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "PROJECT.md",
+        r#"+++
+name = "Demo"
+goal = "Ship it"
+coordinator_profile = "claude"
+thread_profile = "codex"
+max_parallel_threads = 4
+auto_resolve_days = 7
+nudge = true
+mute = false
+
+[[repos]]
+path = "/src/app"
+
+[[repos]]
+path = "/src/api"
+machine = "m1"
++++
+
+# Instructions
+
+Ship small PRs.
+"#,
+    );
+    let index = "# Memory\n\n- [Payments](memory/payments.md): the provider\n";
+    write(&fixture, "MEMORY.md", index);
+    write(&fixture, "memory/release.md", "Release on Tuesdays.\n");
+    write(&fixture, "memory/payments.md", "Use the sandbox keys.\n");
+    write(&fixture, "memory/draft.txt", "not memory");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "/etc/hosts",
+        Path::new(&fixture.dir()).join("memory/linked.md"),
+    )
+    .unwrap();
+
+    let mut expected = project(&fixture);
+    let fields = json!({
+        "instructions": "# Instructions\n\nShip small PRs.\n",
+        "memory": index,
+        "memory_files": [
+            {"name": "payments.md", "text": "Use the sandbox keys.\n"},
+            {"name": "release.md", "text": "Release on Tuesdays.\n"}
+        ],
+        "repos": [
+            {"path": "/src/app", "machine": ""},
+            {"path": "/src/api", "machine": "m1"}
+        ],
+        "coordinator_profile": "claude",
+        "thread_profile": "codex",
+        "max_parallel_threads": 4,
+        "auto_resolve_days": 7,
+        "nudge": true,
+        "mute": false
+    });
+    for (key, value) in fields.as_object().unwrap() {
+        expected[key] = value.clone();
+    }
+    assert_eq!(
+        fixture.json(&["project", "show", "demo", "--json"]),
+        json!({"schema_version": 1, "project": expected})
+    );
+}
+
+#[test]
+fn task_list_json_reads_tasks_md_with_structured_owners() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "TASKS.md",
+        "# Tasks\n\n## Backlog\n- [ ] Write the launch post (me)\n- [ ] Fix login (codex-fast@m1) · t-0001\n  Users on Safari get logged out.\n  See https://example.com/issue/4\n- [ ] Review the contract (Elias)\n- [ ] Call the bank (Priya Rao)\n- [ ] Old style (agent → t-0002)\n- [ ] Tidy imports (claude)\n\n## Later\n- [ ] Price page\n",
+    );
+    let owner = |kind: &str, profile: &str, machine: &str, name: &str| json!({"kind": kind, "profile": profile, "machine": machine, "name": name});
+    let task = |list: &str, title: &str, owner: Value, thread: &str, description: &str| {
+        json!({
+            "list": list,
+            "title": title,
+            "owner": owner,
+            "thread": thread,
+            "description": description
+        })
+    };
+    assert_eq!(
+        fixture.json(&["task", "list", "demo", "--json"]),
+        json!({
+            "schema_version": 1,
+            "project": "demo",
+            "tasks": [
+                task("Backlog", "Write the launch post", owner("me", "", "", ""), "", ""),
+                task(
+                    "Backlog",
+                    "Fix login",
+                    owner("agent", "codex-fast", "m1", ""),
+                    "t-0001",
+                    "Users on Safari get logged out.\nSee https://example.com/issue/4"
+                ),
+                task("Backlog", "Review the contract", owner("person", "", "", "Elias"), "", ""),
+                task("Backlog", "Call the bank", owner("person", "", "", "Priya Rao"), "", ""),
+                task("Backlog", "Old style", owner("agent", "", "", ""), "t-0002", ""),
+                task("Backlog", "Tidy imports", owner("agent", "claude", "", ""), "", ""),
+                task("Later", "Price page", owner("unassigned", "", "", ""), "", "")
+            ]
+        })
+    );
+    assert_eq!(
+        fixture.text(&["task", "list", "demo"]),
+        "Backlog\tWrite the launch post\tme\t\nBacklog\tFix login\tcodex-fast@m1\tt-0001\nBacklog\tReview the contract\tElias\t\nBacklog\tCall the bank\tPriya Rao\t\nBacklog\tOld style\tdefault profile\tt-0002\nBacklog\tTidy imports\tclaude\t\nLater\tPrice page\t\t\n"
+    );
+
+    std::fs::remove_file(Path::new(&fixture.dir()).join("TASKS.md")).unwrap();
+    assert_eq!(
+        fixture.json(&["task", "list", "demo", "--json"]),
+        json!({"schema_version": 1, "project": "demo", "tasks": []})
+    );
+}
+
+#[test]
+fn routine_list_json_has_triggers_command_status_and_runs() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "routines/pr-followup.md",
+        "+++\non = \"pr\"\nevents = [\"checks-failed\", \"review\"]\n+++\n\nFix what the reviewers asked.\n",
+    );
+    write(
+        &fixture,
+        "routines/standup.md",
+        "+++\nschedule = \"every 2h\"\n+++\nSummarize the open threads.\n",
+    );
+    write(
+        &fixture,
+        "routines/deps.md",
+        "+++\nschedule = \"daily 03:00\"\ncommand = \"cargo outdated\"\nenabled = false\n+++\nReport outdated crates.\n",
+    );
+    write(&fixture, "routines/broken.md", "no front matter\n");
+    write(
+        &fixture,
+        ".state/ticker.json",
+        &json!({"routines": {
+            "standup": {"last_run": "2026-10-01T09:00:00.25Z", "skipped": 1, "no_coordinator": 2}
+        }})
+        .to_string(),
+    );
+    let routine = |name: &str, trigger: &str, schedule: &str, events: Value, enabled: bool| {
+        json!({
+            "name": name,
+            "trigger": trigger,
+            "schedule": schedule,
+            "events": events,
+            "enabled": enabled,
+            "command": "",
+            "command_status": "none",
+            "prompt": "",
+            "last_run": "",
+            "next_run": "",
+            "skipped_unhandled": 0,
+            "skipped_no_coordinator": 0
+        })
+    };
+    let mut deps = routine("deps", "schedule", "daily 03:00", json!([]), false);
+    deps["command"] = "cargo outdated".into();
+    deps["command_status"] = "commands-off".into();
+    deps["prompt"] = "Report outdated crates.".into();
+    let mut followup = routine(
+        "pr-followup",
+        "pr",
+        "",
+        json!(["checks-failed", "review"]),
+        true,
+    );
+    followup["prompt"] = "Fix what the reviewers asked.".into();
+    let mut standup = routine("standup", "schedule", "every 2h", json!([]), true);
+    standup["prompt"] = "Summarize the open threads.".into();
+    standup["last_run"] = "2026-10-01T09:00:00Z".into();
+    standup["next_run"] = "2026-10-01T11:00:00Z".into();
+    standup["skipped_unhandled"] = 1.into();
+    standup["skipped_no_coordinator"] = 2.into();
+    assert_eq!(
+        fixture.json(&["routine", "list", "demo", "--json"]),
+        json!({
+            "schema_version": 1,
+            "project": "demo",
+            "routine_commands": false,
+            "routines": [deps, followup, standup],
+            "broken": [{
+                "file": "routines/broken.md",
+                "error": "a routine must start with a `+++` line"
+            }]
+        })
+    );
+    let text = fixture.text(&["routine", "list", "demo"]);
+    assert!(
+        text.starts_with("deps\tdaily 03:00\tdisabled\tcommand: routine_commands is false, so it does not run\tlast never · next - (disabled)\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn icon_and_tone_are_set_by_cli_and_absent_until_then() {
+    let fixture = fixture();
+    let project_md = Path::new(&fixture.dir()).join("PROJECT.md");
+    let before = std::fs::read_to_string(&project_md).unwrap();
+    assert!(
+        !before.contains("icon") && !before.contains("tone"),
+        "{before}"
+    );
+
+    fixture.text(&["set", "demo", "icon", "globe"]);
+    fixture.text(&["set", "demo", "tone", "teal"]);
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(
+        (
+            &listed["projects"][0]["icon"],
+            &listed["projects"][0]["tone"]
+        ),
+        (&json!("globe"), &json!("teal"))
+    );
+    assert_eq!(
+        fixture.json(&["project", "show", "demo", "--json"])["project"]["icon"],
+        "globe"
+    );
+
+    let refused = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(fixture.args(&["set", "demo", "icon", "Globe!"]))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+
+    fixture.text(&["set", "demo", "icon", ""]);
+    let after = std::fs::read_to_string(&project_md).unwrap();
+    assert!(!after.contains("icon"), "{after}");
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(
+        (
+            &listed["projects"][0]["icon"],
+            &listed["projects"][0]["tone"]
+        ),
+        (&json!(""), &json!("teal"))
     );
 }
