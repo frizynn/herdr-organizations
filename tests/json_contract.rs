@@ -614,7 +614,9 @@ fn routine_list_json_has_triggers_command_status_and_runs() {
         &fixture,
         ".state/ticker.json",
         &json!({"routines": {
-            "standup": {"last_run": "2026-10-01T09:00:00.25Z", "skipped": 1, "no_coordinator": 2}
+            "standup": {"last_run": "2026-10-01T09:00:00.25Z", "skipped": 1, "no_coordinator": 2},
+            // Left from when pr-followup was a scheduled routine.
+            "pr-followup": {"last_run": "2026-09-01T09:00:00Z", "skipped": 3}
         }})
         .to_string(),
     );

@@ -445,16 +445,20 @@ pub fn list_json(
     let routines: Vec<_> = routines
         .iter()
         .map(|r| {
-            let state = states.get(&r.name).cloned().unwrap_or_default();
-            let last = state.last_run.parse::<jiff::Timestamp>().ok();
-            let (trigger, schedule, events, next) = match &r.trigger {
-                Trigger::Schedule(schedule) => (
+            let (trigger, schedule, events, state) = match &r.trigger {
+                Trigger::Schedule(_) => (
                     "schedule",
                     r.schedule_text.as_str(),
                     &[][..],
-                    next_run(schedule, last, &now).filter(|_| r.enabled),
+                    states.get(&r.name).cloned().unwrap_or_default(),
                 ),
-                Trigger::Pr(events) => ("pr", "", events.as_slice(), None),
+                // Fired by the pull request poll, which keeps no run state.
+                Trigger::Pr(events) => ("pr", "", events.as_slice(), State::default()),
+            };
+            let last = state.last_run.parse::<jiff::Timestamp>().ok();
+            let next = match &r.trigger {
+                Trigger::Schedule(schedule) if r.enabled => next_run(schedule, last, &now),
+                _ => None,
             };
             serde_json::json!({
                 "name": r.name,
