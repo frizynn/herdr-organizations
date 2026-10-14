@@ -181,6 +181,8 @@ pub struct ProjectJson {
     pub dir: String,
     /// Group token -> number of threads, for groups with at least one.
     pub counts: std::collections::BTreeMap<&'static str, usize>,
+    pub icon: String,
+    pub tone: String,
 }
 
 pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
@@ -198,7 +200,125 @@ pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
             .into_iter()
             .map(|(group, n)| (group.token(), n))
             .collect(),
+        icon: settings.icon,
+        tone: settings.tone,
     }
+}
+
+/// `project show --json` (docs/json.md): the project, its settings, and what
+/// every thread receives from it: the instructions and the memory.
+#[derive(Serialize)]
+struct ProjectShowJson {
+    #[serde(flatten)]
+    project: ProjectJson,
+    instructions: String,
+    memory: String,
+    memory_files: Vec<MemoryFileJson>,
+    repos: Vec<RepoJson>,
+    coordinator_profile: String,
+    thread_profile: String,
+    max_parallel_threads: u32,
+    auto_resolve_days: u32,
+    nudge: bool,
+    mute: bool,
+}
+
+#[derive(Serialize)]
+struct MemoryFileJson {
+    name: String,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct RepoJson {
+    path: String,
+    /// Empty for this machine.
+    machine: String,
+}
+
+fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
+    let project = Project::load(&ctx.root, slug)?;
+    let (settings, instructions) = project.read_project_md()?;
+    let memory_dir = project.dir().join("memory");
+    let memory_files = project::md_files(&memory_dir)
+        .into_iter()
+        .filter_map(|name| {
+            let text = std::fs::read_to_string(memory_dir.join(&name)).ok()?;
+            Some(MemoryFileJson { name, text })
+        })
+        .collect();
+    Ok(ProjectShowJson {
+        project: project_json(&project, &threads::rows(ctx, &project)),
+        instructions,
+        memory: std::fs::read_to_string(project.dir().join("MEMORY.md")).unwrap_or_default(),
+        memory_files,
+        repos: settings
+            .repos
+            .into_iter()
+            .map(|r| RepoJson {
+                path: r.path,
+                machine: r.machine.unwrap_or_default(),
+            })
+            .collect(),
+        coordinator_profile: settings.coordinator_profile,
+        thread_profile: settings.thread_profile,
+        max_parallel_threads: settings.max_parallel_threads,
+        auto_resolve_days: settings.auto_resolve_days,
+        nudge: settings.nudge,
+        mute: settings.mute,
+    })
+}
+
+/// `project show [--json]`: the JSON document, or one `key<TAB>value` line
+/// per field, with each text as its size.
+pub fn print_project_show(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
+    let shown = project_show(ctx, slug)?;
+    if json {
+        return threads::print_json(&serde_json::json!({
+            "schema_version": threads::JSON_SCHEMA_VERSION,
+            "project": shown,
+        }));
+    }
+    let size = |text: &str| format!("{} characters", text.chars().count());
+    let memory = std::iter::once(format!("MEMORY.md {}", size(&shown.memory)))
+        .chain(
+            shown
+                .memory_files
+                .iter()
+                .map(|f| format!("memory/{} {}", f.name, size(&f.text))),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let repos = shown
+        .repos
+        .iter()
+        .map(|r| match r.machine.as_str() {
+            "" => r.path.clone(),
+            machine => format!("{}@{machine}", r.path),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let p = &shown.project;
+    for (key, value) in [
+        ("slug", p.slug.clone()),
+        ("name", p.name.clone()),
+        ("status", p.status.to_string()),
+        ("goal", p.goal.clone()),
+        ("icon", p.icon.clone()),
+        ("tone", p.tone.clone()),
+        ("coordinator_profile", shown.coordinator_profile.clone()),
+        ("thread_profile", shown.thread_profile.clone()),
+        (
+            "max_parallel_threads",
+            shown.max_parallel_threads.to_string(),
+        ),
+        ("repos", repos),
+        ("instructions", size(&shown.instructions)),
+        ("memory", memory),
+    ] {
+        println!("{key}\t{value}");
+    }
+    Ok(())
 }
 
 /// `overview --json`: never asks on a terminal. Without a slug it is the

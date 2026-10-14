@@ -139,7 +139,7 @@ TASK
 
 | What | Where it lives | How to change it |
 | --- | --- | --- |
-| Project settings (name, goal, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
+| Project settings (name, goal, icon, tone, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
 | Agent profiles, and which ones a project may use | `~/.config/herdr-projects/config.toml` | The Projects popup, or `profile add`, `profile allow` and `profile default` at a terminal |
 | Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
 | Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
@@ -177,6 +177,9 @@ herdr-organizations overview --json
 | `inbox list <slug> --json` | Inbox items, without marking them seen |
 | `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json` | The result of a pull request action |
 | `template list --json`, `template show <name> --json` | Templates |
+| `project show <slug> --json` | A project's settings, repos, instructions and memory |
+| `task list <slug> --json` | The tasks in `TASKS.md`, with owners and threads |
+| `routine list <slug> --json` | Routines with their schedule, command status and last and next run |
 
 [docs/json.md](docs/json.md) defines every field.
 

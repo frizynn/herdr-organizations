@@ -155,6 +155,12 @@ pub struct Settings {
     pub nudge: bool,
     /// Silences every notification for the project except errors.
     pub mute: bool,
+    /// The project's glyph and colour names in a client such as Nenu. Empty
+    /// lets the client pick from the slug; `new` writes neither.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tone: String,
     pub repos: Vec<Repo>,
 }
 
@@ -172,6 +178,8 @@ impl Default for Settings {
             // merges with half-typed text (docs/herdr-notes.md, stage 2).
             nudge: true,
             mute: false,
+            icon: String::new(),
+            tone: String::new(),
             repos: Vec::new(),
         }
     }
@@ -544,6 +552,22 @@ pub fn load_safety_layers_from(
         }
     }
     Ok((default, own))
+}
+
+/// The `*.md` files directly in `dir` that are regular files, not links, in
+/// name order; hidden ones are left out, and a missing `dir` has none.
+pub fn md_files(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".md") && !n.starts_with('.'))
+        .filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok_and(|m| m.is_file()))
+        .collect();
+    files.sort();
+    files
 }
 
 /// Slugs of the projects in `root`: folders that contain `PROJECT.md`. Entries

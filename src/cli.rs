@@ -158,6 +158,16 @@ enum Command {
         #[command(subcommand)]
         command: RoutineCommand,
     },
+    /// The project's settings and what every thread receives from it
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// TASKS.md, which only the coordinator writes
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Pause a project: the ticker skips it and `thread start` is refused
     Pause { slug: String },
     /// Make a paused project active again
@@ -248,7 +258,7 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Change one setting in PROJECT.md (name, goal, coordinator_profile, thread_profile, max_parallel_threads, auto_resolve_days, nudge, mute, repos.add, repos.remove)
+    /// Change one setting in PROJECT.md (name, goal, icon, tone, coordinator_profile, thread_profile, max_parallel_threads, auto_resolve_days, nudge, mute, repos.add, repos.remove)
     Set {
         slug: String,
         key: String,
@@ -739,7 +749,34 @@ enum RoutineCommand {
     /// Approve a routine's command (a person at a terminal only)
     Approve { slug: String, name: String },
     /// List routines with their approval status
-    List { slug: String },
+    List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommand {
+    /// Settings, repos, instructions and memory
+    Show {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskCommand {
+    /// List the tasks; ask the coordinator to change them (`coordinator prompt`)
+    List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The typed fields of a profile, for `add` and `edit`.
@@ -1479,13 +1516,26 @@ pub fn run() -> Result<()> {
                 let project = Project::load(&ctx.root, &slug)?;
                 routine::approve(&ctx.config_dir, &project, &name)
             }
-            RoutineCommand::List { slug } => {
+            RoutineCommand::List { slug, json } => {
                 let project = Project::load(&ctx.root, &slug)?;
                 let commands = project.safety(&ctx.config_dir)?.routine_commands;
+                if json {
+                    return threads::print_json(&routine::list_json(
+                        &ctx.config_dir,
+                        &project,
+                        commands,
+                    ));
+                }
                 routine::print_list(&ctx.config_dir, &project, commands);
                 Ok(())
             }
         },
+        Command::Project {
+            command: ProjectCommand::Show { slug, json },
+        } => overview::print_project_show(&ctx, &slug, json),
+        Command::Task {
+            command: TaskCommand::List { slug, json },
+        } => crate::tasks::print_list(&ctx, &slug, json),
         Command::Pause { slug } => lifecycle::set_status(&ctx, &slug, Status::Paused),
         Command::Resume { slug } => {
             if Project::load(&ctx.root, &slug)?.status() == Status::Archived {
