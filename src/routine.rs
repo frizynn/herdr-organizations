@@ -263,20 +263,8 @@ pub fn parse(name: &str, text: &str) -> Result<Routine> {
 pub fn load_all(project: &Project) -> (Vec<Routine>, Vec<Broken>) {
     let mut routines = Vec::new();
     let mut broken = Vec::new();
-    let Ok(entries) = std::fs::read_dir(project.dir().join("routines")) else {
-        return (routines, broken);
-    };
-    let mut files: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.ends_with(".md") && !n.starts_with('.'))
-        .collect();
-    files.sort();
-    for file in files {
+    for file in project::md_files(&project.dir().join("routines")) {
         let path = project.dir().join("routines").join(&file);
-        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-            continue;
-        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -397,6 +385,31 @@ pub fn approve(config_dir: &Path, project: &Project, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether a routine's command runs, as the JSON contract's `command_status`
+/// token and as `routine list` words it.
+fn command_status(
+    config_dir: &Path,
+    project: &Project,
+    routine: &Routine,
+    routine_commands: bool,
+) -> (&'static str, &'static str) {
+    if routine.command.is_empty() {
+        ("none", "prompt only")
+    } else if !routine_commands {
+        (
+            "commands-off",
+            "command: routine_commands is false, so it does not run",
+        )
+    } else if is_approved(config_dir, project, routine) {
+        ("approved", "command: approved")
+    } else {
+        (
+            "unapproved",
+            "command: NOT approved (or edited since approval)",
+        )
+    }
+}
+
 pub fn print_list(config_dir: &Path, project: &Project, routine_commands: bool) {
     let (routines, broken) = load_all(project);
     let states = crate::steps::load_state(project).routines;
@@ -405,15 +418,7 @@ pub fn print_list(config_dir: &Path, project: &Project, routine_commands: bool) 
         println!("no routines");
     }
     for r in &routines {
-        let kind = if r.command.is_empty() {
-            "prompt only".to_string()
-        } else if !routine_commands {
-            "command: routine_commands is false, so it does not run".to_string()
-        } else if is_approved(config_dir, project, r) {
-            "command: approved".to_string()
-        } else {
-            "command: NOT approved (or edited since approval)".to_string()
-        };
+        let (_, kind) = command_status(config_dir, project, r, routine_commands);
         let when = when_text(r, states.get(&r.name), &now);
         println!(
             "{}\t{}\t{}\t{kind}\t{when}",
@@ -425,6 +430,59 @@ pub fn print_list(config_dir: &Path, project: &Project, routine_commands: bool) 
     for b in &broken {
         println!("{}\tconfig-error: {}", b.file, b.error);
     }
+}
+
+/// `routine list --json` (docs/json.md).
+pub fn list_json(
+    config_dir: &Path,
+    project: &Project,
+    routine_commands: bool,
+) -> serde_json::Value {
+    let (routines, broken) = load_all(project);
+    let states = crate::steps::load_state(project).routines;
+    let now = jiff::Zoned::now();
+    let seconds = |t: jiff::Timestamp| t.round(jiff::Unit::Second).unwrap_or(t).to_string();
+    let routines: Vec<_> = routines
+        .iter()
+        .map(|r| {
+            let state = states.get(&r.name).cloned().unwrap_or_default();
+            let last = state.last_run.parse::<jiff::Timestamp>().ok();
+            let (trigger, schedule, events, next) = match &r.trigger {
+                Trigger::Schedule(schedule) => (
+                    "schedule",
+                    r.schedule_text.as_str(),
+                    &[][..],
+                    next_run(schedule, last, &now).filter(|_| r.enabled),
+                ),
+                Trigger::Pr(events) => ("pr", "", events.as_slice(), None),
+            };
+            serde_json::json!({
+                "name": r.name,
+                "trigger": trigger,
+                "schedule": schedule,
+                "events": events,
+                "enabled": r.enabled,
+                "command": r.command,
+                "command_status": command_status(config_dir, project, r, routine_commands).0,
+                "prompt": r.prompt,
+                "last_run": last.map(seconds).unwrap_or_default(),
+                "next_run": next.map(seconds).unwrap_or_default(),
+                "skipped_unhandled": state.skipped,
+                "skipped_no_coordinator": state.no_coordinator,
+            })
+        })
+        .collect();
+    let broken: Vec<_> = broken
+        .iter()
+        .map(|b| serde_json::json!({ "file": b.file, "error": b.error }))
+        .collect();
+    serde_json::json!({
+        "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "routine_commands": routine_commands,
+        "routines": routines,
+        "broken": broken,
+    })
 }
 
 // ---------------------------------------------------------------- running

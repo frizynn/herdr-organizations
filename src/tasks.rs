@@ -227,6 +227,58 @@ pub fn read(project_dir: &Path) -> String {
     std::fs::read_to_string(project_dir.join("TASKS.md")).unwrap_or_default()
 }
 
+/// `task list [--json]`: the JSON document, or one
+/// `list<TAB>title<TAB>owner<TAB>thread` line per task.
+pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()> {
+    let project = crate::project::Project::load(&ctx.root, slug)?;
+    let tasks = parse(&read(&project.dir()));
+    if json {
+        let config = crate::profiles::load(&ctx.config_dir)?;
+        let is_profile = |p: &str| config.get(p).is_some();
+        return crate::threads::print_json(&serde_json::json!({
+            "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+            "project": project.slug,
+            "tasks": tasks.iter().map(|t| to_json(t, is_profile)).collect::<Vec<_>>(),
+        }));
+    }
+    for t in &tasks {
+        println!(
+            "{}\t{}\t{}\t{}",
+            t.list,
+            t.title,
+            t.owner,
+            t.thread.as_deref().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// A task in the `task list --json` contract (docs/json.md). `is_profile`
+/// tells a bare name that is a profile from a person's.
+pub fn to_json(task: &Task, is_profile: impl Fn(&str) -> bool) -> serde_json::Value {
+    let person = task.owner.is_person(is_profile);
+    let (kind, profile, machine) = match &task.owner {
+        Owner::Unassigned => ("unassigned", None, None),
+        Owner::Me => ("me", None, None),
+        Owner::Agent { profile, machine } if !person => {
+            ("agent", profile.as_deref(), machine.as_deref())
+        }
+        Owner::Agent { .. } | Owner::Person(_) => ("person", None, None),
+    };
+    serde_json::json!({
+        "list": task.list,
+        "title": task.title,
+        "owner": {
+            "kind": kind,
+            "profile": profile.unwrap_or_default(),
+            "machine": machine.unwrap_or_default(),
+            "name": if person { task.owner.to_string() } else { String::new() },
+        },
+        "thread": task.thread.as_deref().unwrap_or_default(),
+        "description": task.description,
+    })
+}
+
 /// TASKS.md for `hp context`: every description folded into one line, so a
 /// long body costs a few tokens; the coordinator reads the file for the rest.
 pub fn compact(text: &str) -> String {

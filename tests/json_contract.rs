@@ -529,6 +529,14 @@ Ship small PRs.
         fixture.json(&["project", "show", "demo", "--json"]),
         json!({"schema_version": 1, "project": expected})
     );
+    let text = fixture.text(&["project", "show", "demo"]);
+    assert!(
+        text.ends_with(&format!(
+            "repos\t/src/app, /src/api@m1\ninstructions\t32 characters\nmemory\tMEMORY.md {} characters, memory/payments.md 22 characters, memory/release.md 21 characters\n",
+            index.len()
+        )),
+        "{text}"
+    );
 }
 
 #[test]

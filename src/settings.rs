@@ -11,9 +11,11 @@ use crate::paths::Ctx;
 use crate::project::{self, Project, Settings};
 
 /// The keys `set` accepts, with what they hold.
-pub const KEYS: [(&str, &str); 10] = [
+pub const KEYS: [(&str, &str); 12] = [
     ("name", "text"),
     ("goal", "text"),
+    ("icon", "glyph name, empty for the client's pick"),
+    ("tone", "colour name, empty for the client's pick"),
     ("coordinator_profile", "profile name"),
     ("thread_profile", "profile name"),
     ("max_parallel_threads", "number"),
@@ -114,6 +116,17 @@ pub fn set_in(text: &str, key: &str, value: &str) -> Result<String> {
             doc[key] = toml_edit::value(n);
         }
         "nudge" | "mute" => doc[key] = toml_edit::value(parse_bool(value)?),
+        "icon" | "tone" if value.is_empty() => {
+            doc.remove(key);
+        }
+        "icon" | "tone" => {
+            project::validate_slug(value).map_err(|_| {
+                anyhow::anyhow!(
+                    "`{value}` is not a {key} name (lower-case letters, digits and hyphens)"
+                )
+            })?;
+            doc[key] = toml_edit::value(value);
+        }
         "repos.add" => {
             let repo = project::parse_repo_arg(value);
             if repo.path.is_empty() {
