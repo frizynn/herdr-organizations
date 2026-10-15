@@ -178,8 +178,9 @@ fn safe_ref(name: &str) -> Option<&str> {
 }
 
 /// The actions a client offers for a thread's pull request as `summary`
-/// describes it, most pressing first: the requests it calls for, then
-/// `merge` when `thread merge` would merge.
+/// describes it, most pressing first: `merge` when `thread merge` would merge
+/// (its checks pass, it has no conflict and its review approved it, so only
+/// comments can be left, often a bot's), then the requests it calls for.
 pub fn pr_actions(t: &Thread, summary: &pr::Summary) -> Vec<&'static str> {
     if t.status != Status::Open {
         return Vec::new();
@@ -190,7 +191,7 @@ pub fn pr_actions(t: &Thread, summary: &pr::Summary) -> Vec<&'static str> {
         .map(Request::token)
         .collect();
     if threads::merge_blocker(t, summary).is_none() {
-        actions.push("merge");
+        actions.insert(0, "merge");
     }
     actions
 }
@@ -632,6 +633,18 @@ mod tests {
         assert_eq!(
             pr_actions(&t, &summary(|s| s.review_decision = "APPROVED".into())),
             ["merge"]
+        );
+        // An approved, mergeable pull request with a comment (a bot's, say)
+        // offers merge first: its review already passed.
+        assert_eq!(
+            pr_actions(
+                &t,
+                &summary(|s| {
+                    s.review_decision = "APPROVED".into();
+                    s.comment_count = 1;
+                })
+            ),
+            ["merge", "address-comments"]
         );
         assert!(pr_actions(&t, &quiet).is_empty());
         let resolved = Thread {
