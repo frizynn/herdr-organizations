@@ -339,6 +339,30 @@ fn replace_starts_the_new_coordinator_on_the_chosen_harness_model_and_effort() {
         error.contains("--profile") && error.contains("--harness"),
         "{error}"
     );
+    // A choice the project refuses stops nothing.
+    let error = fixture.refused(&["coordinator", "replace", "acme", "--harness", "codex"]);
+    assert!(
+        error.contains("profile `codex` is not allowed for the coordinator"),
+        "{error}"
+    );
+    let error = fixture.refused(&[
+        "coordinator",
+        "replace",
+        "acme",
+        "--harness",
+        "claude",
+        "--reasoning-effort",
+        "ultra",
+    ]);
+    assert!(error.contains("effort `ultra` is not one of"), "{error}");
+    assert!(
+        !fixture
+            .herdr_calls()
+            .iter()
+            .any(|c| c.starts_with("pane close")),
+        "{:#?}",
+        fixture.herdr_calls()
+    );
     let message = fixture.ok(&[
         "coordinator",
         "replace",
