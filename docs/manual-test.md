@@ -72,6 +72,16 @@ Open **Herdr Organizations: launcher** (or the bound key) in a disposable sessio
 
 Record the Herdr client and server versions, operating system, harness versions, and any client-only limitations with results.
 
+## Task links and drift
+
+In a disposable root, with a project whose `TASKS.md` has a task:
+
+1. `thread start demo --title T --task-file - --from-task "<title>"`: the task's line ends with ` · t-000N` and no other byte of `TASKS.md` changed; `thread show demo t-000N --json` has `"task": "<title>"` and `"task_origin": "task"`. Repeat with `node start demo --parent root ... --from-task`.
+2. Give a second task the same title: `--from-task` is refused and no thread record is created.
+3. `thread resolve` the thread while its task is open: `inbox list demo --json` has one `task` item for it.
+4. Write a `HANDOFF.md` over 8,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `handoff-over-limit`, and `doctor` warns.
+5. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: once the ticker has run, `thread show --json` reports `MERGED`.
+
 ## 0.2.0: the Herdr-native redesign
 
 Checked on 2026-09-23 in a scratch `hp-dev` session (herdr 0.9.1, macOS, Claude Code 2.1.280). "Builder" means the builder ran it and read the result; "client-witnessed" needs a person looking at an attached Herdr client.

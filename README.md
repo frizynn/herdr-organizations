@@ -195,6 +195,7 @@ This fork adds, as the git history shows:
 - the versioned `--json` contract and guarded pull request actions (`thread merge`, `thread set`)
 - an event-driven ticker, the Organizations popup, the optional dock and organization counts in Herdr's sidebar
 - `coordinator replace`, node templates (`template`) and a History view of resolved work
+- tracking that does not rely on the coordinator's prompt: `--from-task` links a task and its thread, resolving a thread whose task is still open leaves an inbox item, and `context` lists the drift between `TASKS.md`, `HANDOFF.md` and the thread records
 
 For compatibility, the plugin id stays `herdr-projects`. Projects stay in `~/.herdr-projects/`, settings in `~/.config/herdr-projects/`, and `HERDR_PROJECTS_ROOT` still works. Projects written by Herdr Projects 0.2.34 load as they are, and their threads show as workers under the root. `herdr-organizations update` needs release tags, which this fork does not publish yet, so update by pulling and rebuilding ([Updating](docs/getting-started.md#updating)).
 

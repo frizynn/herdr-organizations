@@ -96,7 +96,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `created`, `updated`, `last_state_change` | string | RFC 3339 timestamps, or empty. |
 | `last_state` | string | The agent state the ticker last recorded. |
 | `error` | string | Why the start failed, when `status` is `failed`. |
-| `resolved_reason` | string | `merged`, `auto` or empty. |
+| `resolved_reason` | string | `manual`, `merged`, `auto` or empty. |
 | `auto_fix_ci`, `auto_merge` | bool | The pull request automation flags. See below. |
 | `pr` | object or `null` | `null` when the thread's report has no valid `PR:` line. |
 | `origin` | string | The repository's remote URL, empty without one. |
@@ -105,10 +105,14 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `next` | [string] | The `## Next` list of its report, then lines the coordinator added. |
 | `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. |
 | `library` | string | Absolute path of the folder for files it produced. |
+| `task` | string | The title of the `TASKS.md` task it was delegated from (`--from-task`), as written there when it started. Empty for a thread started without one. |
+| `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 
 ## Pull request
 
 The ticker reads each open thread's pull request with `gh` at most every two minutes. Every value here can therefore be up to about two minutes old. `thread merge` does not use these values. It reads the pull request again first.
+
+A resolved thread keeps the values it had when it was resolved. When its `state` was still `OPEN`, the ticker reads its `state` and `review` again once an hour, up to 20 such threads an hour, until GitHub reports something else. The other fields stay as they were.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -128,7 +132,7 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | string | Starts with a UTC timestamp, so ids sort oldest first. |
-| `kind` | string | `thread-state`, `pr`, `routine`, `routine-approval`, `outage`, `session`, `config-error`, `rename` or `space`. |
+| `kind` | string | `thread-state`, `pr`, `task`, `routine`, `routine-approval`, `outage`, `session`, `config-error`, `rename` or `space`. A `task` item means a thread was resolved while `TASKS.md` still has a task open on it; its `subject` is the thread id. |
 | `subject` | string | A thread id, routine name or machine label. |
 | `created` | string | RFC 3339 timestamp. |
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
@@ -154,7 +158,7 @@ The ticker reads each open thread's pull request with `gh` at most every two min
 | `machine` | string | An agent's machine, empty for this machine. |
 | `name` | string | A person's name as written, empty for the other kinds. |
 
-Only the coordinator writes `TASKS.md`. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
+Only the coordinator writes `TASKS.md`, with one exception: `thread start` and `node start` with `--from-task` append ` · <thread id>` to that task's line, under the project's lock. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
 
 ```sh
 herdr-organizations coordinator prompt acme --text-file - <<'EOF'
