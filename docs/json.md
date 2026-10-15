@@ -2,7 +2,7 @@
 
 Other programs, such as a web client, read Herdr Organizations through `--json`. Only these documents are a contract. The files under a project folder (`PROJECT.md`, `threads/*.toml`, `inbox/*.md`, `.state/*.json`, including `.state/ticker.json`) are internal and can change without notice. A reader that uses them directly does so at its own risk.
 
-[Nenu](https://github.com/frizynn/nenu) is one such reader. It reads `overview --json` and `template list --json`, and runs `new --json`, `thread merge --json`, `thread set --json`, `thread pr-action --json` and `thread pr-create --json` when a person asks for that action. It treats an unknown `schema_version` like a missing contract, so keep the version honest.
+[Nenu](https://github.com/frizynn/nenu) is one such reader. It reads `overview --json`, `template list --json` and `profile list --project <slug> --json`, and runs `new --json`, `thread merge --json`, `thread set --json`, `thread pr-action --json` and `thread pr-create --json` when a person asks for that action. It treats an unknown `schema_version` like a missing contract, so keep the version honest.
 
 Each document is a single JSON object printed on one line of standard output. A failing command prints its error to standard error and exits non-zero, and prints nothing on standard output. `thread pr-action` and `thread pr-create` are the exception: when they refuse, they also print their document, with `ok: false` and the reason, and exit 1 (see [Pull request actions](#pull-request-actions)).
 
@@ -36,6 +36,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
 | `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
+| `profile list --project <slug> --json` | `{schema_version, project, coordinator: Choices, thread: Choices}`, see [Profile choices](#profile-choices) |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
 
@@ -262,6 +263,19 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 `template show --json` adds `rules` (text), `memory` (the `MEMORY.md` text, empty for none) and `memory_files` (`[{name, text}]` for `memory/*.md`).
 
 `node start` prints one JSON line that is not part of this contract. It includes `template`, the name given with `--template` or empty.
+
+## Profile choices
+
+`profile list --project <slug> --json` says what the project's coordinator and its threads may run, for a client's start form. `--json` needs `--project`. It only reads: the user's profiles and allow-lists in `config.toml`, the project's defaults in `PROJECT.md`, and which harnesses are installed and signed in (the offline check of [Agent profiles](operations.md#agent-profiles)). `coordinator` and `thread` have the same shape:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `default_profile` | string | `coordinator_profile` or `thread_profile` in `PROJECT.md`: what `open` or `thread start` use when nothing is chosen. |
+| `last` | object or `null` | The coordinator's last start, from its record: `{profile, harness, model, reasoning_effort}`. The model and effort are the ones it ran with (chosen, else its profile's); both empty for a coordinator started before they were recorded. `null` when the project's coordinator never started, and always `null` under `thread`. |
+| `harnesses` | `[{harness, profile, default_model, efforts}]` | The installed, signed-in harnesses whose profile of the same name the role's allow-list permits, in Herdr's order. `harness` is what `--harness` takes and `profile` the profile it resolves to. `efforts` are the levels `--reasoning-effort` accepts for it, empty when it has no effort flag. `default_model` is that profile's own model, else the model the harness's own settings name (Claude Code's `settings.json`, Codex's `config.toml`), else empty: the harness then picks. |
+| `profiles` | `[{name, harness, model, reasoning_effort, description, builtin}]` | Every profile the role's allow-list permits: yours, then the listed built-ins. `builtin` is true for a built-in. |
+
+`open <slug>` and `coordinator replace <slug>` take `--profile NAME` or `--harness KIND`, then `--model` and `--reasoning-effort`. A model is a single name (letters, digits and `._-/:@+[]`, not starting with `-`), and an effort is one of the harness's `efforts`. Both replace the profile's own, and a refused choice changes nothing.
 
 ## Pull request actions
 

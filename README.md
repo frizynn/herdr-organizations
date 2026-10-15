@@ -112,7 +112,7 @@ Commands you are likely to use yourself:
 | Command | What it does |
 | --- | --- |
 | `herdr-organizations list` | List projects. |
-| `herdr-organizations open <slug>` | Start the project's coordinator, or focus it if one is running. |
+| `herdr-organizations open <slug>` | Start the project's coordinator, or focus it if one is running. `--harness <kind> --model <m> --reasoning-effort <e>` chooses what it runs. |
 | `herdr-organizations overview [<slug>]` | Threads grouped by what needs you. |
 | `herdr-organizations node list <slug>` | The organization tree, with role, parent and live state. |
 | `herdr-organizations thread show <slug> <id>` | One thread's record, group, note and Next list. |
@@ -122,7 +122,7 @@ Commands you are likely to use yourself:
 | `herdr-organizations thread pr-action <slug> <id> fix-ci` | Ask the thread to fix its pull request (`fix-ci`, `address-comments` or `resolve-conflicts`) with a message the binary writes from a fresh read; refused when the pull request does not need it. |
 | `herdr-organizations thread pr-create <slug> <id>` | Open the pull request of a thread whose agent is idle and whose branch is pushed without one. |
 | `herdr-organizations thread resolve <slug> <id>` | Copy the report home, then remove the worktree, the merged branch and the tab. |
-| `herdr-organizations coordinator replace <slug> --profile <name>` | Stop the project's coordinator and start a new one on another profile. |
+| `herdr-organizations coordinator replace <slug> --profile <name>` | Stop the project's coordinator and start a new one on another profile, or with `--harness <kind> [--model <m>] [--reasoning-effort <e>]` on another harness, model and effort. |
 | `herdr-organizations template save <slug> <id> --name <name>` | Save a node as a template to start others from. |
 | `herdr-organizations doctor --fix` | Check the setup and repair the plugin's own files. |
 
