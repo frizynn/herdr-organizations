@@ -2,9 +2,9 @@
 
 Other programs, such as a web client, read Herdr Organizations through `--json`. Only these documents are a contract. The files under a project folder (`PROJECT.md`, `threads/*.toml`, `inbox/*.md`, `.state/*.json`, including `.state/ticker.json`) are internal and can change without notice. A reader that uses them directly does so at its own risk.
 
-[Nenu](https://github.com/frizynn/nenu) is one such reader. It reads `overview --json` and `template list --json`, and runs `new --json`, `thread merge --json` and `thread set --json` when a person asks for that action. It treats an unknown `schema_version` like a missing contract, so keep the version honest.
+[Nenu](https://github.com/frizynn/nenu) is one such reader. It reads `overview --json` and `template list --json`, and runs `new --json`, `thread merge --json`, `thread set --json`, `thread pr-action --json` and `thread pr-create --json` when a person asks for that action. It treats an unknown `schema_version` like a missing contract, so keep the version honest.
 
-Each document is a single JSON object printed on one line of standard output. A failing command prints its error to standard error and exits non-zero, and prints nothing on standard output.
+Each document is a single JSON object printed on one line of standard output. A failing command prints its error to standard error and exits non-zero, and prints nothing on standard output. `thread pr-action` and `thread pr-create` are the exception: when they refuse, they also print their document, with `ok: false` and the reason, and exit 1 (see [Pull request actions](#pull-request-actions)).
 
 ## Versioning
 
@@ -27,6 +27,8 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `inbox list <slug> --json` | `{schema_version, project, items: [Item]}` |
 | `thread set <slug> <id> [--auto-fix-ci on/off] [--auto-merge on/off] --json` | `{schema_version, id, auto_fix_ci, auto_merge}` |
 | `thread merge <slug> <id> [--method squash/merge/rebase] --json` | `{schema_version, id, pr, merged: true}` |
+| `thread pr-action <slug> <id> fix-ci/address-comments/resolve-conflicts --json` | `{schema_version, ok, id, action, pr, sent, message, reason}` |
+| `thread pr-create <slug> <id> --json` | `{schema_version, ok, id, pr, reason}` |
 | `template list [--project slug] --json` | `[Template]`, a bare array (see [Template](#template)) |
 | `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
 | `project show <slug> --json` | `{schema_version, project: Project + the fields of [Project detail](#project-detail)}` |
@@ -101,6 +103,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `resolved_reason` | string | `manual`, `merged`, `auto` or empty. |
 | `auto_fix_ci`, `auto_merge` | bool | The pull request automation flags. See below. |
 | `pr` | object or `null` | `null` when the thread's report has no valid `PR:` line. |
+| `actions` | [string] | What a client may ask of the thread itself: `create-pr` when `thread pr-create` would open its pull request (no pull request, a local worktree branch origin has, a report, and an agent that is idle or in review), as of the ticker's last pull request check and the live group. Otherwise empty. The pull request's own actions are in `pr.actions`. |
 | `origin` | string | The repository's remote URL, empty without one. |
 | `state_line` | string | The sidebar's state line as the ticker last computed it (`needs you · ~55%`). |
 | `activity`, `percent` | string, number or `null` | The agent's own last progress report (`report`); local threads only. |
@@ -128,6 +131,7 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `draft` | bool or `null` | |
 | `mergeable` | string or `null` | `MERGEABLE`, `CONFLICTING` or `UNKNOWN`, as GitHub reports it. |
 | `merge_blocker` | string or `null` | `null` when `thread merge` would merge, as of the last read. Otherwise the reason it would refuse, such as `the thread is not open` or `1 check(s) failed`. Once the record's `state` is not `OPEN` (for example right after `thread merge`), it is `it is not open (state MERGED)` even before the next read. |
+| `actions` | [string] | What a client may ask about it, as of the last read, most pressing first, so a client with room for one button takes the first: `resolve-conflicts` (GitHub reports a conflict), `fix-ci` (a check failed), `address-comments` (a comment, a review that comments or asks for changes, or a change request), then `merge` (`merge_blocker` is `null`). Empty for a thread that is not open, a pull request that is not `OPEN` and one the ticker has not read. The first three are `thread pr-action`; `merge` is `thread merge`. More values may come; skip the ones you do not know. |
 
 ## Item
 
@@ -277,4 +281,53 @@ A pull request with no checks is refused because, right after a push, GitHub may
 Both flags are off by default and are only changed with `thread set`. The ticker never turns them on.
 
 - `auto_merge`: on each pull request check, the ticker runs the same guarded merge as `thread merge`, at most once per head commit, review decision, mergeability and check counts. A refused or failed attempt leaves one inbox item and is retried only when one of those changes, for example when a required check appears or a new commit is pushed. A failure with nothing changed, such as a network error, waits for that change or for `thread merge`.
-- `auto_fix_ci`: when the pull request has failing checks, or has comments or a change request, and no enabled `pr` routine (such as the default `routines/pr-followup.md`) already prompts the thread about that event, the ticker prompts the thread's agent once it is idle or done. It prompts once per failing head commit, when the comment count grows, and when the review decision becomes `CHANGES_REQUESTED`. An approval is not a reason to prompt. Each prompt leaves an inbox item. The prompt names no check, comment or author. It tells the agent to read them with `gh` as data, fix what belongs to its task, push, and not merge. Remote threads are skipped. As with the coordinator nudge, on Herdr 0.9.1 a prompt can merge with text a person has half-typed in that pane.
+- `auto_fix_ci`: when the pull request has failing checks, or has comments or a change request, and no enabled `pr` routine (such as the default `routines/pr-followup.md`) already prompts the thread about that event, the ticker prompts the thread's agent once it is idle or done. It prompts once per failing head commit, when the comment count grows, and when the review decision becomes `CHANGES_REQUESTED`. An approval is not a reason to prompt. It skips what `thread pr-action` already asked about the same state of the pull request. Each prompt leaves an inbox item. The prompt names no check, comment or author. It tells the agent to read them with `gh` as data, fix what belongs to its task, push, and not merge. Remote threads are skipped. As with the coordinator nudge, on Herdr 0.9.1 a prompt can merge with text a person has half-typed in that pane.
+
+### Asking a thread to fix its pull request
+
+`thread pr-action <slug> <id> <action>` sends the thread's agent one message about its pull request, the way `thread prompt` does: the agent may be working (it queues the message), the text is recorded under `## Follow-ups` in its task file, and it is refused when the agent waits on a prompt, a trust screen shows or someone has typed in its input box. A person, Nenu or the coordinator chooses the action; the binary writes the text.
+
+It reads the pull request again first and refuses an action its state does not call for:
+
+| Action | Sent when | The message says |
+| --- | --- | --- |
+| `fix-ci` | a check failed | how many checks fail and on which commit, `gh pr checks <url>` and `gh run view <run id> --log-failed` |
+| `address-comments` | it has a comment, a review that comments or asks for changes, or a change request | how many comments and such reviews, the review decision, `gh pr view <url> --comments` and the `gh api` call for inline comments |
+| `resolve-conflicts` | GitHub reports a merge conflict (`UNKNOWN`, GitHub still working it out, is refused with "try again in a minute") | the base branch, the `git fetch` and `git merge` commands, to push without force |
+
+Every message ends with: fix what belongs to the task, push to the thread's branch, update the report, and do not merge. Check names, comments and logins are never in it: they are GitHub text, which the agent reads with those commands, as data. The `fix-ci` document's client already has the names in `pr.failing`.
+
+A request is recorded on the thread with the state it was about: the head commit and failing check names for `fix-ci`; the head commit, comment and review counts and review decision for `address-comments`; the head commit and base for `resolve-conflicts`. Asking again before that state changes sends nothing, whoever asked first: `thread pr-action` itself (a second press), auto-fix, or a `pr` routine such as `pr-followup`. The other way round, auto-fix and `pr` routines leave alone what `thread pr-action` already asked about the same state. Each request sent, and each one not sent because it was already asked, leaves a `pr` inbox item (`asked to fix CI`, `fix CI already asked`).
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `ok` | bool | `false` when it refused. The command then exits 1 and prints the reason on standard error too. |
+| `id`, `action`, `pr` | string | The thread, the action asked for, and its pull request URL (empty when it has none). |
+| `sent` | bool | The message reached the agent. `ok: true, sent: false` means it was already asked. |
+| `message` | string | The text sent, empty when nothing was. |
+| `reason` | string | Why nothing was sent: the refusal (`no check fails on its pull request (3 passed, 0 pending)`, `it has no pull request; ...`, a pane refusal such as `agent_blocked: ...`), or who already asked and when (`auto-fix already asked it at 2026-10-15T10:00:00Z about this state of its pull request (commit 0123456); ...`). Empty when it was sent. |
+
+### Opening a thread's pull request
+
+`thread pr-create <slug> <id>` opens the pull request of a thread that pushed its branch without one, with `gh pr create` in the origin repository: the thread's title as the title, its report's `## Report` section as the description, into its base (`main` for `origin/main`; the repository's default branch for a commit). It refuses unless all of these hold:
+
+- the thread is open and has no pull request on record
+- it is a local worktree thread with a branch and a GitHub origin
+- it has written a report, with a `## Report` section
+- the project's Herdr session answers and the thread's group is idle or ready for review (its agent is not working or waiting on you)
+- its local branch and `origin/<branch>` point at the same commit, as the remote-tracking ref of the last push or fetch says
+- GitHub has no pull request for the branch (`pr` then names it)
+
+It records the new pull request on the thread at once, so the ticker reads it on its next check, and leaves a `PR created` inbox item. It does not prompt the agent.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `ok` | bool | `false` when it refused; the command then exits 1. |
+| `id` | string | |
+| `pr` | string | The pull request it opened; when it refused, the one the thread or its branch already has, else empty. |
+| `reason` | string | Why it refused, such as `its agent is not idle (working)` or ``its branch `hp/acme/t-0007-x` is not pushed to origin, or has commits that are not``. Empty when it opened one. |
+
+### Merge conflicts
+
+When GitHub starts reporting a thread's pull request as conflicting, the ticker leaves one `pr` inbox item (`PR has conflicts`) and a notification without sound, and nothing more until GitHub reports it mergeable again. `UNKNOWN` in between changes nothing, so a conflict that GitHub recomputes is not announced twice.
+

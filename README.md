@@ -119,6 +119,8 @@ Commands you are likely to use yourself:
 | `herdr-organizations thread read <slug> <id>` | What a thread's pane shows now, such as a question or a permission prompt. |
 | `herdr-organizations thread merge <slug> <id>` | Merge the thread's pull request, only if it is open, approved, free of conflicts and every check passed. |
 | `herdr-organizations thread set <slug> <id> --auto-merge on` | Merge automatically once those same conditions hold. `--auto-fix-ci on` prompts the thread about failing checks and review comments. |
+| `herdr-organizations thread pr-action <slug> <id> fix-ci` | Ask the thread to fix its pull request (`fix-ci`, `address-comments` or `resolve-conflicts`) with a message the binary writes from a fresh read; refused when the pull request does not need it. |
+| `herdr-organizations thread pr-create <slug> <id>` | Open the pull request of a thread whose agent is idle and whose branch is pushed without one. |
 | `herdr-organizations thread resolve <slug> <id>` | Copy the report home, then remove the worktree, the merged branch and the tab. |
 | `herdr-organizations coordinator replace <slug> --profile <name>` | Stop the project's coordinator and start a new one on another profile. |
 | `herdr-organizations template save <slug> <id> --name <name>` | Save a node as a template to start others from. |
@@ -175,7 +177,7 @@ herdr-organizations overview --json
 | `overview [<slug>] --json` | Projects, each with its threads, groups and pull requests |
 | `thread list <slug> --json`, `thread show <slug> <id> --json`, `node list <slug> --json`, `node show <slug> <id> --json` | Threads or nodes |
 | `inbox list <slug> --json` | Inbox items, without marking them seen |
-| `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json` | The result of a pull request action |
+| `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json`, `thread pr-action <slug> <id> <action> --json`, `thread pr-create <slug> <id> --json` | The result of a pull request action |
 | `template list --json`, `template show <name> --json` | Templates |
 | `project show <slug> --json` | A project's settings, repos, instructions and memory |
 | `task list <slug> --json` | The tasks in `TASKS.md`, with owners and threads |
