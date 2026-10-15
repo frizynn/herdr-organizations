@@ -1800,7 +1800,7 @@ pub struct ThreadJson {
 
 /// A thread's pull request as the ticker last saw it (every two minutes).
 /// Counts are `null` until the ticker has read them.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct PrJson {
     pub url: String,
     pub state: String,

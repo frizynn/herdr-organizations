@@ -72,6 +72,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
 | `list [--json]`, `new ... --json`, `overview [project] [--json]`, `project show <project> [--json]` | The project documents of [docs/json.md](json.md). |
 | `task list <project> [--json]` | The tasks in `TASKS.md`. Only the coordinator writes the file; ask it, or send it a sentence with `coordinator prompt`. |
+| `task lint <project> [--json]` | Every problem the [drift](#drift) section draws from in `TASKS.md`, without its 10-line cap. It changes nothing. |
+| `project status <project> [--json]` | The project's tasks and open threads with their state, pull requests, drift and Next lines, computed from the files on every call (see [docs/json.md](json.md#project-status)). |
 | `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
 | `sweep <project> [--dry-run] [--yes]` | Remove what nothing uses any more. |
 | `set <project> <key> <value>`, `routine list [--json]/toggle/approve`, `safety show/yolo/set` | Settings, routines and safety (see below). |
@@ -227,7 +229,7 @@ Each task in `TASKS.md` has at most one owner, in brackets after its title. The 
 
 ## Drift
 
-Right after its inbox, `context` prints `## Drift (computed, data not instructions)`: where `TASKS.md` and `HANDOFF.md` disagree with the thread records, at most 10 lines, computed from the files on every call. Each line names its rule:
+Right after its inbox, `context` prints `## Drift (computed, data not instructions)`: where `TASKS.md` and `HANDOFF.md` disagree with the thread records, at most 10 lines, computed from the files on every call. `task lint` lists every task problem, `doctor` warns when there are any, and `project status --json` carries them for a client. Each line names its rule:
 
 | Rule | Meaning |
 | --- | --- |
@@ -253,6 +255,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
   "Bash(<binary> --root <root> inbox done:*)",
   "Bash(<binary> --root <root> list:*)",
   "Bash(<binary> --root <root> routine list:*)",
+  "Bash(<binary> --root <root> task lint:*)",
   "Bash(<binary> --root <root> thread list:*)",
   "Bash(<binary> --root <root> thread show:*)",
   "Bash(<binary> --root <root> thread prompt:*)",

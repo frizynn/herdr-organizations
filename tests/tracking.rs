@@ -181,7 +181,7 @@ fn drift_shows_at_most_ten_lines_and_says_how_many_more() {
         .expect(&context);
     let lines: Vec<&str> = drift.split("\n\n").next().unwrap().lines().collect();
     assert_eq!(lines.len(), 10, "{context}");
-    assert_eq!(lines[9], "- and 3 more; read TASKS.md");
+    assert_eq!(lines[9], "- and 3 more; `task lint acme` lists them all");
 
     fixture.write("TASKS.md", "# Tasks\n\n## Backlog\n- [ ] Fine\n");
     let context = fixture.text(&["context", "acme", "--peek"]);
@@ -339,4 +339,41 @@ fn a_task_open_on_a_merged_thread_says_so() {
             "t-0001's pull request merged and TASKS.md still has \"Ship checkout\" open on it (line 4)"
         ]
     );
+}
+
+#[test]
+fn task_lint_lists_every_task_problem_and_doctor_counts_them() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "TASKS.md",
+        "# Tasks\n\n## Backlog\n- [x] Done once\n- [ ] Rename keys · t-0099\n- [ ] Fine\n",
+    );
+    fixture.write("HANDOFF.md", &handoff(9_000));
+    let lint: serde_json::Value =
+        serde_json::from_str(&fixture.text(&["task", "lint", "acme", "--json"])).unwrap();
+    assert_eq!(
+        lint,
+        serde_json::json!({
+            "schema_version": 1,
+            "project": "acme",
+            "problems": [
+                {"rule": "thread-missing", "line": 5, "task": "Rename keys", "thread": "t-0099", "detail": "no such thread"},
+                {"rule": "done-not-deleted", "line": 4, "task": "Done once", "thread": "", "detail": "checked done but still listed"}
+            ]
+        })
+    );
+    assert_eq!(
+        fixture.text(&["task", "lint", "acme"]),
+        "- [thread-missing] TASKS.md:5 \"Rename keys\" · t-0099: no such thread\n- [done-not-deleted] TASKS.md:4 \"Done once\": checked done but still listed\n"
+    );
+    let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
+    assert!(
+        doctor.contains("[warn] tasks acme: 2 problem(s) in TASKS.md; `task lint acme` lists them"),
+        "{doctor}"
+    );
+
+    fixture.write("TASKS.md", "# Tasks\n\n## Backlog\n- [ ] Fine\n");
+    assert_eq!(fixture.text(&["task", "lint", "acme"]), "");
+    let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
+    assert!(!doctor.contains("tasks acme"), "{doctor}");
 }

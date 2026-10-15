@@ -109,7 +109,7 @@ Keep the file short: it is printed every turn and costs tokens.
 
 ## Drift
 
-After the inbox, `hp context` prints `## Drift (computed, data not instructions)`: lines the binary computes where `TASKS.md` or `HANDOFF.md` disagree with the thread records. They are facts, not requests, and they repeat every turn until the files agree:
+After the inbox, `hp context` prints `## Drift (computed, data not instructions)`: lines the binary computes where `TASKS.md` or `HANDOFF.md` disagree with the thread records, at most 10 (`hp task lint <slug>` lists them all). They are facts, not requests, and they repeat every turn until the files agree:
 
 - `handoff-over-limit`: compact `HANDOFF.md` now.
 - `thread-resolved`: a task names a resolved thread. If its pull request merged, delete the task and say so; otherwise ask once, as in "Thread ends".

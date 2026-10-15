@@ -30,7 +30,9 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `template list [--project slug] --json` | `[Template]`, a bare array (see [Template](#template)) |
 | `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
 | `project show <slug> --json` | `{schema_version, project: Project + the fields of [Project detail](#project-detail)}` |
+| `project status <slug> --json` | `{schema_version, project, generated_at, objective, sources, items: [Status item], drift, problems: [Problem], next}`, see [Project status](#project-status) |
 | `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
+| `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
@@ -167,6 +169,50 @@ EOF
 ```
 
 `coordinator prompt` fails when the project's session is not reachable or no coordinator can take a prompt, and it prints text, not JSON.
+
+## Project status
+
+`project status` is the project's work in one document, for a client's notes view such as the one Nenu plans for its project panel. The binary computes it on every call from `TASKS.md`, `HANDOFF.md`, the thread records with their pull requests, and the inbox. Nobody writes it, so it never disagrees with them. It asks the project's Herdr session for live groups, as `overview` does, and falls back to the recorded group when the session is unreachable.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `project` | string | The slug. |
+| `generated_at` | string | RFC 3339, when it was computed. |
+| `objective` | string | The first paragraph under `## Current objective` in `HANDOFF.md`, its lines joined by spaces; empty without one. |
+| `sources` | object | `tasks_updated` and `handoff_updated` (RFC 3339 modification times, empty when the file is missing), `handoff_chars` and `handoff_limit` (what `context` shows of it, 8,000), and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
+| `items` | [Status item] | One per task in `TASKS.md`, in file order, then one per thread that is not resolved and that no task names, in id order. |
+| `drift` | object | How many problems of each rule (`handoff_over_limit`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
+| `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |
+| `next` | `[{thread, line}]` | The Next lines of every thread that is not resolved, in id order. |
+
+| Status item field | Type | Meaning |
+| --- | --- | --- |
+| `kind` | `"task"` or `"thread"` | More kinds may come (pull requests no thread opened, routines); skip the ones you do not know. |
+| `id` | string | `task:<line>` (its line in `TASKS.md`, so it changes when lines above it do) or the thread id. |
+| `title` | string | |
+| `list` | string | A task's `## ` list, empty for a thread. |
+| `owner` | object or `null` | A task's owner, as in [Task](#task); `null` for a thread. |
+| `state` | string | `todo`, `working`, `idle`, `waiting`, `review`, `landing` or `done`. A task takes its thread's group (`waiting-on-you` is `waiting`, `ready-for-review` is `review`). A checked task is `done`. A task whose thread is resolved is `done` when its pull request merged and `todo` otherwise, and its `flags` say why. |
+| `group` | string | The thread's group token as in [Thread](#thread), empty for a task with no thread. |
+| `task` | string | The task's title; for a thread, the task it was delegated from, empty from chat. |
+| `thread` | string | The thread id, empty for a task with none. |
+| `pr` | object or `null` | The thread's [pull request](#pull-request). |
+| `created`, `updated` | string | RFC 3339: the thread's creation and last agent state change (its last record change before one). Empty for a task with no thread: `TASKS.md` keeps no dates. |
+| `flags` | [string] | The [Problem](#problem) rules of that task line, and `pr-merged` when its thread's pull request merged. |
+
+## Problem
+
+What `task lint` lists and the `## Drift` section of `context` prints. The binary computes it; it changes nothing.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `rule` | string | `handoff-over-limit` (not in `task lint`), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. |
+| `line` | number | The task's line in `TASKS.md`, from 1; 0 for the handoff. |
+| `task` | string | The task's title, empty for the handoff. |
+| `thread` | string | The thread the task line names, empty when none. |
+| `detail` | string | A few words from the binary, such as `the thread is resolved and its PR merged`. |
+
+`task lint` exits 0 whether or not it finds problems; `doctor` warns when a project has any.
 
 ## Routine
 
