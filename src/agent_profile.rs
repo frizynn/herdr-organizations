@@ -57,6 +57,38 @@ impl AgentProfile {
             .extend(overrides.raw_agent_args.iter().cloned());
     }
 
+    /// `args` (a profile's launch arguments for `harness`) with this node's
+    /// own flags on top, through `argv`; unchanged when the node sets none.
+    pub fn over(&self, harness: &str, args: Vec<String>) -> Result<Vec<String>> {
+        if self.is_plain() {
+            return Ok(args);
+        }
+        AgentProfile {
+            harness: harness.to_string(),
+            ..self.clone()
+        }
+        .argv(&args)
+    }
+
+    /// A local profile's launch arguments with this node's own flags on top:
+    /// the node's model and effort replace the profile's.
+    pub fn over_profile(
+        &self,
+        profile: &crate::profiles::Profile,
+        legacy: &[String],
+        legacy_agent: &str,
+    ) -> Result<Vec<String>> {
+        let mut profile = profile.clone();
+        if !self.model.is_empty() {
+            profile.entry.model.clear();
+        }
+        if !self.reasoning_effort.is_empty() {
+            profile.entry.effort.clear();
+        }
+        let args = crate::profiles::launch_args(&profile, legacy, legacy_agent);
+        self.over(profile.agent(), args)
+    }
+
     /// Returns argv components for the selected harness: the node's model and
     /// effort flags (the profile flags' own adapter), its permission flags,
     /// its raw arguments, then `safety_args` (the profile's and the project's

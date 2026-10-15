@@ -243,6 +243,7 @@ pub fn adopt_workspace(ctx: &Ctx, args: &AdoptWorkspace) -> Result<()> {
             },
             rebind: false,
             profile: None,
+            launch: Default::default(),
             new: false,
             here: false,
         },

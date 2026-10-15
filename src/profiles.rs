@@ -503,6 +503,33 @@ fn signed_in(env: &Env, kind: &str) -> bool {
     }
 }
 
+/// The model a harness's own settings name, read offline from its files:
+/// Claude Code's `settings.json` and Codex's `config.toml`. Empty when they
+/// name none (its CLI then picks), for any other harness, or for a value that
+/// is no model name.
+fn configured_model(env: &Env, kind: &str) -> String {
+    let dir_of = |var: &str, fallback: &str| {
+        env.var(var)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env.home.join(fallback))
+    };
+    let read = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    let model = match kind {
+        "claude" => serde_json::from_str::<serde_json::Value>(&read(
+            dir_of("CLAUDE_CONFIG_DIR", ".claude").join("settings.json"),
+        ))
+        .ok()
+        .and_then(|settings| settings.get("model")?.as_str().map(str::to_string)),
+        "codex" => {
+            toml::from_str::<toml::Table>(&read(dir_of("CODEX_HOME", ".codex").join("config.toml")))
+                .ok()
+                .and_then(|config| config.get("model")?.as_str().map(str::to_string))
+        }
+        _ => None,
+    };
+    model.filter(|m| is_model_name(m)).unwrap_or_default()
+}
+
 /// The kinds whose CLI is on `PATH` and looks signed in, in Herdr's order.
 pub fn detect(env: &Env) -> Vec<String> {
     crate::agents::KINDS
@@ -875,6 +902,87 @@ pub fn list_text(ctx: &Ctx, project: Option<&Project>) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// `profile list --project SLUG --json`: what the project's coordinator and
+/// its threads may run, for a client's start form (docs/json.md, "Profile
+/// choices"). The harnesses are the installed, signed-in kinds whose profile
+/// of the same name the role's allow-list permits.
+pub fn choices_json(ctx: &Ctx, project: &Project) -> Result<String> {
+    use serde_json::{Value, json};
+    let config = load(&ctx.config_dir)?;
+    let safety = project.safety(&ctx.config_dir)?;
+    let (settings, _) = project.read_project_md()?;
+    let detected = detect(ctx.env);
+    let choices = |role: Role, last: Value| {
+        let allowed = config.allowed(&safety, role);
+        let permits = |name: &str| {
+            allowed
+                .as_ref()
+                .is_none_or(|list| list.iter().any(|a| a == name))
+        };
+        let harnesses: Vec<Value> = detected
+            .iter()
+            .filter(|kind| permits(kind))
+            .filter_map(|kind| config.get(kind))
+            .map(|p| {
+                let model = if p.entry.model.is_empty() {
+                    configured_model(ctx.env, p.agent())
+                } else {
+                    p.entry.model.clone()
+                };
+                json!({
+                    "harness": p.name,
+                    "profile": p.name,
+                    "default_model": model,
+                    "efforts": effort_values(p.agent()).unwrap_or_default(),
+                })
+            })
+            .collect();
+        let profiles: Vec<Value> = config
+            .listed(&detected)
+            .into_iter()
+            .filter(|p| permits(&p.name))
+            .map(|p| {
+                json!({
+                    "name": p.name,
+                    "harness": p.entry.agent,
+                    "model": p.entry.model,
+                    "reasoning_effort": p.entry.effort,
+                    "description": p.entry.description,
+                    "builtin": p.builtin,
+                })
+            })
+            .collect();
+        let default = match role {
+            Role::Thread => &settings.thread_profile,
+            Role::Coordinator => &settings.coordinator_profile,
+        };
+        json!({
+            "default_profile": default,
+            "last": last,
+            "harnesses": harnesses,
+            "profiles": profiles,
+        })
+    };
+    let last = project
+        .coordinator()
+        .filter(|record| !record.agent.is_empty())
+        .map_or(Value::Null, |record| {
+            json!({
+                "profile": crate::coordinator::recorded_profile(&record),
+                "harness": record.agent,
+                "model": record.model,
+                "reasoning_effort": record.reasoning_effort,
+            })
+        });
+    Ok(json!({
+        "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "coordinator": choices(Role::Coordinator, last),
+        "thread": choices(Role::Thread, Value::Null),
+    })
+    .to_string())
 }
 
 /// The `context` block: the profiles the coordinator may choose for threads,

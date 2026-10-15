@@ -1168,7 +1168,10 @@ fn launch_pass(
                     .filter(|p| p.builtin)
                     .map(|p| crate::profiles::launch_args(&p, &safety.thread_agent_args, &legacy))
                     .unwrap_or_default();
-                (t.agent.clone(), [builtin, model].concat())
+                (
+                    t.agent.clone(),
+                    node.over(&t.agent, [builtin, model].concat())?,
+                )
             } else if t.remote_profile {
                 // Its machine's own definition, stored at start; the name is
                 // checked against this project's allow-list again.
@@ -1194,11 +1197,14 @@ fn launch_pass(
                     )?;
                     return Ok(());
                 }
-                (t.agent.clone(), t.profile_args.clone())
+                (
+                    t.agent.clone(),
+                    node.over(&t.agent, t.profile_args.clone())?,
+                )
             } else {
                 // The profile is looked up and checked against the allow-list
                 // again: one the user removed or disallowed since does not launch.
-                let mut profile = match crate::profiles::resolve(
+                let profile = match crate::profiles::resolve(
                     &config,
                     &safety,
                     &settings,
@@ -1224,29 +1230,16 @@ fn launch_pass(
                         return Ok(());
                     }
                 };
-                // The node's own model and effort replace the profile's.
-                if !node.model.is_empty() {
-                    profile.entry.model.clear();
-                }
-                if !node.reasoning_effort.is_empty() {
-                    profile.entry.effort.clear();
-                }
                 if profile.agent() != t.agent {
                     let agent = profile.agent().to_string();
                     thread::update(project, &t.id, |t| t.agent = agent)?;
                 }
+                // The node's own model and effort replace the profile's.
                 (
                     profile.agent().to_string(),
-                    crate::profiles::launch_args(&profile, &safety.thread_agent_args, &legacy),
+                    node.over_profile(&profile, &safety.thread_agent_args, &legacy)?,
                 )
             };
-            if !node.is_plain() {
-                args = crate::agent_profile::AgentProfile {
-                    harness: kind.clone(),
-                    ..node.clone()
-                }
-                .argv(&args)?;
-            }
             if !t.is_remote() {
                 args = crate::profiles::expand_home(&args, &ctx.env.home);
             }

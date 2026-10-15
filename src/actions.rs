@@ -263,6 +263,7 @@ pub fn run_on_slug(ctx: &Ctx, command: &str, slug: &str) -> Result<()> {
                 },
                 rebind: false,
                 profile: None,
+                launch: Default::default(),
                 new: false,
                 here: false,
             },

@@ -146,6 +146,7 @@ pub fn set_status(ctx: &Ctx, slug: &str, status: Status) -> Result<()> {
                 session: crate::paths::SessionFlags::default(),
                 rebind: false,
                 profile: None,
+                launch: Default::default(),
                 new: false,
                 here: false,
             };
