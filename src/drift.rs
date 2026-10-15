@@ -128,7 +128,7 @@ fn task_problems(list: &[Task], records: &BTreeMap<String, Thread>) -> Vec<Probl
         match task.thread.as_deref().map(|id| records.get(id)) {
             Some(None) => found.push(problem(Rule::ThreadMissing, task, "no such thread".into())),
             Some(Some(t)) if !task.done && t.status == Status::Resolved => {
-                let merged = if t.pr_state.eq_ignore_ascii_case("merged") {
+                let merged = if t.pr_merged() {
                     " and its PR merged"
                 } else {
                     ""
@@ -239,6 +239,13 @@ mod tests {
             record("t-0001", Status::Resolved, "MERGED"),
             record("t-0003", Status::Open, ""),
         ]);
+        let mut by_ticker = record("t-0004", Status::Resolved, "");
+        by_ticker.1.resolved_reason = "merged".into();
+        let merged = task_problems(
+            &tasks::parse("- [ ] Shipped · t-0004\n"),
+            &BTreeMap::from([by_ticker]),
+        );
+        assert_eq!(merged[0].detail, "the thread is resolved and its PR merged");
         let mut found = task_problems(&list, &records);
         found.sort_by_key(|p| (p.rule, p.line));
         let rules: Vec<(Rule, usize)> = found.iter().map(|p| (p.rule, p.line)).collect();

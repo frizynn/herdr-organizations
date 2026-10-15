@@ -187,6 +187,12 @@ impl Thread {
         !self.machine.is_empty()
     }
 
+    /// Its pull request merged, as its record knows: the ticker resolved it
+    /// for that, or the last read said `MERGED`.
+    pub fn pr_merged(&self) -> bool {
+        self.pr_state.eq_ignore_ascii_case("merged") || self.resolved_reason == "merged"
+    }
+
     pub fn report_path(&self) -> String {
         format!("{}/report.md", self.thread_dir)
     }

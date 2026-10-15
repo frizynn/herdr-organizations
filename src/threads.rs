@@ -1254,7 +1254,7 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
 /// open on it gets one `task` item, so the coordinator settles it (the skill's
 /// "Thread ends") instead of having to notice.
 pub fn note_open_task(project: &Project, resolved: &Thread) -> Result<()> {
-    let merged = resolved.pr_state.eq_ignore_ascii_case("merged");
+    let merged = resolved.pr_merged();
     for task in crate::tasks::open_on(&crate::tasks::read(&project.dir()), &resolved.id) {
         let (event, what) = if merged {
             (
