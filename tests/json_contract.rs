@@ -726,3 +726,113 @@ fn icon_and_tone_are_set_by_cli_and_absent_until_then() {
         (&json!(""), &json!("teal"))
     );
 }
+
+/// Sets a file's modification time, so `sources` is the same on every run.
+fn touch(path: &Path, rfc3339: &str) {
+    let when: std::time::SystemTime = rfc3339.parse::<jiff::Timestamp>().unwrap().into();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "TASKS.md",
+        "# Tasks\n\n## Backlog\n- [ ] Checkout (codex) · t-0001\n- [ ] Copy fix · t-0002\n- [ ] Write the docs (me)\n- [x] Old work\n",
+    );
+    write(
+        &fixture,
+        "HANDOFF.md",
+        "# Handoff\n\n## Current objective\nShip the checkout\nbefore Friday.\n\nMore detail.\n\n## Active work\n- t-0001\n",
+    );
+    write(
+        &fixture,
+        "threads/t-0003.toml",
+        "id = \"t-0003\"\ntitle = \"Research\"\nstatus = \"open\"\nkind = \"tab\"\ncreated = \"2026-10-02T09:00:00Z\"\nupdated = \"2026-10-02T09:30:00Z\"\nlast_group = \"working\"\ntask_origin = \"chat\"\n",
+    );
+    write(&fixture, "threads/t-0003.next.md", "- Pick a library\n");
+    let dir = Path::new(&fixture.dir()).to_path_buf();
+    touch(&dir.join("TASKS.md"), "2026-10-03T08:00:00Z");
+    touch(&dir.join("HANDOFF.md"), "2026-10-03T09:00:00Z");
+
+    let mut status = fixture.json(&["project", "status", "demo", "--json"]);
+    let generated = status["generated_at"].take();
+    assert!(
+        generated
+            .as_str()
+            .unwrap()
+            .parse::<jiff::Timestamp>()
+            .is_ok(),
+        "{generated}"
+    );
+    let checkout_pr = checkout_thread(&fixture)["pr"].clone();
+    let no_owner = Value::Null;
+    assert_eq!(
+        status,
+        json!({
+            "schema_version": 1,
+            "project": "demo",
+            "generated_at": null,
+            "objective": "Ship the checkout before Friday.",
+            "sources": {
+                "tasks_updated": "2026-10-03T08:00:00Z",
+                "handoff_updated": "2026-10-03T09:00:00Z",
+                "handoff_chars": 104,
+                "handoff_limit": 8000,
+                "pr_checked": ""
+            },
+            "items": [
+                {
+                    "kind": "task", "id": "task:4", "title": "Checkout", "list": "Backlog",
+                    "owner": {"kind": "agent", "profile": "codex", "machine": "", "name": ""},
+                    "state": "review", "group": "ready-for-review", "task": "Checkout", "thread": "t-0001",
+                    "pr": checkout_pr, "created": "2026-10-01T10:00:00Z", "updated": "2026-10-01T10:30:00Z",
+                    "flags": []
+                },
+                {
+                    "kind": "task", "id": "task:5", "title": "Copy fix", "list": "Backlog",
+                    "owner": {"kind": "unassigned", "profile": "", "machine": "", "name": ""},
+                    "state": "done", "group": "resolved", "task": "Copy fix", "thread": "t-0002",
+                    "pr": null, "created": "2026-10-01T10:05:00Z", "updated": "2026-10-01T10:50:00Z",
+                    "flags": ["thread-resolved", "pr-merged"]
+                },
+                {
+                    "kind": "task", "id": "task:6", "title": "Write the docs", "list": "Backlog",
+                    "owner": {"kind": "me", "profile": "", "machine": "", "name": ""},
+                    "state": "todo", "group": "", "task": "Write the docs", "thread": "",
+                    "pr": null, "created": "", "updated": "", "flags": []
+                },
+                {
+                    "kind": "task", "id": "task:7", "title": "Old work", "list": "Backlog",
+                    "owner": {"kind": "unassigned", "profile": "", "machine": "", "name": ""},
+                    "state": "done", "group": "", "task": "Old work", "thread": "",
+                    "pr": null, "created": "", "updated": "", "flags": ["done-not-deleted"]
+                },
+                {
+                    "kind": "thread", "id": "t-0003", "title": "Research", "list": "",
+                    "owner": no_owner, "state": "working", "group": "working", "task": "", "thread": "t-0003",
+                    "pr": null, "created": "2026-10-02T09:00:00Z", "updated": "2026-10-02T09:30:00Z",
+                    "flags": []
+                }
+            ],
+            "drift": {
+                "handoff_over_limit": 0, "thread_resolved": 1, "thread_missing": 0,
+                "done_not_deleted": 1, "status_in_owner": 0, "duplicate_title": 0,
+                "inbox_unhandled": 1
+            },
+            "problems": [
+                {"rule": "thread-resolved", "line": 5, "task": "Copy fix", "thread": "t-0002",
+                 "detail": "the thread is resolved and its PR merged"},
+                {"rule": "done-not-deleted", "line": 7, "task": "Old work", "thread": "",
+                 "detail": "checked done but still listed"}
+            ],
+            "next": [{"thread": "t-0003", "line": "Pick a library"}]
+        })
+    );
+}
