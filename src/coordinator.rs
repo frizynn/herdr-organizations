@@ -288,7 +288,7 @@ fn launch(
     let chosen_or_own =
         |chosen: &str, own: &str| if chosen.is_empty() { own } else { chosen }.to_string();
     Ok(Launch {
-        base_args: safety.launch_args(&kind, &base_args),
+        base_args: crate::agents::in_own_process(&kind, &safety.launch_args(&kind, &base_args)),
         model: chosen_or_own(&node.model, &profile.entry.model),
         effort: chosen_or_own(&node.reasoning_effort, &profile.entry.effort),
         chosen: requested.is_some() || !node.model.is_empty() || !node.reasoning_effort.is_empty(),

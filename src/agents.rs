@@ -53,6 +53,24 @@ pub fn resume_args(kind: &str, id: &str) -> Option<Vec<String>> {
     Some(args)
 }
 
+/// `args` for a `kind` agent this binary launches. Codex gets `--no-daemon`
+/// first: on Codex's shared background server, Herdr's session hook runs in
+/// that server's process and reports to the pane that started the server,
+/// so this pane never learns its conversation. A `--no-daemon` already there
+/// is not repeated (Codex refuses a repeat), and a `--remote` is a server the
+/// user chose (Codex refuses both together).
+pub fn in_own_process(kind: &str, args: &[String]) -> Vec<String> {
+    let chosen = args
+        .iter()
+        .any(|a| a == "--no-daemon" || a == "--remote" || a.starts_with("--remote="));
+    if kind != "codex" || chosen {
+        return args.to_vec();
+    }
+    std::iter::once("--no-daemon".to_string())
+        .chain(args.iter().cloned())
+        .collect()
+}
+
 /// Whether `value` looks like a model name: `opus`, `gpt-5.5`,
 /// `anthropic/claude-sonnet-5`, `claude-opus-5-5[1m]`. Never a flag.
 fn is_model_name(value: &str) -> bool {

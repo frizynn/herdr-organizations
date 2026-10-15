@@ -1249,6 +1249,7 @@ fn launch_pass(
             } else {
                 args
             };
+            let args = crate::agents::in_own_process(&kind, &args);
             herdr
                 .on_machine(&t.machine)
                 .agent_start(&t.agent_name, &kind, &t.pane_id, &args)?;

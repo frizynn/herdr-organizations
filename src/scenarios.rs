@@ -691,6 +691,7 @@ fn ticker_launch_uses_the_persisted_codex_profile_as_exact_argv() {
     assert_eq!(
         &call.args[separator + 1..],
         [
+            "--no-daemon",
             "--model",
             "gpt-5.6",
             "-c",
@@ -702,6 +703,46 @@ fn ticker_launch_uses_the_persisted_codex_profile_as_exact_argv() {
             "$(touch remains-argv-data)",
         ]
     );
+}
+
+#[test]
+fn a_codex_thread_runs_in_its_own_process_once_and_never_beside_a_users_server() {
+    let launch = |agent: &str, raw: &[&str]| -> Vec<String> {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let cwd = world.home.path().to_string_lossy().into_owned();
+        let thread = world.thread(&project, world.home.path(), |_| {});
+        thread::update(&project, &thread.id, |record| {
+            record.agent = agent.into();
+            record.raw_agent_args = strings(raw);
+            record.prompt_pending = true;
+        })
+        .unwrap();
+        *world.panes.borrow_mut() = format!(
+            "[{},{}]",
+            world.coordinator_pane(&project),
+            pane_json("w2", "w2:t1", "w2:p1", &cwd)
+        );
+        world
+            .runner
+            .on("agent start", fail(1, "keep pending for test"));
+        let _ = ticker::tick_project(&world.ctx(), &project);
+        let calls = world.runner.calls.borrow();
+        let call = calls
+            .iter()
+            .find(|call| call.args.starts_with(&["agent".into(), "start".into()]))
+            .unwrap();
+        let separator = call.args.iter().position(|a| a == "--");
+        separator.map_or_else(Vec::new, |at| call.args[at + 1..].to_vec())
+    };
+
+    assert_eq!(launch("codex", &[]), ["--no-daemon"]);
+    assert_eq!(launch("codex", &["--no-daemon"]), ["--no-daemon"]);
+    assert_eq!(
+        launch("codex", &["--remote", "ws://127.0.0.1:4500"]),
+        ["--remote", "ws://127.0.0.1:4500"]
+    );
+    assert!(launch("claude", &[]).is_empty());
 }
 
 #[test]
@@ -1686,6 +1727,7 @@ fn yolo_launches_each_thread_with_its_own_harness_flag() {
     assert!(
         call.args.ends_with(&strings(&[
             "--",
+            "--no-daemon",
             "-m",
             "gpt-5.5",
             "--dangerously-bypass-approvals-and-sandbox"
@@ -3736,6 +3778,65 @@ fn a_chosen_model_and_effort_resume_only_the_session_that_ran_them() {
     );
 }
 
+/// The `agent start` of an `open` with `profile` for `opus_coordinator`'s
+/// project, its recorded coordinator a Codex one on the `codex` profile.
+fn codex_open_start(profiles: &str, profile: &str, new: bool) -> String {
+    let (world, project, socket) = opus_coordinator();
+    project
+        .update_coordinator(|c| {
+            c.agent = "codex".into();
+            c.profile = "codex".into();
+            c.model.clear();
+            c.reasoning_effort.clear();
+        })
+        .unwrap();
+    write_profiles(&world, profiles);
+    let options = crate::coordinator::OpenOptions {
+        profile: Some(profile.into()),
+        launch: Default::default(),
+        new,
+        ..chosen(&socket, "", "")
+    };
+    crate::coordinator::open(&world.ctx(), "demo", &options).unwrap();
+    last_start(&world)
+}
+
+#[test]
+fn a_codex_coordinator_runs_in_its_own_process_unless_the_user_chose_a_server() {
+    // Off the shared Codex server, Herdr's hook runs in the pane's own process.
+    let start = codex_open_start("", "codex", false);
+    assert!(start.ends_with("-- --no-daemon resume sess-42"), "{start}");
+    let start = codex_open_start("", "codex", true);
+    assert!(start.ends_with("-- --no-daemon"), "{start}");
+
+    // A profile that already says so is not repeated; Codex refuses a repeat.
+    let solo = "[profiles.solo]\nagent = \"codex\"\nargs = [\"--no-daemon\"]\n";
+    let start = codex_open_start(solo, "solo", false);
+    assert!(start.ends_with("-- --no-daemon"), "{start}");
+    assert_eq!(start.matches("--no-daemon").count(), 1, "{start}");
+
+    // A server the user chose stays theirs: Codex refuses both together.
+    for remote in [
+        r#"["--remote", "ws://127.0.0.1:4500"]"#,
+        r#"["--remote=unix://"]"#,
+    ] {
+        let far = format!("[profiles.far]\nagent = \"codex\"\nargs = {remote}\n");
+        let start = codex_open_start(&far, "far", false);
+        assert!(start.contains("--remote"), "{start}");
+        assert!(!start.contains("--no-daemon"), "{start}");
+    }
+
+    // Claude Code launches as before.
+    let (world, _project, socket) = opus_coordinator();
+    crate::coordinator::open(&world.ctx(), "demo", &chosen(&socket, "opus", "high")).unwrap();
+    let start = last_start(&world);
+    assert!(
+        start.ends_with("-- --model opus --effort high --resume sess-42"),
+        "{start}"
+    );
+    assert!(!start.contains("--no-daemon"), "{start}");
+}
+
 #[test]
 fn open_new_starts_a_fresh_coordinator_beside_a_live_one_without_its_session() {
     let world = World::new();
@@ -4274,6 +4375,38 @@ fn open_in_a_pane_resumes_the_recorded_session_and_starts_fresh_when_that_fails(
     assert_eq!(runs[1].args, ["--resume", "sess-42"]);
     assert!(runs[2].args.is_empty(), "{}", runs[2].display());
     assert_eq!(h.project.coordinator().unwrap().agent_session, "sess-9");
+}
+
+#[test]
+fn a_codex_coordinator_run_in_this_pane_runs_in_its_own_process() {
+    let h = Here::new(&[]);
+    let child = h
+        .child_agent("w5:p1", "", "sess-7")
+        .replace("claude", "codex");
+    let agents = h.world.agents.clone();
+    h.world.runner.on_fn(
+        |cmd| cmd.program == "codex",
+        move |_| {
+            *agents.borrow_mut() = format!("[{child}]");
+            Ok(Output::default())
+        },
+    );
+    let options = crate::coordinator::OpenOptions {
+        session: crate::paths::SessionFlags {
+            session: None,
+            socket: Some(h.socket.clone()),
+        },
+        rebind: false,
+        profile: Some("codex".into()),
+        launch: Default::default(),
+        new: false,
+        here: true,
+    };
+    crate::coordinator::open(&h.world.ctx(), "demo", &options).unwrap();
+    let calls = h.world.runner.calls.borrow();
+    let runs: Vec<&Cmd> = calls.iter().filter(|c| c.program == "codex").collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].args, ["--no-daemon"]);
 }
 
 #[test]
@@ -5014,7 +5147,7 @@ fn a_remote_thread_launches_with_its_machines_own_profile() {
     let line = start.display();
     assert!(
         line.contains("--kind codex")
-            && line.contains("-- --model gpt-5.5 --config /Users/box/x.toml"),
+            && line.contains("-- --no-daemon --model gpt-5.5 --config /Users/box/x.toml"),
         "{line}"
     );
     assert_eq!(thread::load(&project, &id).unwrap().status, Status::Open);
