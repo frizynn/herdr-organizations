@@ -38,6 +38,32 @@ pub struct SessionArgs {
     socket: Option<PathBuf>,
 }
 
+/// The node flags `open` and `coordinator replace` take on top of a profile,
+/// as `node start` does: `--harness` is the profile of that name.
+#[derive(Args, Clone, Default)]
+pub struct LaunchArgs {
+    /// A Herdr agent kind (claude, codex, ...): the profile of that name, one the project allows
+    #[arg(long, value_name = "HARNESS", conflicts_with = "profile")]
+    harness: Option<String>,
+    /// The model, passed as the harness's --model; replaces the profile's
+    #[arg(long, value_name = "NAME")]
+    model: Option<String>,
+    /// The reasoning effort, as the harness's own flag; replaces the profile's (`profile list` shows the levels)
+    #[arg(long, value_name = "LEVEL")]
+    reasoning_effort: Option<String>,
+}
+
+impl From<LaunchArgs> for ProfileOverrides {
+    fn from(args: LaunchArgs) -> Self {
+        ProfileOverrides {
+            harness: args.harness,
+            model: args.model,
+            reasoning_effort: args.reasoning_effort,
+            ..ProfileOverrides::default()
+        }
+    }
+}
+
 impl From<SessionArgs> for SessionFlags {
     fn from(args: SessionArgs) -> Self {
         SessionFlags {
@@ -83,6 +109,8 @@ enum Command {
         /// The coordinator's profile, one the project allows (default: coordinator_profile in PROJECT.md); `profile list` shows them
         #[arg(long, alias = "agent", value_name = "NAME")]
         profile: Option<String>,
+        #[command(flatten)]
+        launch: LaunchArgs,
         /// Start another coordinator even though one is running
         #[arg(long)]
         new: bool,
@@ -391,12 +419,15 @@ enum CoordinatorCommand {
         #[arg(long, value_name = "FILE")]
         text_file: String,
     },
-    /// Stop the project's running coordinator and start a new one on --profile
+    /// Stop the project's running coordinator and start a new one on --profile or --harness
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["profile", "harness"])))]
     Replace {
         slug: String,
         /// The profile the new coordinator runs on (claude, codex, or one of yours)
         #[arg(long)]
-        profile: String,
+        profile: Option<String>,
+        #[command(flatten)]
+        launch: LaunchArgs,
     },
 }
 
@@ -842,6 +873,9 @@ enum ProfileCommand {
         /// Only the names, one per line (what other machines read to assign tasks here)
         #[arg(long, conflicts_with = "project")]
         names: bool,
+        /// With --project: what its coordinator and threads may run, as the versioned JSON contract (docs/json.md)
+        #[arg(long, requires = "project")]
+        json: bool,
     },
     /// Print a profile's launch setup here as JSON (default: [defaults] thread_profile); other machines read it to start threads here
     Resolve { name: Option<String> },
@@ -1096,6 +1130,7 @@ pub fn run() -> Result<()> {
         Command::Open {
             slug,
             profile,
+            launch,
             new,
             tab,
             rebind,
@@ -1107,6 +1142,7 @@ pub fn run() -> Result<()> {
                 session: session.into(),
                 rebind,
                 profile,
+                launch: launch.into(),
                 new,
                 // Only a person at a terminal gets the agent in place; the
                 // popup and agents' shell tools run `open` without one.
@@ -1118,10 +1154,19 @@ pub fn run() -> Result<()> {
                 let text = read_text(&text_file)?;
                 coordinator::prompt(&ctx, &slug, &text)
             }
-            CoordinatorCommand::Replace { slug, profile } => {
+            CoordinatorCommand::Replace {
+                slug,
+                profile,
+                launch,
+            } => {
                 println!(
                     "{}",
-                    crate::ui_ops::replace_coordinator(&ctx, &slug, &profile)?
+                    crate::ui_ops::replace_coordinator(
+                        &ctx,
+                        &slug,
+                        profile.as_deref().unwrap_or(""),
+                        &launch.into()
+                    )?
                 );
                 Ok(())
             }
@@ -1710,7 +1755,18 @@ pub fn run() -> Result<()> {
                 println!("{}", crate::profiles::resolve_json(&ctx, name.as_deref())?);
                 return Ok(());
             }
-            if let ProfileCommand::List { project, names } = command {
+            if let ProfileCommand::List {
+                project,
+                names,
+                json,
+            } = command
+            {
+                if json {
+                    let slug = project.unwrap_or_default();
+                    let project = Project::load(&ctx.root, &slug)?;
+                    println!("{}", crate::profiles::choices_json(&ctx, &project)?);
+                    return Ok(());
+                }
                 if names {
                     let config = crate::profiles::load(&ctx.config_dir)?;
                     for p in config.listed(&crate::profiles::detect(ctx.env)) {

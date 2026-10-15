@@ -251,6 +251,11 @@ pub struct Coordinator {
     /// The profile it started with (empty before profiles: the built-in of
     /// `agent`). A resume or a reuse needs the same profile.
     pub profile: String,
+    /// The model and reasoning effort it started with: the ones chosen at
+    /// `open`, else the profile's own. Empty: the harness's default, or a
+    /// coordinator started before they were recorded.
+    pub model: String,
+    pub reasoning_effort: String,
     /// The last native session id Herdr reported for that kind, for resume.
     pub agent_session: String,
     pub updated: String,

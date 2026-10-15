@@ -1431,6 +1431,7 @@ fn thread_start_and_open_refuse_profiles_off_the_allow_list() {
             session: Default::default(),
             rebind: false,
             profile: Some(bad.into()),
+            launch: Default::default(),
             new: true,
             here: false,
         };
@@ -1448,6 +1449,7 @@ fn thread_start_and_open_refuse_profiles_off_the_allow_list() {
         session: Default::default(),
         rebind: false,
         profile: Some("luna".into()),
+        launch: Default::default(),
         new: true,
         here: false,
     };
@@ -3333,6 +3335,7 @@ fn open_alive(world: &World, project: &Project) -> anyhow::Result<()> {
         },
         rebind: false,
         profile: None,
+        launch: Default::default(),
         new: false,
         here: false,
     };
@@ -3429,6 +3432,7 @@ fn open_starts_a_coordinator_without_a_priming_prompt_then_focuses_it_and_resume
         },
         rebind: false,
         profile: None,
+        launch: Default::default(),
         new,
         here: false,
     };
@@ -3570,7 +3574,9 @@ fn replacing_the_coordinator_stops_the_live_one_then_starts_the_chosen_profile()
     );
     world.runner.on("--pane w3:p2", ok(r#"{"result":{"agent":{"pane_id":"w3:p2","tab_id":"w3:t2","workspace_id":"w3","name":"hpc-demo-1","agent":"codex","agent_status":"idle"}}}"#));
 
-    let message = crate::ui_ops::replace_coordinator(&world.ctx(), "demo", "codex").unwrap();
+    let message =
+        crate::ui_ops::replace_coordinator(&world.ctx(), "demo", "codex", &Default::default())
+            .unwrap();
 
     assert!(message.contains("stopped 1"), "{message}");
     let calls = world.runner.calls.borrow();
@@ -3584,6 +3590,150 @@ fn replacing_the_coordinator_stops_the_live_one_then_starts_the_chosen_profile()
         .position(|c| c.contains("agent start") && c.contains("--kind codex"))
         .unwrap_or_else(|| panic!("{shown:#?}"));
     assert!(close < start, "{shown:#?}");
+}
+
+/// A project whose recorded coordinator ran Claude Code on opus at high
+/// effort, in pane w3:p1, with session `sess-42`; Herdr answers the calls an
+/// `open` makes.
+fn opus_coordinator() -> (World, Project, std::path::PathBuf) {
+    let world = World::new();
+    let project = project::create(&world.root, "demo", "Ship it", vec![]).unwrap();
+    let socket = world.home.path().join("a.sock");
+    std::fs::write(&socket, b"").unwrap();
+    let dir = project.canonical_dir().to_string_lossy().into_owned();
+    project
+        .update_coordinator(|c| {
+            c.socket = socket.to_string_lossy().into_owned();
+            c.workspace_id = "w3".into();
+            c.tab_id = "w3:t1".into();
+            c.pane_id = "w3:p1".into();
+            c.agent_name = "hpc-demo".into();
+            c.cwd = dir.clone();
+            c.agent = "claude".into();
+            c.profile = "claude".into();
+            c.model = "opus".into();
+            c.reasoning_effort = "high".into();
+            c.agent_session = "sess-42".into();
+        })
+        .unwrap();
+    world.runner.on("agent focus", ok(r#"{"result":{}}"#));
+    world.runner.on("tab rename", ok(r#"{"result":{}}"#));
+    world.runner.on(
+        "workspace get",
+        ok(r#"{"result":{"workspace":{"label":"Demo"}}}"#),
+    );
+    world.runner.on(
+        "workspace create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w4","tab_id":"w4:t1","pane_id":"w4:p1"}}}"#),
+    );
+    world.runner.on(
+        "tab create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
+    );
+    world.runner.on("agent start", ok(r#"{"result":{"agent":{"pane_id":"w3:p2","tab_id":"w3:t2","workspace_id":"w3","name":"hpc-demo-1","agent":"claude","agent_status":"idle"}}}"#));
+    (world, project, socket)
+}
+
+fn chosen(socket: &Path, model: &str, effort: &str) -> crate::coordinator::OpenOptions {
+    crate::coordinator::OpenOptions {
+        session: crate::paths::SessionFlags {
+            session: None,
+            socket: Some(socket.to_path_buf()),
+        },
+        rebind: false,
+        profile: None,
+        launch: crate::agent_profile::ProfileOverrides {
+            harness: Some("claude".into()),
+            model: (!model.is_empty()).then(|| model.into()),
+            reasoning_effort: (!effort.is_empty()).then(|| effort.into()),
+            ..Default::default()
+        },
+        new: false,
+        here: false,
+    }
+}
+
+fn last_start(world: &World) -> String {
+    world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .rfind(|c| c.display().contains("agent start"))
+        .map(|c| c.display())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_chosen_model_and_effort_reuse_only_the_coordinator_that_runs_them() {
+    let (world, project, socket) = opus_coordinator();
+    let dir = project.canonical_dir().to_string_lossy().into_owned();
+    *world.agents.borrow_mut() = format!(
+        "[{}]",
+        agent_json("w3", "w3:t1", "w3:p1", &dir, "hpc-demo", "idle")
+    );
+    *world.panes.borrow_mut() = format!("[{}]", pane_json("w3", "w3:t1", "w3:p1", &dir));
+    let ctx = world.ctx();
+
+    // The same choice focuses the live coordinator.
+    crate::coordinator::open(&ctx, "demo", &chosen(&socket, "opus", "high")).unwrap();
+    assert_eq!(
+        (
+            world.runner.count("agent focus"),
+            world.runner.count("agent start")
+        ),
+        (1, 0)
+    );
+
+    // Another model starts one beside it, fresh, and records that model.
+    crate::coordinator::open(&ctx, "demo", &chosen(&socket, "sonnet", "")).unwrap();
+    let start = last_start(&world);
+    assert!(start.contains("--pane w3:p2"), "{start}");
+    assert!(start.ends_with("-- --model sonnet"), "{start}");
+    let record = project.coordinator().unwrap();
+    assert_eq!(
+        (
+            record.pane_id.as_str(),
+            record.model.as_str(),
+            record.reasoning_effort.as_str(),
+            record.agent_session.as_str()
+        ),
+        ("w3:p2", "sonnet", "", "")
+    );
+}
+
+#[test]
+fn a_chosen_model_and_effort_resume_only_the_session_that_ran_them() {
+    // The pane is gone: the same choice resumes the recorded session.
+    let (world, _project, socket) = opus_coordinator();
+    crate::coordinator::open(&world.ctx(), "demo", &chosen(&socket, "opus", "high")).unwrap();
+    let start = last_start(&world);
+    assert!(
+        start.ends_with("-- --model opus --effort high --resume sess-42"),
+        "{start}"
+    );
+
+    // Another effort starts fresh.
+    let (world, _project, socket) = opus_coordinator();
+    crate::coordinator::open(&world.ctx(), "demo", &chosen(&socket, "opus", "max")).unwrap();
+    let start = last_start(&world);
+    assert!(start.ends_with("-- --model opus --effort max"), "{start}");
+
+    // A plain `open` keeps today's rule: the same profile resumes, on the
+    // profile's own model, and the record says so.
+    let (world, project, socket) = opus_coordinator();
+    let plain = crate::coordinator::OpenOptions {
+        launch: Default::default(),
+        ..chosen(&socket, "", "")
+    };
+    crate::coordinator::open(&world.ctx(), "demo", &plain).unwrap();
+    let start = last_start(&world);
+    assert!(start.ends_with("-- --resume sess-42"), "{start}");
+    let record = project.coordinator().unwrap();
+    assert_eq!(
+        (record.model.as_str(), record.reasoning_effort.as_str()),
+        ("", "")
+    );
 }
 
 #[test]
@@ -3610,6 +3760,7 @@ fn open_new_starts_a_fresh_coordinator_beside_a_live_one_without_its_session() {
         },
         rebind: false,
         profile: None,
+        launch: Default::default(),
         new,
         here: false,
     };
@@ -3978,6 +4129,7 @@ impl Here {
             },
             rebind: false,
             profile: None,
+            launch: Default::default(),
             new,
             here,
         };

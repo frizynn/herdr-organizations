@@ -730,6 +730,7 @@ fn advance(ctx: &Ctx, pending: &Pending) -> Result<Option<Next>> {
             },
             rebind: false,
             profile: None,
+            launch: Default::default(),
             new: false,
             here: false,
         };

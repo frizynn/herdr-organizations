@@ -13,10 +13,11 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_profile::{AgentProfile, ProfileOverrides};
 use crate::drift::MAX_HANDOFF_CHARS;
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::paths::{self, Ctx, SessionFlags};
-use crate::profiles::Role;
+use crate::profiles::{Profile, Role};
 use crate::project::{self, Coordinator, Project, Status};
 use crate::remote::quote;
 use crate::{inbox, names, organizations, ticker};
@@ -103,6 +104,8 @@ pub fn found(
         cwd,
         agent: agent.agent.clone(),
         profile: String::new(),
+        model: String::new(),
+        reasoning_effort: String::new(),
         agent_session: agent.session_id().to_string(),
         updated: String::new(),
     })
@@ -183,12 +186,27 @@ pub fn nudge_target(panes: &[LivePane], now: jiff::Timestamp) -> Option<&LivePan
 
 /// The profile a coordinator record ran: before profiles, the built-in of
 /// its kind.
-fn recorded_profile(record: &Coordinator) -> &str {
+pub(crate) fn recorded_profile(record: &Coordinator) -> &str {
     if record.profile.is_empty() {
         &record.agent
     } else {
         &record.profile
     }
+}
+
+/// Whether the recorded coordinator runs `profile` with `model` and `effort`.
+/// A record from before model and effort were kept counts as the profile's own.
+fn runs_choice(record: &Coordinator, profile: &Profile, model: &str, effort: &str) -> bool {
+    let or_own = |recorded: &str, own: &str| {
+        if recorded.is_empty() {
+            own.to_string()
+        } else {
+            recorded.to_string()
+        }
+    };
+    recorded_profile(record) == profile.name
+        && or_own(&record.model, &profile.entry.model) == model
+        && or_own(&record.reasoning_effort, &profile.entry.effort) == effort
 }
 
 pub struct OpenOptions {
@@ -197,6 +215,10 @@ pub struct OpenOptions {
     /// The profile; default `coordinator_profile` in PROJECT.md. It must be
     /// on the project's coordinator allow-list.
     pub profile: Option<String>,
+    /// The node flags on top of it, as at `node start`: `harness` names the
+    /// profile of that name when `profile` is unset, and the model and effort
+    /// replace the profile's. The command line sets only those three.
+    pub launch: ProfileOverrides,
     /// Start another coordinator although one is running.
     pub new: bool,
     /// Start the agent in the pane this command runs in, when that is a shell
@@ -218,6 +240,71 @@ fn here_pane(ctx: &Ctx, options: &OpenOptions, socket: &str, agents: &[Agent]) -
     (!agents.iter().any(|a| a.pane_id == pane)).then(|| pane.to_string())
 }
 
+/// What `open` starts: the coordinator's profile and its launch arguments.
+struct Launch {
+    profile: Profile,
+    kind: String,
+    base_args: Vec<String>,
+    /// The model and effort it runs: the chosen ones, else the profile's.
+    model: String,
+    effort: String,
+    /// A profile, harness, model or effort was chosen: only a coordinator
+    /// that runs that choice is reused or resumed.
+    chosen: bool,
+}
+
+/// The coordinator `options` asks for, refused (allow-list, model, effort)
+/// before anything is started or stopped. An agent can run `open` too: it may
+/// pick an allowed profile, never widen powers.
+fn launch(
+    ctx: &Ctx,
+    project: &Project,
+    settings: &project::Settings,
+    options: &OpenOptions,
+) -> Result<Launch> {
+    let config = crate::profiles::load(&ctx.config_dir)?;
+    let safety = project.safety(&ctx.config_dir)?;
+    // `--harness K` is the profile named K, as at `node start`.
+    let requested = options
+        .profile
+        .clone()
+        .or_else(|| options.launch.harness.clone());
+    let profile = crate::profiles::resolve(
+        &config,
+        &safety,
+        settings,
+        Role::Coordinator,
+        requested.as_deref(),
+        &project.slug,
+    )?;
+    let kind = profile.agent().to_string();
+    let mut node = AgentProfile::default();
+    node.apply(&options.launch);
+    let legacy = crate::profiles::legacy_agent(&config, settings, Role::Coordinator);
+    let base_args = crate::profiles::expand_home(
+        &node.over_profile(&profile, &safety.coordinator_agent_args, &legacy)?,
+        &ctx.env.home,
+    );
+    let chosen_or_own =
+        |chosen: &str, own: &str| if chosen.is_empty() { own } else { chosen }.to_string();
+    Ok(Launch {
+        base_args: safety.launch_args(&kind, &base_args),
+        model: chosen_or_own(&node.model, &profile.entry.model),
+        effort: chosen_or_own(&node.reasoning_effort, &profile.entry.effort),
+        chosen: requested.is_some() || !node.model.is_empty() || !node.reasoning_effort.is_empty(),
+        kind,
+        profile,
+    })
+}
+
+/// Refuses what `open` with `options` would refuse about its profile and
+/// launch flags, without starting anything.
+pub(crate) fn check_launch(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let (settings, _) = project.read_project_md()?;
+    launch(ctx, &project, &settings, options).map(|_| ())
+}
+
 /// `open` for the popup: the same steps with nothing printed over its screen.
 pub(crate) fn open_quiet(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     crate::term::quiet(|| open(ctx, slug, options))
@@ -235,19 +322,14 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             crate::project::BODY_WARN_CHARS
         );
     }
-    // An agent can run `open` too: it may pick an allowed profile, never
-    // widen powers.
-    let config = crate::profiles::load(&ctx.config_dir)?;
-    let safety = project.safety(&ctx.config_dir)?;
-    let profile = crate::profiles::resolve(
-        &config,
-        &safety,
-        &settings,
-        Role::Coordinator,
-        options.profile.as_deref(),
-        slug,
-    )?;
-    let kind = profile.agent().to_string();
+    let Launch {
+        profile,
+        kind,
+        base_args,
+        model,
+        effort,
+        chosen,
+    } = launch(ctx, &project, &settings, options)?;
     let session = paths::resolve_session(&options.session, ctx.env, ctx.runner)?;
     let socket = session.socket.to_string_lossy().into_owned();
     let prefix = current_prefix(&ctx.root)?;
@@ -287,17 +369,17 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     let cwd = dir.to_string_lossy().into_owned();
 
     // A coordinator is running: focus the most recently active one.
-    // With an explicit profile, only the recorded coordinator is reused, and
-    // only when it runs that profile: choosing another profile in the popup
-    // starts one beside the others.
+    // With an explicit profile, harness, model or effort, only the recorded
+    // coordinator is reused, and only when it runs that choice: choosing
+    // another in the popup starts one beside the others.
     let running: Vec<&Agent> = agents
         .iter()
         .filter(|a| a.works_in(&cwd))
         .filter(|a| {
-            options.profile.is_none()
-                || previous
-                    .as_ref()
-                    .is_some_and(|r| r.pane_id == a.pane_id && recorded_profile(r) == profile.name)
+            !chosen
+                || previous.as_ref().is_some_and(|r| {
+                    r.pane_id == a.pane_id && runs_choice(r, &profile, &model, &effort)
+                })
         })
         .collect();
     if let Some(agent) = running.iter().max_by_key(|a| a.state_change_seq)
@@ -312,6 +394,8 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             // Another pane's profile is not known: the built-in of its kind.
             if c.pane_id != agent.pane_id {
                 c.profile = agent.agent.clone();
+                c.model.clear();
+                c.reasoning_effort.clear();
             }
             c.socket = socket.clone();
             c.session = session_name;
@@ -400,6 +484,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             !options.new
                 && r.agent == kind
                 && recorded_profile(r) == profile.name
+                && (!chosen || runs_choice(r, &profile, &model, &effort))
                 && !r.agent_session.is_empty()
         })
         .and_then(|r| crate::agents::resume_args(&kind, &r.agent_session))
@@ -415,6 +500,8 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             cwd: cwd.clone(),
             agent: kind.clone(),
             profile: profile.name.clone(),
+            model: model.clone(),
+            reasoning_effort: effort.clone(),
             // Kept only for the resume; the ticker records a fresh agent's own.
             agent_session: if resume.is_empty() {
                 String::new()
@@ -428,12 +515,6 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         }
     })?;
 
-    let legacy = crate::profiles::legacy_agent(&config, &settings, Role::Coordinator);
-    let base_args = crate::profiles::expand_home(
-        &crate::profiles::launch_args(&profile, &safety.coordinator_agent_args, &legacy),
-        &ctx.env.home,
-    );
-    let base_args = safety.launch_args(&kind, &base_args);
     let mut args = base_args.clone();
     args.extend(resume.iter().cloned());
     if here.is_some() {

@@ -476,11 +476,17 @@ impl Drop for Terminal {
 /// prints (resolve, adopt) cannot scribble over the full-screen view.
 pub fn quiet<T>(f: impl FnOnce() -> T) -> T {
     let _ = io::stdout().flush();
-    // SAFETY: dup/dup2/close on the process's own standard descriptors; each
-    // saved descriptor is restored and closed before returning.
+    // SAFETY: fcntl/dup2/close on the process's own standard descriptors;
+    // each saved descriptor is restored and closed before returning. The
+    // copies are close-on-exec: a child started meanwhile (the detached
+    // ticker) must not keep the caller's output open, or a reader waiting for
+    // its end waits for the ticker.
     unsafe {
-        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-        let saved = [libc::dup(1), libc::dup(2)];
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+        let saved = [
+            libc::fcntl(1, libc::F_DUPFD_CLOEXEC, 0),
+            libc::fcntl(2, libc::F_DUPFD_CLOEXEC, 0),
+        ];
         if null >= 0 && saved.iter().all(|fd| *fd >= 0) {
             libc::dup2(null, 1);
             libc::dup2(null, 2);
