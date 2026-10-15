@@ -328,6 +328,15 @@ fn report(
                 ),
             );
         }
+        let tasks = crate::drift::task_lint(&project).len();
+        if tasks > 0 {
+            check(
+                &mut out,
+                None,
+                &format!("tasks {slug}"),
+                format!("{tasks} problem(s) in TASKS.md; `task lint {slug}` lists them"),
+            );
+        }
         for other in &slugs {
             if other > slug && crate::names::collide(slug, other) {
                 check(

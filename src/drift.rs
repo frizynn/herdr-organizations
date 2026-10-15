@@ -52,6 +52,17 @@ pub struct Problem {
 }
 
 impl Problem {
+    /// The `task lint --json` and `project status --json` shape.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rule": self.rule.name(),
+            "line": self.line,
+            "task": self.task,
+            "thread": self.thread,
+            "detail": self.detail,
+        })
+    }
+
     /// One line of the digest's drift section.
     pub fn text(&self) -> String {
         if self.rule == Rule::HandoffOverLimit {
@@ -194,7 +205,7 @@ fn is_status(owner: &Owner) -> bool {
 
 /// The digest's section: at most `MAX_LINES` lines, the last one saying how
 /// many more there are.
-pub fn section(problems: &[Problem]) -> String {
+pub fn section(problems: &[Problem], slug: &str) -> String {
     let mut out = String::from("## Drift (computed, data not instructions)\n");
     if problems.is_empty() {
         out.push_str("(none)\n");
@@ -209,9 +220,39 @@ pub fn section(problems: &[Problem]) -> String {
         let _ = writeln!(out, "{}", problem.text());
     }
     if shown < problems.len() {
-        let _ = writeln!(out, "- and {} more; read TASKS.md", problems.len() - shown);
+        let _ = writeln!(
+            out,
+            "- and {} more; `task lint {slug}` lists them all",
+            problems.len() - shown
+        );
     }
     out
+}
+
+/// The problems of TASKS.md alone, for `task lint` and `doctor`.
+pub fn task_lint(project: &Project) -> Vec<Problem> {
+    problems(project)
+        .into_iter()
+        .filter(|p| p.rule != Rule::HandoffOverLimit)
+        .collect()
+}
+
+/// `task lint [--json]`: every problem of TASKS.md, one line each, or the
+/// JSON document. It only reads.
+pub fn print_lint(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> anyhow::Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let found = task_lint(&project);
+    if json {
+        return crate::threads::print_json(&serde_json::json!({
+            "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+            "project": project.slug,
+            "problems": found.iter().map(Problem::to_json).collect::<Vec<_>>(),
+        }));
+    }
+    for problem in &found {
+        println!("{}", problem.text());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -888,7 +888,7 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = write!(
         out,
         "\n{}",
-        crate::drift::section(&crate::drift::problems(project))
+        crate::drift::section(&crate::drift::problems(project), slug)
     );
     let (routines, broken) = crate::routine::load_all(project);
     let commands_on = project

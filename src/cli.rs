@@ -769,12 +769,26 @@ enum ProjectCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Tasks, threads, pull requests and drift, computed from the files on every call
+    Status {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum TaskCommand {
     /// List the tasks; ask the coordinator to change them (`coordinator prompt`)
     List {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Where TASKS.md disagrees with the thread records; it changes nothing
+    Lint {
         slug: String,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
@@ -1526,9 +1540,15 @@ pub fn run() -> Result<()> {
         Command::Project {
             command: ProjectCommand::Show { slug, json },
         } => overview::print_project_show(&ctx, &slug, json),
+        Command::Project {
+            command: ProjectCommand::Status { slug, json },
+        } => crate::status::print(&ctx, &slug, json),
         Command::Task {
             command: TaskCommand::List { slug, json },
         } => crate::tasks::print_list(&ctx, &slug, json),
+        Command::Task {
+            command: TaskCommand::Lint { slug, json },
+        } => crate::drift::print_lint(&ctx, &slug, json),
         Command::Pause { slug } => lifecycle::set_status(&ctx, &slug, Status::Paused),
         Command::Resume { slug } => {
             if Project::load(&ctx.root, &slug)?.status() == Status::Archived {
