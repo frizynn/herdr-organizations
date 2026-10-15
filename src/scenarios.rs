@@ -2305,6 +2305,64 @@ fn a_merged_thread_whose_agent_stays_idle_is_resolved_after_the_grace_period() {
     );
 }
 
+/// Resolve-on-merge with the delegated task still in TASKS.md: the
+/// coordinator gets one `task` item instead of having to notice.
+#[test]
+fn a_merged_thread_resolved_with_its_task_still_open_leaves_a_task_item() {
+    let (world, project) = merged_world("idle");
+    std::fs::write(
+        project.dir().join("TASKS.md"),
+        "# Tasks\n\n## Backlog\n- [ ] Task (claude) · t-0001\n",
+    )
+    .unwrap();
+    let ctx = world.ctx();
+    ticker::tick_project(&ctx, &project).unwrap();
+    merged_seen_ago(&project, crate::steps::MERGE_GRACE_SECS);
+    ticker::tick_project(&ctx, &project).unwrap();
+    let items = items_of(&project, "task");
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].subject.as_str(), items[0].event.as_str()),
+        ("t-0001", "PR merged, task open")
+    );
+    assert_eq!(
+        crate::steps::nudge_text(&items),
+        "[hp inbox] t-0001 PR merged, task open"
+    );
+}
+
+/// The ticker stops reading a pull request once its thread is resolved, so a
+/// thread resolved by hand before its merge kept `OPEN` for good. Such a
+/// record is read again, at most once an hour, and nothing is announced.
+#[test]
+fn a_resolved_thread_whose_pull_request_was_left_open_is_read_again() {
+    let (world, project) = pr_world(MERGED_JSON);
+    thread::update(&project, "t-0001", |t| {
+        t.status = Status::Resolved;
+        t.resolved_reason = "manual".into();
+        t.pr = PR_URL.into();
+        t.pr_state = "OPEN".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    ticker::tick_project(&ctx, &project).unwrap();
+    let t = thread::load(&project, "t-0001").unwrap();
+    assert_eq!(
+        (t.status, t.pr_state.as_str(), t.pr_review.as_str()),
+        (Status::Resolved, "MERGED", "APPROVED")
+    );
+    assert_eq!(world.runner.count("gh pr view"), 1);
+    assert!(items_of(&project, "pr").is_empty());
+
+    // The two-minute pass comes round again within the hour: no new read.
+    thread::update(&project, "t-0001", |t| t.pr_state = "OPEN".into()).unwrap();
+    let mut state = crate::steps::load_state(&project);
+    state.last_pr_check = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(&project, &state).unwrap();
+    ticker::tick_project(&ctx, &project).unwrap();
+    assert_eq!(world.runner.count("gh pr view"), 1);
+}
+
 /// The agent's own progress report, as `herdr-projects report` writes it. The
 /// thread's pane is listed too, or the ticker drops the record as stale.
 fn thread_progress(world: &World, project: &Project, percent: u8, activity: &str) {

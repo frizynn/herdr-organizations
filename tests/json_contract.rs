@@ -101,6 +101,8 @@ pr = "{URL}"
 pr_state = "OPEN"
 pr_review = "APPROVED"
 auto_fix_ci = true
+task = "Checkout"
+task_origin = "task"
 "#
         ),
     )
@@ -197,7 +199,9 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "percent": null,
         "next": [],
         "report": null,
-        "library": format!("{}/library/t-0001", fixture.dir())
+        "library": format!("{}/library/t-0001", fixture.dir()),
+        "task": "Checkout",
+        "task_origin": "task"
     })
 }
 
@@ -245,7 +249,9 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "percent": null,
         "next": [],
         "report": null,
-        "library": format!("{}/library/t-0002", fixture.dir())
+        "library": format!("{}/library/t-0002", fixture.dir()),
+        "task": "",
+        "task_origin": ""
     })
 }
 
