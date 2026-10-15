@@ -498,6 +498,29 @@ fn a_node_started_from_a_template_gets_its_role_profile_rules_and_memory() {
         (node.profile.as_str(), node.agent.as_str()),
         ("deep", "codex")
     );
+
+    // Delegated from a task: the owner's profile wins over the template's,
+    // which still serves an unassigned task.
+    std::fs::write(
+        project.dir().join("TASKS.md"),
+        "## A\n- [ ] Owned (claude)\n- [ ] Open\n",
+    )
+    .unwrap();
+    for (task, profile) in [("Owned", "claude"), ("Open", "deep")] {
+        let mut delegated = args(
+            task,
+            crate::organizations::NodeRequest {
+                from_task: Some(task.into()),
+                ..crate::organizations::NodeRequest::default()
+            },
+        );
+        crate::templates::resolve(&ctx, Some("demo"), "frontend")
+            .unwrap()
+            .fill(&mut delegated, None)
+            .unwrap();
+        let node = threads::start(&ctx, "demo", delegated).unwrap();
+        assert_eq!((node.profile.as_str(), node.task.as_str()), (profile, task));
+    }
     assert_eq!(
         crate::organizations::node_rules(&project, &node.id).unwrap(),
         "# Node instructions\n\nKeep changes accessible.\n"
@@ -2361,6 +2384,52 @@ fn a_resolved_thread_whose_pull_request_was_left_open_is_read_again() {
     crate::steps::save_state(&project, &state).unwrap();
     ticker::tick_project(&ctx, &project).unwrap();
     assert_eq!(world.runner.count("gh pr view"), 1);
+}
+
+/// Up to 20 a pass, round robin; a pull request that cannot be read is
+/// skipped and raises no `gh` outage.
+#[test]
+fn resolved_pull_requests_are_read_in_batches_and_a_failure_is_skipped() {
+    let (world, project) = pr_world(MERGED_JSON);
+    thread::update(&project, "t-0001", |t| t.status = Status::Resolved).unwrap();
+    for n in 1..=22 {
+        let id = format!("t-{n:04}");
+        if n > 1 {
+            thread::allocate(&project, |t| t.title = id.clone()).unwrap();
+        }
+        // t-0002's cannot be read: `view_state` refuses it before `gh`.
+        let url = if n == 2 {
+            "https://example.com/owner/gone/1".to_string()
+        } else {
+            PR_URL.to_string()
+        };
+        thread::update(&project, &id, |t| {
+            t.status = Status::Resolved;
+            t.pr = url;
+            t.pr_state = "OPEN".into();
+        })
+        .unwrap();
+    }
+    let ctx = world.ctx();
+    let open = |project: &Project| {
+        thread::list(project)
+            .iter()
+            .filter(|t| t.pr_state == "OPEN")
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+    };
+    ticker::tick_project(&ctx, &project).unwrap_err();
+    assert_eq!(open(&project), ["t-0002", "t-0021", "t-0022"]);
+    assert!(items_of(&project, "outage").is_empty());
+
+    // An hour later the next batch starts after the last one read.
+    let mut state = crate::steps::load_state(&project);
+    state.last_pr_check = "2026-01-01T00:00:00Z".into();
+    state.last_resolved_pr_check = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(&project, &state).unwrap();
+    ticker::tick_project(&ctx, &project).unwrap_err();
+    assert_eq!(open(&project), ["t-0002"]);
+    assert!(items_of(&project, "outage").is_empty());
 }
 
 /// The agent's own progress report, as `herdr-projects report` writes it. The

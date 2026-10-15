@@ -878,9 +878,7 @@ pub fn pull_requests(
             }
         }
     }
-    errors.extend(resolved_pull_requests(
-        ctx, project, state, memory, &notifier, now,
-    ));
+    errors.extend(resolved_pull_requests(ctx, project, state, now));
     errors
 }
 
@@ -892,8 +890,6 @@ fn resolved_pull_requests(
     ctx: &Ctx,
     project: &Project,
     state: &mut State,
-    memory: &mut Memory,
-    notifier: &crate::notify::Notifier,
     now: jiff::Timestamp,
 ) -> Vec<anyhow::Error> {
     let mut errors = Vec::new();
@@ -916,25 +912,23 @@ fn resolved_pull_requests(
         .position(|t| t.id > state.resolved_pr_cursor)
         .unwrap_or(0);
     stale.rotate_left(after);
+    // A pull request that cannot be read any more (a deleted repository, lost
+    // access) is logged and skipped; it says nothing about `gh` as a whole,
+    // which the pass above follows.
     for t in stale.into_iter().take(RESOLVED_PR_BATCH) {
         state.resolved_pr_cursor = t.id.clone();
         match pr::view_state(ctx.runner, &t.pr, &t.origin) {
-            Ok((pr_state, review)) => {
-                gh_worked(project, memory, now, &mut errors);
-                if pr_state != t.pr_state || review != t.pr_review {
-                    errors.extend(
-                        thread::update(project, &t.id, |t| {
-                            t.pr_state = pr_state;
-                            t.pr_review = review;
-                        })
-                        .err(),
-                    );
-                }
+            Ok((pr_state, review)) if pr_state != t.pr_state || review != t.pr_review => {
+                errors.extend(
+                    thread::update(project, &t.id, |t| {
+                        t.pr_state = pr_state;
+                        t.pr_review = review;
+                    })
+                    .err(),
+                );
             }
-            Err(error) => {
-                gh_failed(project, notifier, memory, &error, now, &mut errors);
-                break;
-            }
+            Ok(_) => {}
+            Err(error) => errors.push(error.context(format!("{}: resolved thread's PR", t.id))),
         }
     }
     errors

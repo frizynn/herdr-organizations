@@ -1378,6 +1378,7 @@ pub fn run() -> Result<()> {
                         rules,
                         memory: Default::default(),
                         from_task,
+                        template_profile: None,
                     },
                 };
                 if let Some(name) = &template {

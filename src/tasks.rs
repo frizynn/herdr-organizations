@@ -343,14 +343,7 @@ pub fn delegation(
 ) -> Result<Delegation> {
     let task = find(&read(&project.dir()), title)?;
     let config = crate::profiles::load(&ctx.config_dir)?;
-    if task.owner.is_person(|p| config.get(p).is_some()) {
-        bail!(
-            "\"{}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks",
-            task.title,
-            task.owner
-        );
-    }
-    let (profile, machine) = launch_for(&task, profile, machine)?;
+    let (profile, machine) = launch_for(&task, |p| config.get(p).is_some(), profile, machine)?;
     let text = with_notes(&task, text);
     Ok(Delegation {
         task,
@@ -427,21 +420,28 @@ pub fn open_on(tasks_md: &str, id: &str) -> Vec<Task> {
 
 /// The `--profile` and `--machine` a delegated task starts with: its owner's,
 /// unless the command line gives its own. A flag that contradicts the owner is
-/// refused, so the task line and the thread never disagree.
+/// refused, so the task line and the thread never disagree, and so is a
+/// person's task (`is_profile` tells a bare name that is no profile).
 pub fn launch_for(
     task: &Task,
+    is_profile: impl Fn(&str) -> bool,
     profile: Option<String>,
     machine: Option<String>,
 ) -> Result<(Option<String>, Option<String>)> {
     let title = &task.title;
+    let person = || {
+        anyhow::anyhow!(
+            "\"{title}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks",
+            task.owner
+        )
+    };
     match &task.owner {
         Owner::Unassigned => Ok((profile, machine)),
         Owner::Me => bail!(
             "\"{title}\" is the user's own task (me); change its owner in TASKS.md before delegating it"
         ),
-        Owner::Person(text) => bail!(
-            "\"{title}\" belongs to {text}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks"
-        ),
+        Owner::Person(_) => Err(person()),
+        Owner::Agent { .. } if task.owner.is_person(is_profile) => Err(person()),
         Owner::Agent {
             profile: owned_profile,
             machine: owned_machine,
@@ -560,41 +560,50 @@ mod tests {
             "## A\n- [ ] P (fast)\n- [ ] M (@m1)\n- [ ] PM (fast@m1)\n- [ ] U\n- [ ] Me (me)\n- [ ] X (Bob Smith)\n",
         );
         let s = |v: &str| Some(v.to_string());
+        let known = |p: &str| ["fast", "deep"].contains(&p);
         assert_eq!(
-            launch_for(&tasks[0], None, None).unwrap(),
+            launch_for(&tasks[0], known, None, None).unwrap(),
             (s("fast"), None)
         );
         assert_eq!(
-            launch_for(&tasks[1], s("deep"), None).unwrap(),
+            launch_for(&tasks[1], known, s("deep"), None).unwrap(),
             (s("deep"), s("m1"))
         );
         assert_eq!(
-            launch_for(&tasks[2], None, s("m1")).unwrap(),
+            launch_for(&tasks[2], known, None, s("m1")).unwrap(),
             (s("fast"), s("m1"))
         );
         assert_eq!(
-            launch_for(&tasks[3], s("deep"), s("m2")).unwrap(),
+            launch_for(&tasks[3], known, s("deep"), s("m2")).unwrap(),
             (s("deep"), s("m2"))
         );
         assert!(
-            launch_for(&tasks[0], s("deep"), None)
+            launch_for(&tasks[0], known, s("deep"), None)
                 .unwrap_err()
                 .to_string()
                 .contains("assigned to profile `fast`")
         );
         assert!(
-            launch_for(&tasks[0], None, s("m1"))
+            launch_for(&tasks[0], known, None, s("m1"))
                 .unwrap_err()
                 .to_string()
                 .contains("assigned to this machine")
         );
-        assert!(launch_for(&tasks[2], None, s("m2")).is_err());
-        assert!(launch_for(&tasks[4], None, None).is_err());
+        assert!(launch_for(&tasks[2], known, None, s("m2")).is_err());
+        assert!(launch_for(&tasks[4], known, None, None).is_err());
         assert!(
-            launch_for(&tasks[5], None, None)
+            launch_for(&tasks[5], known, None, None)
                 .unwrap_err()
                 .to_string()
                 .contains("a person")
+        );
+        // A bare name that is no profile here is a person too.
+        let priya = &parse("- [ ] Call the bank (Priya)\n")[0];
+        assert!(
+            launch_for(priya, known, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("belongs to Priya, a person")
         );
     }
 
@@ -704,6 +713,11 @@ mod tests {
                 .ends_with("- [ ] Last · t-0012")
         );
         assert!(link(text, "Nope", "t-0013").is_err());
+        // A CRLF line keeps its line ending.
+        assert_eq!(
+            link("- [ ] One\r\n- [ ] Two\r\n", "one", "t-0014").unwrap(),
+            "- [ ] One · t-0014\r\n- [ ] Two\r\n"
+        );
     }
 
     #[test]

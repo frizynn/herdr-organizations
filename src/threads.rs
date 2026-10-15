@@ -306,12 +306,13 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
         &machine,
     )?;
     // The profile: `--profile` (or a node's `--harness`, a built-in profile of
-    // that kind), else the parent node's, else the project default for the
-    // role. It decides the harness; the node's own flags come on top.
+    // that kind) or the delegated task's owner, else the template's, else the
+    // parent node's, else the project default for the role. It decides the harness; the node's own flags come on top.
     let requested = args
         .profile
         .clone()
         .or_else(|| node_request.profile.harness.clone())
+        .or_else(|| node_request.template_profile.clone())
         .or_else(|| organizations::parent_profile(&project, &node_request.parent_id));
     let profile = thread_profile(
         ctx,

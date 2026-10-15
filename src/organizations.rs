@@ -34,6 +34,9 @@ pub struct NodeRequest {
     /// The TASKS.md task it is delegated from (`--from-task`), its title as
     /// written there: the new record keeps it and the task line gets the id.
     pub from_task: Option<String>,
+    /// The profile of the template it starts from, used when neither a flag
+    /// nor the task's owner names one.
+    pub template_profile: Option<String>,
 }
 
 impl Default for NodeRequest {
@@ -46,6 +49,7 @@ impl Default for NodeRequest {
             rules: String::new(),
             memory: Memory::default(),
             from_task: None,
+            template_profile: None,
         }
     }
 }
@@ -1065,6 +1069,43 @@ mod tests {
             role,
             ..NodeRequest::default()
         }
+    }
+
+    /// The coordinator renamed the task between the command's check and the
+    /// lock: the link fails and nothing of the node is left.
+    #[test]
+    fn a_task_line_gone_under_the_lock_leaves_no_node_behind() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let tasks = "## A\n- [ ] Renamed\n";
+        std::fs::write(project.dir().join("TASKS.md"), tasks).unwrap();
+        let error = create_node(
+            &project,
+            &CreateNode {
+                request: NodeRequest {
+                    from_task: Some("Original".into()),
+                    ..NodeRequest::default()
+                },
+                title: "Original".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "Do it.".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no task titled \"Original\""),
+            "{error:#}"
+        );
+        assert!(thread::list(&project).is_empty());
+        assert!(!thread::task_path(&project, "t-0001").exists());
+        assert!(!node_scope_dir(&project, "t-0001").exists());
+        assert_eq!(
+            std::fs::read_to_string(project.dir().join("TASKS.md")).unwrap(),
+            tasks
+        );
     }
 
     fn create_with_rules(

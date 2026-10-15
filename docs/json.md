@@ -158,7 +158,7 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `machine` | string | An agent's machine, empty for this machine. |
 | `name` | string | A person's name as written, empty for the other kinds. |
 
-Only the coordinator writes `TASKS.md`, with one exception: `thread start` and `node start` with `--from-task` append ` · <thread id>` to that task's line, under the project's lock. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
+Only the coordinator writes `TASKS.md`, with one exception: `thread start` and `node start` with `--from-task` append ` · <thread id>` to the end of that task's line. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
 
 ```sh
 herdr-organizations coordinator prompt acme --text-file - <<'EOF'

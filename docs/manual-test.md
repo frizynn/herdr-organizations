@@ -80,7 +80,7 @@ In a disposable root, with a project whose `TASKS.md` has a task:
 2. Give a second task the same title: `--from-task` is refused and no thread record is created.
 3. `thread resolve` the thread while its task is open: `inbox list demo --json` has one `task` item for it.
 4. Write a `HANDOFF.md` over 8,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `handoff-over-limit`, and `doctor` warns.
-5. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: once the ticker has run, `thread show --json` reports `MERGED`.
+5. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: within an hour of the ticker running (at once on a ticker's first pass), `thread show --json` reports `MERGED`.
 
 ## 0.2.0: the Herdr-native redesign
 
