@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::herdr::{Agent, Herdr};
 use crate::organizations;
 use crate::paths::Ctx;
+use crate::pr_actions::{self, Request};
 use crate::project::{self, Project, Settings};
 use crate::thread::{self, CopyOutcome, Group, Status, Thread};
 use crate::threads;
@@ -71,6 +72,12 @@ pub struct State {
     /// the last thread read, so the next batch starts after it.
     pub last_resolved_pr_check: String,
     pub resolved_pr_cursor: String,
+    /// Threads whose pull request's merge conflict was announced; one leaves
+    /// once GitHub reports it mergeable, so a conflict is announced once.
+    pub conflicts: BTreeSet<String>,
+    /// thread id -> head commit of its branch, pushed to origin with no pull
+    /// request found for it at the last check (`thread pr-create`).
+    pub unopened: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -720,6 +727,7 @@ pub fn pull_requests(
     }
     state.last_pr_check = now.to_string();
 
+    let mut unopened = BTreeMap::new();
     for t in thread::list(project) {
         if t.status != Status::Open {
             continue;
@@ -770,13 +778,26 @@ pub fn pull_requests(
         };
         if url != t.pr {
             let new_url = url.clone();
-            errors.extend(thread::update(project, &t.id, |t| t.pr = new_url).err());
+            errors.extend(
+                thread::update(project, &t.id, |t| {
+                    t.pr = new_url;
+                    t.pr_asked.clear();
+                })
+                .err(),
+            );
             // What was known about the previous pull request is not this one's.
             state.prs.remove(&t.id);
             state.auto_fix.remove(&t.id);
             state.auto_merge_tried.remove(&t.id);
+            state.conflicts.remove(&t.id);
         }
         if url.is_empty() {
+            if t.kind == thread::Kind::Worktree
+                && !t.is_remote()
+                && let Some(head) = pr_actions::pushed_head(ctx.runner, &t)
+            {
+                unopened.insert(t.id.clone(), head);
+            }
             continue;
         }
 
@@ -812,6 +833,7 @@ pub fn pull_requests(
                 }
             }
             Ok(pr::Checked::Summary(summary)) => {
+                errors.extend(note_conflict(project, &notifier, state, &t, &url, &summary).err());
                 let old = state.prs.get(&t.id).cloned();
                 // Counts, mergeability and failing check names change without
                 // news: they are kept for `--json` and the auto actions, and
@@ -878,8 +900,54 @@ pub fn pull_requests(
             }
         }
     }
+    state.unopened = unopened;
     errors.extend(resolved_pull_requests(ctx, project, state, now));
     errors
+}
+
+/// One `pr` item when GitHub starts reporting a merge conflict, and nothing
+/// more until it reports the pull request mergeable again. `UNKNOWN`, GitHub
+/// still working it out, changes nothing.
+fn note_conflict(
+    project: &Project,
+    notifier: &crate::notify::Notifier,
+    state: &mut State,
+    t: &Thread,
+    url: &str,
+    summary: &pr::Summary,
+) -> Result<()> {
+    match summary.mergeable.as_str() {
+        "CONFLICTING" if summary.state == "OPEN" => {
+            if !state.conflicts.insert(t.id.clone()) {
+                return Ok(());
+            }
+            let number = url.rsplit('/').next().unwrap_or("");
+            notifier.send(
+                &t.id,
+                &format!("PR #{number} · merge conflicts"),
+                crate::notify::Sound::None,
+                false,
+            );
+            inbox::write(
+                project,
+                "pr",
+                &t.id,
+                "PR has conflicts",
+                &format!(
+                    "{}: pull request {url} has merge conflicts; `thread pr-action {} {} resolve-conflicts` asks the thread to resolve them",
+                    thread_label(t),
+                    project.slug,
+                    t.id
+                ),
+                "",
+            )?;
+        }
+        "" | "UNKNOWN" if summary.state == "OPEN" => {}
+        _ => {
+            state.conflicts.remove(&t.id);
+        }
+    }
+    Ok(())
 }
 
 /// The pass above reads open threads only, so a thread resolved while its
@@ -993,12 +1061,23 @@ fn fire_pr_routines(
     if events.is_empty() {
         return errors;
     }
+    // What `thread pr-action` already asked about this state is not news.
+    let record = thread::load(project, &t.id).unwrap_or_else(|_| t.clone());
+    let news: Vec<&str> = events
+        .iter()
+        .copied()
+        .filter(|e| {
+            Request::of_event(e)
+                .is_none_or(|request| !pr_actions::asked_by_hand(&record, request, summary))
+        })
+        .collect();
+    let mut asked: BTreeMap<&str, (Request, String)> = BTreeMap::new();
     let (routines, _) = routine::load_all(project);
     for r in routines.iter().filter(|r| r.enabled) {
         let routine::Trigger::Pr(wanted) = &r.trigger else {
             continue;
         };
-        let hit: Vec<&str> = events
+        let hit: Vec<&str> = news
             .iter()
             .copied()
             .filter(|e| wanted.iter().any(|w| w == e))
@@ -1008,14 +1087,21 @@ fn fire_pr_routines(
         }
         let prompt = pr_routine_prompt(&r.name, &r.prompt, url, &hit, summary);
         let (event, outcome) = match threads::prompt(ctx, &project.slug, &t.id, &prompt) {
-            Ok(state) => (
-                "prompted its thread",
-                format!(
-                    "prompted {} (agent was {state}) about: {}",
-                    t.id,
-                    hit.join(", ")
-                ),
-            ),
+            Ok(state) => {
+                for request in hit.iter().filter_map(|e| Request::of_event(e)) {
+                    asked
+                        .entry(request.token())
+                        .or_insert_with(|| (request, format!("routine {}", r.name)));
+                }
+                (
+                    "prompted its thread",
+                    format!(
+                        "prompted {} (agent was {state}) about: {}",
+                        t.id,
+                        hit.join(", ")
+                    ),
+                )
+            }
             Err(error) => (
                 "could not prompt its thread",
                 format!(
@@ -1036,6 +1122,9 @@ fn fire_pr_routines(
             )
             .err(),
         );
+    }
+    for (request, by) in asked.into_values() {
+        errors.extend(pr_actions::record(project, &t.id, request, summary, &by).err());
     }
     errors
 }
@@ -1190,19 +1279,21 @@ fn auto_fix(
     summary: &pr::Summary,
 ) -> Result<()> {
     let sent = state.auto_fix.get(&t.id).cloned().unwrap_or_default();
-    let checks_key = format!("{} {}", summary.head_oid, summary.failing_checks.join(","));
+    let checks_key = Request::FixCi.key(summary);
     let comments_key = format!("{} {}", summary.comment_count, summary.review_decision);
     let fix_checks = summary.checks.failed > 0
         && checks_key != sent.checks
-        && !pr_routine_covers(project, "checks-failed");
+        && !pr_routine_covers(project, "checks-failed")
+        && !pr_actions::asked_by_hand(t, Request::FixCi, summary);
     // Only more comments or a fresh change request is feedback; an approval
     // is not, and a needless push could restart checks or dismiss it.
     let (sent_count, sent_review) = sent.comments.split_once(' ').unwrap_or(("0", ""));
     let more_comments = summary.comment_count > sent_count.parse().unwrap_or(0);
     let changes_requested =
         summary.review_decision == "CHANGES_REQUESTED" && sent_review != "CHANGES_REQUESTED";
-    let fix_comments =
-        (more_comments || changes_requested) && !pr_routine_covers(project, "review");
+    let fix_comments = (more_comments || changes_requested)
+        && !pr_routine_covers(project, "review")
+        && !pr_actions::asked_by_hand(t, Request::AddressComments, summary);
     if !fix_comments && comments_key != sent.comments {
         // Seen without news: the baseline a later comment or change request
         // is compared with.
@@ -1248,6 +1339,14 @@ fn auto_fix(
         ),
         "",
     )?;
+    for (asked, request) in [
+        (fix_checks, Request::FixCi),
+        (fix_comments, Request::AddressComments),
+    ] {
+        if asked {
+            pr_actions::record(project, &t.id, request, summary, "auto-fix")?;
+        }
+    }
     Ok(())
 }
 
@@ -1739,8 +1838,9 @@ mod tests {
                 );
                 let gh_view = Rc::new(RefCell::new(view("APPROVED", GREEN, 10)));
                 let served = gh_view.clone();
+                // By program: a prompt that quotes `gh pr view` is not a call.
                 world.runner.on_fn(
-                    |cmd| cmd.display().contains("gh pr view"),
+                    |cmd| cmd.program == "gh" && cmd.display().contains("gh pr view"),
                     move |_| Ok(ok(&served.borrow())),
                 );
                 world.runner.on("gh pr merge", merge);
@@ -2038,7 +2138,8 @@ mod tests {
 
             let setup = Setup::new("idle", |t| t.pr = URL.into());
             crate::project::write_default_routine(&setup.project).unwrap();
-            *setup.gh_view.borrow_mut() = view("APPROVED", RED, 10);
+            // Not approved: an approval is a `review` event the routine prompts about.
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", RED, 10);
             ask(&setup);
             setup.check(&mut State::default());
             assert_eq!(setup.world.runner.count("agent prompt"), 1, "pr-followup");

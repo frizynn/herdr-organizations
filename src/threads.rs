@@ -69,7 +69,12 @@ fn require_session<'a>(ctx: &'a Ctx, project: &Project) -> Result<SessionView<'a
     })
 }
 
-fn git(runner: &dyn Runner, repo: &str, args: &[&str], timeout: Duration) -> Result<String> {
+pub(crate) fn git(
+    runner: &dyn Runner,
+    repo: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String> {
     let out = runner.run(
         &Cmd::new("git", timeout)
             .args(["-C", repo])
@@ -1665,6 +1670,8 @@ pub struct Row {
     pub thread: Thread,
     pub group: Group,
     pub note: String,
+    /// The group comes from the project's Herdr session now, not the record.
+    pub live: bool,
 }
 
 pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
@@ -1674,6 +1681,12 @@ pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
         .into_iter()
         .map(|t| row(&t, &project.root, view.as_ref(), now))
         .collect()
+}
+
+/// One thread's row, asking the project's Herdr session now.
+pub fn live_row(ctx: &Ctx, project: &Project, t: &Thread) -> Row {
+    let view = session_view(ctx, project);
+    row(t, &project.root, view.as_ref(), jiff::Timestamp::now())
 }
 
 /// Best known group without a live Herdr round trip. The ticker persists this
@@ -1698,6 +1711,7 @@ fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp
             thread: t.clone(),
             group: Group::Resolved,
             note: t.resolved_reason.clone(),
+            live: false,
         };
     }
     let Some(view) = view else {
@@ -1706,6 +1720,7 @@ fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp
             thread: t.clone(),
             group: recorded,
             note: "session unreachable".into(),
+            live: false,
         };
     };
     if t.is_remote() {
@@ -1719,6 +1734,7 @@ fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp
             thread: t.clone(),
             group: recorded,
             note: format!("{state}, on {}", t.machine),
+            live: false,
         };
     }
     let live = thread::live_with_report(t, &view.agents, &view.panes, now, root, &view.socket);
@@ -1739,6 +1755,7 @@ fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp
         thread: t.clone(),
         group,
         note,
+        live: true,
     }
 }
 
@@ -1781,6 +1798,8 @@ pub struct ThreadJson {
     pub auto_fix_ci: bool,
     pub auto_merge: bool,
     pub pr: Option<PrJson>,
+    /// What a client may ask of the thread itself (`create-pr`).
+    pub actions: Vec<&'static str>,
     pub origin: String,
     /// The sidebar's state line as the ticker last computed it.
     pub state_line: String,
@@ -1814,6 +1833,8 @@ pub struct PrJson {
     pub mergeable: Option<String>,
     /// `null` when ready to merge, else why `thread merge` would refuse.
     pub merge_blocker: Option<String>,
+    /// What a client may ask about it, most pressing first.
+    pub actions: Vec<&'static str>,
 }
 
 /// Merging and turning auto-merge on are the user's call. When the caller is
@@ -1856,12 +1877,9 @@ pub fn merge_blocker(t: &Thread, summary: &pr::Summary) -> Option<String> {
     pr::merge_blocker(summary).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
 }
 
-pub fn thread_json(
-    project: &Project,
-    row: &Row,
-    prs: &std::collections::BTreeMap<String, pr::Summary>,
-) -> ThreadJson {
+pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> ThreadJson {
     let t = &row.thread;
+    let prs = &state.prs;
     let pr = (!t.pr.is_empty()).then(|| {
         // A summary stored before the counts existed has no head commit.
         let summary = prs.get(&t.id).filter(|s| !s.head_oid.is_empty());
@@ -1887,6 +1905,11 @@ pub fn thread_json(
                 }
                 Some(s) => merge_blocker(t, s),
                 None => Some("the ticker has not read this pull request yet".into()),
+            },
+            actions: match summary {
+                _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => Vec::new(),
+                Some(s) => crate::pr_actions::pr_actions(t, s),
+                None => Vec::new(),
             },
         }
     });
@@ -1927,6 +1950,7 @@ pub fn thread_json(
         auto_fix_ci: t.auto_fix_ci,
         auto_merge: t.auto_merge,
         pr,
+        actions: crate::pr_actions::thread_actions(row, state),
         origin: t.origin.clone(),
         state_line: t.state_line.clone(),
         activity: t.activity.clone(),
@@ -1951,9 +1975,9 @@ pub fn thread_json(
 
 /// Every thread of a project in the `--json` contract, in id order.
 pub fn threads_json(project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
-    let prs = steps::load_state(project).prs;
+    let state = steps::load_state(project);
     rows.iter()
-        .map(|row| thread_json(project, row, &prs))
+        .map(|row| thread_json(project, row, &state))
         .collect()
 }
 
@@ -1984,13 +2008,13 @@ pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let entries = organizations::tree(&project)?;
     let rows = rows(ctx, &project);
-    let prs = steps::load_state(&project).prs;
+    let state = steps::load_state(&project);
     let nodes: Vec<NodeJson> = entries
         .iter()
         .filter_map(|entry| {
             let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
             Some(NodeJson {
-                thread: thread_json(&project, row, &prs),
+                thread: thread_json(&project, row, &state),
                 depth: entry.depth,
                 tree_order: entry.tree_order,
             })
@@ -2024,8 +2048,8 @@ pub fn set_flags(
 
 /// One thread as JSON, the same document `thread show --json` prints.
 pub fn row_json(project: &Project, row: &Row) -> serde_json::Value {
-    let prs = steps::load_state(project).prs;
-    serde_json::to_value(thread_json(project, row, &prs)).unwrap_or_default()
+    let state = steps::load_state(project);
+    serde_json::to_value(thread_json(project, row, &state)).unwrap_or_default()
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
@@ -2071,13 +2095,7 @@ pub fn print_node_list(ctx: &Ctx, slug: &str) -> Result<()> {
 pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
-    let view = session_view(ctx, &project);
-    let row = row(
-        &record,
-        &project.root,
-        view.as_ref(),
-        jiff::Timestamp::now(),
-    );
+    let row = live_row(ctx, &project, &record);
     if json {
         return print_json(&serde_json::json!({
             "schema_version": JSON_SCHEMA_VERSION,

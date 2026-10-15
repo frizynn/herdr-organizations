@@ -475,6 +475,7 @@ mod tests {
             },
             group,
             note: note.into(),
+            live: true,
         }
     }
 

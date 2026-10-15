@@ -180,6 +180,23 @@ pub struct Thread {
     /// `task` when started with `--from-task`, `chat` when started without
     /// it, empty on a record from before task links or an adopted pane.
     pub task_origin: String,
+    /// What its agent was last asked about its pull request, per request
+    /// (`fix-ci`, `address-comments`, `resolve-conflicts`), so `thread
+    /// pr-action`, auto-fix and `pr` routines do not repeat one another.
+    /// Last, because TOML writes tables after plain values.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_asked: std::collections::BTreeMap<String, Asked>,
+}
+
+/// One request about a pull request, as the agent received it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct Asked {
+    /// The pull request's state it was about (`pr_actions::Request::key`).
+    pub key: String,
+    /// `thread pr-action`, `auto-fix` or `routine <name>`.
+    pub by: String,
+    pub at: String,
 }
 
 impl Thread {

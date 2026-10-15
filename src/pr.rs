@@ -156,6 +156,8 @@ pub struct Summary {
     pub is_draft: bool,
     pub mergeable: String,
     pub base_ref: String,
+    /// Reviews that comment or ask for changes; approvals ask for nothing.
+    pub review_count: usize,
 }
 
 impl Summary {
@@ -256,7 +258,7 @@ pub fn merge_attempt_key(summary: &Summary) -> String {
     )
 }
 
-fn valid_oid(oid: &str) -> bool {
+pub fn valid_oid(oid: &str) -> bool {
     oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -310,6 +312,45 @@ pub fn merge(
         bail!("gh pr merge: {}", sanitize(&out.error_text()));
     }
     Ok(())
+}
+
+/// `gh pr create` for `branch` of the `origin` repository, already pushed, so
+/// `gh` neither prompts nor pushes. `base` empty leaves the repository's
+/// default branch. Every value goes after `=`, so none reads as a flag.
+/// Returns the new pull request's URL.
+pub fn create(
+    runner: &dyn Runner,
+    origin: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<String> {
+    let Some(Remote { host, repo }) = parse_remote(origin) else {
+        bail!("its origin is not a GitHub repository");
+    };
+    let mut cmd = gh(&host).args([
+        "pr".to_string(),
+        "create".into(),
+        format!("--repo={repo}"),
+        format!("--head={branch}"),
+    ]);
+    if !base.is_empty() {
+        cmd = cmd.arg(format!("--base={base}"));
+    }
+    cmd = cmd.args([format!("--title={title}"), format!("--body={body}")]);
+    cmd.timeout = GH_MERGE_TIMEOUT;
+    let out = runner.run(&cmd)?;
+    if !out.success() {
+        bail!("gh pr create: {}", sanitize(&out.error_text()));
+    }
+    out.stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| valid_pr_url(line))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("gh pr create printed no pull request URL"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -378,6 +419,8 @@ impl GhCheck {
 #[serde(default)]
 struct GhComment {
     author: Option<GhOwner>,
+    /// A review's `COMMENTED`, `CHANGES_REQUESTED`, `APPROVED` or `DISMISSED`.
+    state: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -479,6 +522,11 @@ pub fn reduce(json: &str, branch: &str, origin: &str) -> Result<Checked> {
         is_draft: view.is_draft,
         mergeable: sanitize(&view.mergeable).to_ascii_uppercase(),
         base_ref: sanitize(&view.base_ref_name),
+        review_count: view
+            .reviews
+            .iter()
+            .filter(|r| matches!(r.state.as_str(), "COMMENTED" | "CHANGES_REQUESTED"))
+            .count(),
     }))
 }
 
