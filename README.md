@@ -179,6 +179,8 @@ herdr-organizations overview --json
 | `template list --json`, `template show <name> --json` | Templates |
 | `project show <slug> --json` | A project's settings, repos, instructions and memory |
 | `task list <slug> --json` | The tasks in `TASKS.md`, with owners and threads |
+| `task lint <slug> --json` | Where `TASKS.md` disagrees with the thread records |
+| `project status <slug> --json` | Tasks and open threads with their state, pull requests, drift and Next lines, computed on every call |
 | `routine list <slug> --json` | Routines with their schedule, command status and last and next run |
 
 [docs/json.md](docs/json.md) defines every field.
