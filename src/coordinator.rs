@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::drift::MAX_HANDOFF_CHARS;
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::paths::{self, Ctx, SessionFlags};
 use crate::profiles::Role;
@@ -20,7 +21,6 @@ use crate::project::{self, Coordinator, Project, Status};
 use crate::remote::quote;
 use crate::{inbox, names, organizations, ticker};
 
-const MAX_HANDOFF_CHARS: usize = 8_000;
 /// A coordinator counts as idle for a nudge once its `(agent_status,
 /// state_change_seq)` pair has been `idle` this long (four ticks).
 pub const NUDGE_IDLE_SECS: i64 = 60;
@@ -684,6 +684,12 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = writeln!(out, "Commands: {prefix}");
     let _ = writeln!(out, "Project: {slug} ({})", project.status());
     let _ = writeln!(out, "Folder: {}", project.dir().display());
+    if let Some(chars) = crate::drift::handoff_over(project) {
+        let _ = writeln!(
+            out,
+            "HANDOFF.md has {chars} characters and this digest shows only the first {MAX_HANDOFF_CHARS}; compact it before anything else."
+        );
+    }
 
     let mut instructions = String::new();
     match project.read_project_md() {
@@ -879,6 +885,11 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
             let _ = writeln!(out, "{}", item.body);
         }
     }
+    let _ = write!(
+        out,
+        "\n{}",
+        crate::drift::section(&crate::drift::problems(project))
+    );
     let (routines, broken) = crate::routine::load_all(project);
     let commands_on = project
         .safety(&ctx.config_dir)

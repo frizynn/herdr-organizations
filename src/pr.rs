@@ -529,6 +529,24 @@ pub fn view(runner: &dyn Runner, url: &str, origin: &str) -> Result<String> {
     Ok(out.stdout)
 }
 
+/// A pull request's state and review decision, all a resolved thread's
+/// record keeps; whose branch it is does not matter any more.
+pub fn view_state(runner: &dyn Runner, url: &str, origin: &str) -> Result<(String, String)> {
+    if !valid_pr_url(url) {
+        bail!("not a pull request URL");
+    }
+    let host = host_of(origin);
+    let cmd = gh(&host)
+        .args(["pr", "view", "--json", "state,reviewDecision"])
+        .args(target(&host, url));
+    let out = runner.run(&cmd)?;
+    if !out.success() {
+        bail!("gh pr view: {}", out.error_text());
+    }
+    let view: GhView = serde_json::from_str(&out.stdout)?;
+    Ok((view.state, view.review_decision))
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct GhListed {

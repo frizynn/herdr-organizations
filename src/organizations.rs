@@ -31,6 +31,9 @@ pub struct NodeRequest {
     pub rules: String,
     /// What the node's memory starts with, as a template carries it.
     pub memory: Memory,
+    /// The TASKS.md task it is delegated from (`--from-task`), its title as
+    /// written there: the new record keeps it and the task line gets the id.
+    pub from_task: Option<String>,
 }
 
 impl Default for NodeRequest {
@@ -42,6 +45,7 @@ impl Default for NodeRequest {
             profile: ProfileOverrides::default(),
             rules: String::new(),
             memory: Memory::default(),
+            from_task: None,
         }
     }
 }
@@ -471,6 +475,13 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.reasoning_effort = profile.reasoning_effort.clone();
         record.permission_profile = profile.permission_profile.clone();
         record.raw_agent_args = profile.raw_agent_args.clone();
+        record.task = args.request.from_task.clone().unwrap_or_default();
+        record.task_origin = if args.request.from_task.is_some() {
+            "task"
+        } else {
+            "chat"
+        }
+        .into();
     })?;
 
     let scope = node_scope_dir(project, &record.id);
@@ -487,7 +498,17 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
                 .with_context(|| format!("could not finish creating node `{}`", record.id));
         }
     };
-    if let Err(error) = project::write_atomic(&task_path, args.task.as_bytes()) {
+    // The task line is linked last, still under the lock, so a failure leaves
+    // neither a record nor a line naming one.
+    let written =
+        project::write_atomic(&task_path, args.task.as_bytes()).and_then(|()| {
+            match &args.request.from_task {
+                Some(title) => link_task(project, title, &record.id),
+                None => Ok(()),
+            }
+        });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&task_path);
         let _ = std::fs::remove_dir_all(&scope);
         if nodes_created && let Some(nodes) = scope.parent() {
             let _ = std::fs::remove_dir(nodes);
@@ -497,6 +518,16 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
             .with_context(|| format!("could not finish creating node `{}`", record.id));
     }
     Ok(record)
+}
+
+/// Appends ` · <id>` to the TASKS.md task `title`, read again here: the
+/// coordinator may have changed the file since the command looked at it.
+fn link_task(project: &Project, title: &str, id: &str) -> Result<()> {
+    let path = project.dir().join("TASKS.md");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let linked = crate::tasks::link(&text, title, id)?;
+    project::write_atomic(&path, linked.as_bytes())
 }
 
 pub fn node_scope_dir(project: &Project, id: &str) -> PathBuf {

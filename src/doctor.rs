@@ -317,6 +317,17 @@ fn report(
                 format!("{}; `doctor --fix` repairs this", problems.join("; ")),
             );
         }
+        if let Some(chars) = crate::drift::handoff_over(&project) {
+            check(
+                &mut out,
+                None,
+                &format!("handoff {slug}"),
+                format!(
+                    "HANDOFF.md has {chars} characters; `context` shows the first {}, so ask the coordinator to compact it",
+                    crate::drift::MAX_HANDOFF_CHARS
+                ),
+            );
+        }
         for other in &slugs {
             if other > slug && crate::names::collide(slug, other) {
                 check(

@@ -1,6 +1,7 @@
 //! TASKS.md: `## List` headings, one `- [ ] title (owner) · t-0007` line per
 //! task, and an optional description indented under its task line. The
-//! coordinator is the only writer; this module only reads it.
+//! coordinator writes it; the binary only appends ` · <id>` to a task line
+//! when a thread is delegated from it (`link`).
 
 use anyhow::{Result, bail};
 use std::fmt;
@@ -99,6 +100,10 @@ impl fmt::Display for Owner {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Task {
+    /// Its line in TASKS.md, from 1.
+    pub line: usize,
+    /// `- [x]`: checked done, which the skill says to delete instead.
+    pub done: bool,
     pub list: String,
     pub title: String,
     pub owner: Owner,
@@ -177,6 +182,8 @@ pub fn parse(text: &str) -> Vec<Task> {
         let (title, owner, thread) = split_line(line.trim_start()[5..].trim());
         let (description, next) = body(&lines, i);
         tasks.push(Task {
+            line: i + 1,
+            done: matches!(line.trim_start().as_bytes()[3], b'x' | b'X'),
             list: list.clone(),
             title,
             owner,
@@ -316,32 +323,106 @@ pub fn compact(text: &str) -> String {
     out.join("\n")
 }
 
-/// The task text for a thread delegated from the TASKS.md task `title`: the
-/// coordinator's text, then the task's description when it has one.
-pub fn delegated(tasks_md: &str, title: &str, task: &str) -> Result<String> {
-    let found = find(tasks_md, title)?;
-    if found.description.trim().is_empty() {
-        return Ok(task.to_string());
-    }
-    Ok(format!(
-        "{}\n\n## Notes from the task list\n\n{}\n",
-        task.trim_end(),
-        found.description.trim()
-    ))
+/// What `--from-task` starts a thread with: the task as written, its owner's
+/// profile and machine (`launch_for`), and the coordinator's text followed by
+/// the task's notes.
+pub struct Delegation {
+    pub task: Task,
+    pub profile: Option<String>,
+    pub machine: Option<String>,
+    pub text: String,
 }
 
-/// The TASKS.md task titled `title`, ignoring case.
+pub fn delegation(
+    ctx: &crate::paths::Ctx,
+    project: &crate::project::Project,
+    title: &str,
+    profile: Option<String>,
+    machine: Option<String>,
+    text: &str,
+) -> Result<Delegation> {
+    let task = find(&read(&project.dir()), title)?;
+    let config = crate::profiles::load(&ctx.config_dir)?;
+    if task.owner.is_person(|p| config.get(p).is_some()) {
+        bail!(
+            "\"{}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks",
+            task.title,
+            task.owner
+        );
+    }
+    let (profile, machine) = launch_for(&task, profile, machine)?;
+    let text = with_notes(&task, text);
+    Ok(Delegation {
+        task,
+        profile,
+        machine,
+        text,
+    })
+}
+
+/// The coordinator's text, then the task's description when it has one.
+fn with_notes(task: &Task, text: &str) -> String {
+    if task.description.trim().is_empty() {
+        return text.to_string();
+    }
+    format!(
+        "{}\n\n## Notes from the task list\n\n{}\n",
+        text.trim_end(),
+        task.description.trim()
+    )
+}
+
+/// The one TASKS.md task titled `title`, ignoring case. Two tasks of that
+/// title are refused: a link to the first could be the wrong one.
 pub fn find(tasks_md: &str, title: &str) -> Result<Task> {
     let wanted = title.trim().to_lowercase();
-    match parse(tasks_md)
+    let mut found: Vec<Task> = parse(tasks_md)
         .into_iter()
-        .find(|t| t.title.to_lowercase() == wanted)
-    {
-        Some(task) => Ok(task),
-        None => bail!(
+        .filter(|t| t.title.to_lowercase() == wanted)
+        .collect();
+    match found.len() {
+        0 => bail!(
             "TASKS.md has no task titled \"{title}\"; --from-task takes the title exactly as it is written there"
         ),
+        1 => Ok(found.remove(0)),
+        n => bail!(
+            "TASKS.md has {n} tasks titled \"{title}\" (lines {}); ask the coordinator to tell them apart first",
+            found
+                .iter()
+                .map(|t| t.line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
+}
+
+/// TASKS.md with ` · <id>` after the task titled `title`, in place of the
+/// thread it named before. Every other byte stays as it was.
+pub fn link(tasks_md: &str, title: &str, id: &str) -> Result<String> {
+    let task = find(tasks_md, title)?;
+    let mut out = String::with_capacity(tasks_md.len() + id.len() + 4);
+    for (index, line) in tasks_md.split_inclusive('\n').enumerate() {
+        if index + 1 != task.line {
+            out.push_str(line);
+            continue;
+        }
+        let text = line.trim_end_matches(['\n', '\r']);
+        let head = match text.rsplit_once('·') {
+            Some((head, old)) if is_thread_id(old.trim()) => head.trim_end(),
+            _ => text.trim_end(),
+        };
+        out.push_str(&format!("{head} · {id}"));
+        out.push_str(&line[text.len()..]);
+    }
+    Ok(out)
+}
+
+/// The open tasks that name thread `id` as the one running them.
+pub fn open_on(tasks_md: &str, id: &str) -> Vec<Task> {
+    parse(tasks_md)
+        .into_iter()
+        .filter(|t| !t.done && t.thread.as_deref() == Some(id))
+        .collect()
 }
 
 /// The `--profile` and `--machine` a delegated task starts with: its owner's,
@@ -569,12 +650,80 @@ mod tests {
 
     #[test]
     fn delegation_appends_the_description_to_the_task() {
-        let task = delegated(TEXT, "fix login", "Fix the Safari logout.\n").unwrap();
+        let task = with_notes(
+            &find(TEXT, "fix login").unwrap(),
+            "Fix the Safari logout.\n",
+        );
         assert_eq!(
             task,
             "Fix the Safari logout.\n\n## Notes from the task list\n\nUsers on Safari get logged out.\n\nBugs:\n  - cookie is dropped\nSee https://example.com/issue/4\n"
         );
-        assert_eq!(delegated(TEXT, "Plain line", "Do it.").unwrap(), "Do it.");
-        assert!(delegated(TEXT, "Nope", "x").is_err());
+        assert_eq!(
+            with_notes(&find(TEXT, "Plain line").unwrap(), "Do it."),
+            "Do it."
+        );
+        assert!(find(TEXT, "Nope").is_err());
+    }
+
+    #[test]
+    fn each_task_knows_its_line_and_whether_it_is_checked() {
+        let tasks = parse(TEXT);
+        let seen: Vec<(usize, bool)> = tasks.iter().map(|t| (t.line, t.done)).collect();
+        assert_eq!(
+            seen,
+            [(4, false), (5, false), (11, false), (14, true), (15, false)]
+        );
+        assert!(parse("- [X] Upper\n")[0].done);
+    }
+
+    #[test]
+    fn link_sets_the_thread_after_the_owner_and_keeps_every_other_byte() {
+        let text = "# Tasks\r\n\n## A\n- [ ] Fix login (claude)\n  notes stay\n- [ ] Ship · t-0002\n- [ ] Old (agent → t-0007)\n- [ ] Last";
+        let linked = link(text, "fix login", "t-0009").unwrap();
+        assert_eq!(
+            linked,
+            text.replace(
+                "- [ ] Fix login (claude)\n",
+                "- [ ] Fix login (claude) · t-0009\n"
+            )
+        );
+        // A new thread replaces the one the line named.
+        assert!(
+            link(text, "Ship", "t-0010")
+                .unwrap()
+                .contains("- [ ] Ship · t-0010\n")
+        );
+        // An old arrow owner keeps its text; the suffix wins when parsed.
+        let old = link(text, "Old", "t-0011").unwrap();
+        assert!(old.contains("- [ ] Old (agent → t-0007) · t-0011\n"));
+        assert_eq!(find(&old, "Old").unwrap().thread.as_deref(), Some("t-0011"));
+        // The last line has no newline and keeps none.
+        assert!(
+            link(text, "last", "t-0012")
+                .unwrap()
+                .ends_with("- [ ] Last · t-0012")
+        );
+        assert!(link(text, "Nope", "t-0013").is_err());
+    }
+
+    #[test]
+    fn a_title_used_twice_is_refused() {
+        let text = "## A\n- [ ] Clean up\n- [x] clean up (me)\n";
+        let error = find(text, "Clean up").unwrap_err().to_string();
+        assert!(
+            error.contains("TASKS.md has 2 tasks titled \"Clean up\" (lines 2, 3)"),
+            "{error}"
+        );
+        assert!(link(text, "Clean up", "t-0001").is_err());
+    }
+
+    #[test]
+    fn open_on_lists_the_unchecked_tasks_a_thread_runs() {
+        let text = "## A\n- [ ] One · t-0001\n- [x] Two · t-0001\n- [ ] Three · t-0002\n- [ ] Four (agent → t-0001)\n";
+        let titles: Vec<String> = open_on(text, "t-0001")
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(titles, ["One", "Four"]);
     }
 }

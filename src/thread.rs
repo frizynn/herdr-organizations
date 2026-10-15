@@ -174,6 +174,12 @@ pub struct Thread {
     /// The agent's own last activity and percent (local threads).
     pub activity: String,
     pub percent: Option<u8>,
+    /// The TASKS.md task it was delegated from (`--from-task`), its title as
+    /// written there at the start; empty for a thread started from chat.
+    pub task: String,
+    /// `task` when started with `--from-task`, `chat` when started without
+    /// it, empty on a record from before task links or an adopted pane.
+    pub task_origin: String,
 }
 
 impl Thread {

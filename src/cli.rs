@@ -420,7 +420,7 @@ enum ThreadCommand {
         /// The task; `-` reads standard input
         #[arg(long, value_name = "FILE")]
         task_file: String,
-        /// Delegating this TASKS.md task (its title as written there): its notes are added to the task, and its owner gives --profile and --machine
+        /// Delegating this TASKS.md task (its title as written there): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the thread's id
         #[arg(long, value_name = "TITLE")]
         from_task: Option<String>,
     },
@@ -612,6 +612,9 @@ struct NodeStartArgs {
     /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB); they replace a template's
     #[arg(long, value_name = "FILE")]
     rules_file: Option<String>,
+    /// Delegating this TASKS.md task (its title as written there): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the node's id
+    #[arg(long, value_name = "TITLE")]
+    from_task: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1128,30 +1131,14 @@ pub fn run() -> Result<()> {
                 slug,
                 title,
                 repo,
-                mut machine,
-                mut profile,
+                machine,
+                profile,
                 kind,
                 base,
                 task_file,
                 from_task,
             } => {
-                let mut task = read_text(&task_file)?;
-                if let Some(from) = from_task {
-                    // The task's owner picks the profile and machine.
-                    let project = Project::load(&ctx.root, &slug)?;
-                    let tasks_md = crate::tasks::read(&project.dir());
-                    let found = crate::tasks::find(&tasks_md, &from)?;
-                    let config = crate::profiles::load(&ctx.config_dir)?;
-                    if found.owner.is_person(|p| config.get(p).is_some()) {
-                        bail!(
-                            "\"{}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks",
-                            found.title,
-                            found.owner
-                        );
-                    }
-                    (profile, machine) = crate::tasks::launch_for(&found, profile, machine)?;
-                    task = crate::tasks::delegated(&tasks_md, &from, &task)?;
-                }
+                let task = read_text(&task_file)?;
                 let kind = kind
                     .as_deref()
                     .map(crate::thread::Kind::parse)
@@ -1167,7 +1154,10 @@ pub fn run() -> Result<()> {
                         kind,
                         base,
                         task,
-                        node: NodeRequest::default(),
+                        node: NodeRequest {
+                            from_task,
+                            ..NodeRequest::default()
+                        },
                     },
                 )?;
                 println!(
@@ -1345,6 +1335,7 @@ pub fn run() -> Result<()> {
                     task_file,
                     rules_file,
                     template,
+                    from_task,
                 } = *args;
                 let kind = kind
                     .as_deref()
@@ -1386,6 +1377,7 @@ pub fn run() -> Result<()> {
                         },
                         rules,
                         memory: Default::default(),
+                        from_task,
                     },
                 };
                 if let Some(name) = &template {

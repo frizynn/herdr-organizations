@@ -324,8 +324,19 @@ fn a_task_open_on_a_merged_thread_says_so() {
         .find(|text| text.contains("kind = \"task\""))
         .expect("a task item");
     assert!(item.contains("event = \"PR merged, task open\""), "{item}");
-    assert!(
-        item.contains("t-0001's pull request merged and TASKS.md still has \\\"Ship checkout\\\" open on it (line 4)"),
-        "{item}"
+    let inbox: serde_json::Value =
+        serde_json::from_str(&fixture.text(&["inbox", "list", "acme", "--json"])).unwrap();
+    let summaries: Vec<&str> = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "task")
+        .map(|i| i["summary"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            "t-0001's pull request merged and TASKS.md still has \"Ship checkout\" open on it (line 4)"
+        ]
     );
 }

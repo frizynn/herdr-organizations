@@ -217,7 +217,7 @@ pub fn placement(kind: Option<Kind>, has_repo: bool, remote: bool) -> Result<Kin
 
 /// Creates the workspace or tab, the thread directory and the brief, then
 /// returns. The agent is launched by the ticker, so there is one delivery path.
-pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
+pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
     let project = Project::load(&ctx.root, slug)?;
     let status = project.status();
     if status != project::Status::Active {
@@ -228,6 +228,26 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
             "`{slug}` is being renamed to `{}`; `thread start` is refused until its coordinator reopens there",
             rename.to
         );
+    }
+    if let Some(title) = args.node.from_task.take() {
+        // The task's owner picks the profile and machine; a node's
+        // `--harness` is the built-in profile of that name.
+        let requested = args
+            .profile
+            .take()
+            .or_else(|| args.node.profile.harness.clone());
+        let delegation = crate::tasks::delegation(
+            ctx,
+            &project,
+            &title,
+            requested,
+            args.machine.take(),
+            &args.task,
+        )?;
+        args.profile = delegation.profile;
+        args.machine = delegation.machine;
+        args.task = delegation.text;
+        args.node.from_task = Some(delegation.task.title);
     }
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
@@ -1227,6 +1247,38 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         ),
         "",
     )?;
+    note_open_task(&project, &resolved)
+}
+
+/// Every path that resolves a thread ends here: a task TASKS.md still has
+/// open on it gets one `task` item, so the coordinator settles it (the skill's
+/// "Thread ends") instead of having to notice.
+pub fn note_open_task(project: &Project, resolved: &Thread) -> Result<()> {
+    let merged = resolved.pr_state.eq_ignore_ascii_case("merged");
+    for task in crate::tasks::open_on(&crate::tasks::read(&project.dir()), &resolved.id) {
+        let (event, what) = if merged {
+            (
+                "PR merged, task open",
+                format!("{}'s pull request merged", resolved.id),
+            )
+        } else {
+            (
+                "thread resolved, task open",
+                format!("{} was resolved", resolved.id),
+            )
+        };
+        crate::inbox::write(
+            project,
+            "task",
+            &resolved.id,
+            event,
+            &format!(
+                "{what} and TASKS.md still has \"{}\" open on it (line {})",
+                task.title, task.line
+            ),
+            "",
+        )?;
+    }
     Ok(())
 }
 
@@ -1740,6 +1792,9 @@ pub struct ThreadJson {
     pub report: Option<String>,
     /// Files it produced for the user.
     pub library: String,
+    /// The TASKS.md task it was delegated from, and `task`, `chat` or empty.
+    pub task: String,
+    pub task_origin: String,
 }
 
 /// A thread's pull request as the ticker last saw it (every two minutes).
@@ -1888,6 +1943,8 @@ pub fn thread_json(
             .join(&t.id)
             .to_string_lossy()
             .into_owned(),
+        task: t.task.clone(),
+        task_origin: t.task_origin.clone(),
     }
 }
 

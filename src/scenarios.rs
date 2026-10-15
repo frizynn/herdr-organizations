@@ -3713,12 +3713,6 @@ fn a_tab_thread_gets_a_brief_with_the_project_header_and_prompts_are_recorded() 
         "# Tasks\n\n## Backlog\n- [ ] Research (agent)\n  Start with the 2025 papers.\n",
     )
     .unwrap();
-    let task = crate::tasks::delegated(
-        &crate::tasks::read(&project.dir()),
-        "Research",
-        "Look into it.",
-    )
-    .unwrap();
     let t = threads::start(
         &ctx,
         "demo",
@@ -3729,12 +3723,24 @@ fn a_tab_thread_gets_a_brief_with_the_project_header_and_prompts_are_recorded() 
             profile: None,
             kind: Some(Kind::Tab),
             base: None,
-            task,
-            node: Default::default(),
+            task: "Look into it.".into(),
+            node: crate::organizations::NodeRequest {
+                from_task: Some("research".into()),
+                ..Default::default()
+            },
         },
     )
     .unwrap();
     assert_eq!(t.kind, Kind::Tab);
+    // The binary links the task line and the record, with the title as written.
+    assert_eq!(
+        std::fs::read_to_string(project.dir().join("TASKS.md")).unwrap(),
+        "# Tasks\n\n## Backlog\n- [ ] Research (agent) · t-0001\n  Start with the 2025 papers.\n"
+    );
+    assert_eq!(
+        (t.task.as_str(), t.task_origin.as_str()),
+        ("Research", "task")
+    );
     let brief = std::fs::read_to_string(Path::new(&t.thread_dir).join("brief.md")).unwrap();
     assert!(
         brief.contains(
