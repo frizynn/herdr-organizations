@@ -26,6 +26,15 @@ pub enum Rule {
 }
 
 impl Rule {
+    pub const ALL: [Rule; 6] = [
+        Rule::HandoffOverLimit,
+        Rule::ThreadResolved,
+        Rule::ThreadMissing,
+        Rule::DoneNotDeleted,
+        Rule::StatusInOwner,
+        Rule::DuplicateTitle,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Rule::HandoffOverLimit => "handoff-over-limit",

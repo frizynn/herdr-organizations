@@ -207,22 +207,15 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut drift: BTreeMap<String, usize> = [
-        Rule::HandoffOverLimit,
-        Rule::ThreadResolved,
-        Rule::ThreadMissing,
-        Rule::DoneNotDeleted,
-        Rule::StatusInOwner,
-        Rule::DuplicateTitle,
-    ]
-    .iter()
-    .map(|rule| {
-        (
-            rule.name().replace('-', "_"),
-            problems.iter().filter(|p| p.rule == *rule).count(),
-        )
-    })
-    .collect();
+    let mut drift: BTreeMap<String, usize> = Rule::ALL
+        .iter()
+        .map(|rule| {
+            (
+                rule.name().replace('-', "_"),
+                problems.iter().filter(|p| p.rule == *rule).count(),
+            )
+        })
+        .collect();
     drift.insert(
         "inbox_unhandled".into(),
         crate::inbox::unhandled(&project).len(),
