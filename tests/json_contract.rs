@@ -190,8 +190,10 @@ fn checkout_thread(fixture: &Fixture) -> Value {
             "comment_count": 2,
             "draft": false,
             "mergeable": "MERGEABLE",
-            "merge_blocker": "1 check(s) have not finished"
+            "merge_blocker": "1 check(s) have not finished",
+            "actions": ["address-comments"]
         },
+        "actions": [],
         "profile": "",
         "origin": "git@github.com:owner/app.git",
         "state_line": "",
@@ -242,6 +244,7 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "auto_fix_ci": false,
         "auto_merge": false,
         "pr": null,
+        "actions": [],
         "profile": "",
         "origin": "",
         "state_line": "",
@@ -396,7 +399,8 @@ fn a_pull_request_the_ticker_has_not_read_has_no_invented_numbers() {
             "comment_count": null,
             "draft": null,
             "mergeable": null,
-            "merge_blocker": "the ticker has not read this pull request yet"
+            "merge_blocker": "the ticker has not read this pull request yet",
+            "actions": []
         })
     );
 }

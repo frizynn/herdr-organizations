@@ -83,6 +83,15 @@ In a disposable root, with a project whose `TASKS.md` has a task:
 5. `task lint demo` lists what `## Drift` lists, without its cap, and `doctor` warns `tasks demo`. `project status demo --json` has one item per task and per open thread no task names, and its `drift` counts match `task lint`.
 6. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: within an hour of the ticker running (at once on a ticker's first pass), `thread show --json` reports `MERGED`.
 
+## Pull request actions
+
+In a disposable root, with a thread whose pull request lives in a scratch repository (or `gh` replaced by a script that serves `gh pr view --json`):
+
+1. With every check green, `thread pr-action demo t-0001 fix-ci --json` exits 1 and prints `ok: false` with `no check fails on its pull request (...)`; the thread's pane receives nothing.
+2. With a failing check, the same command prints `sent: true` and the message; the pane shows it, `threads/t-0001.task.md` has it under `## Follow-ups`, and `inbox list --json` has an `asked to fix CI` item. Run it again: `sent: false`, the reason names `thread pr-action`, and a `fix CI already asked` item. With `--auto-fix-ci on` or the default `pr-followup` routine, the ticker sends nothing more for that commit.
+3. Make the pull request conflict with its base: within two minutes of the ticker running, one `PR has conflicts` item and a notification; none after while it stays conflicting. Resolve it and conflict again: one more.
+4. On a worktree thread with no pull request whose agent is idle and has a report: before its branch is pushed, `thread pr-create demo t-0002 --json` refuses with `not pushed`; push it and wait for the ticker: `thread show --json` has `"actions": ["create-pr"]`, and `thread pr-create` opens the pull request with the thread's title and the report's `## Report`, and records it.
+
 ## 0.2.0: the Herdr-native redesign
 
 Checked on 2026-09-23 in a scratch `hp-dev` session (herdr 0.9.1, macOS, Claude Code 2.1.280). "Builder" means the builder ran it and read the result; "client-witnessed" needs a person looking at an attached Herdr client.

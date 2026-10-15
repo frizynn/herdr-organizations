@@ -65,6 +65,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `thread list/show [--json]`, `thread ack`, `thread adopt` | Look at threads. `--json` prints the versioned document of [docs/json.md](json.md). |
 | `thread resolve [--keep-worktree \| --close-view] [--discard-uncopied] [--skip-copy] [--reopen]` | Final copy home, then clean up. `--close-view` keeps the worktree and branch, closes the thread's tab or workspace first, and resolves nothing when it cannot close it. |
 | `thread merge [--method squash\|merge\|rebase] [--json]`, `thread set [--auto-fix-ci on\|off] [--auto-merge on\|off] [--json]` | Merge a thread's pull request only when it is open, approved, conflict-free and every check passed, pinned to the checked head commit; and the per-thread pull request automation. Both refuse from an agent pane of the project. Auto-fix leaves events an enabled `pr` routine covers to that routine. |
+| `thread pr-action <project> <id> fix-ci\|address-comments\|resolve-conflicts [--json]` | Ask the thread to fix its pull request: a follow-up with counts and `gh` commands the binary wrote from a fresh read, refused when the pull request's state does not call for it, and not sent again while nothing changed since it, auto-fix or a `pr` routine asked (see [Pull request actions](json.md#pull-request-actions)). |
+| `thread pr-create <project> <id> [--json]` | Open the pull request of a local worktree thread whose agent is idle and whose branch origin has without one: its title, its report's `## Report` as the description, into its base. It is recorded at once. |
 | `node start <project> --parent root\|<id> [--role worker\|coordinator] [--template NAME] --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] [--rules-file F] --task-file F [--from-task TITLE]` | A node in the tree (`node create` is an alias); `--role` defaults to the template's, else `worker`. `--from-task` works as for `thread start`. `thread start` is the same for a worker under `root`. |
 | `template save <project> <id> --name N [--global] [--description D] [--force]`, `template list [--project P] [--json]`, `template show <name> [--project P] [--json]`, `template delete <name> [--project P]` | [Templates](#templates). |
 | `node restart [--profile P]`, `node prompt`, `node list [--json]`, `node show [--json]`, `node ack`, `node resolve [--keep-worktree \| --close-view]` | Hierarchy-aware lifecycle; `node list` prints the tree in stable preorder. |
@@ -259,6 +261,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
   "Bash(<binary> --root <root> thread list:*)",
   "Bash(<binary> --root <root> thread show:*)",
   "Bash(<binary> --root <root> thread prompt:*)",
+  "Bash(<binary> --root <root> thread pr-action:*)",
   "Bash(<binary> --root <root> thread next:*)",
   "Bash(<binary> --root <root> thread read:*)",
   "Bash(<binary> --root <root> thread brief:*)",
@@ -275,7 +278,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
 
 - Allow `thread start` and `node start` only where you've set `start_threads = "auto"`. Left off the list, every start meets your agent's own permission prompt.
 - With `thread keys` on the list, the coordinator answers a thread's questions and permission prompts itself, by the skill's rules, and its trust screens when `trust_screens` is `coordinator`. Remove it to confirm each answer first.
-- Never allow `thread resolve`, `node resolve`, `thread merge`, `thread set`, `sweep`, `delete`, `rename`, `archive`, `routine approve`, `configure` or `unconfigure`.
+- Never allow `thread resolve`, `node resolve`, `thread merge`, `thread set`, `thread pr-create`, `sweep`, `delete`, `rename`, `archive`, `routine approve`, `configure` or `unconfigure`. `thread pr-create` publishes to GitHub, so it is the user's call.
 
 ## What the safety settings do and don't stop
 
@@ -293,7 +296,7 @@ Direct-child delivery for nested coordinators is event-driven and independent of
 
 `HANDOFF.md` is deliberately small: the current objective, user decisions and constraints, active work and the next action, linking reports and memory instead of copying them, so a replacement coordinator rebuilds its state from one `context`. `context` prints its first 8,000 characters; past that it says so at the top of the digest and in the [drift](#drift) section, and `doctor` warns.
 
-- **Notifications** go out once per event, titled `<Project> · <thread>`: `needs you · ...` with Herdr's request sound; a new report or a merged pull request with the done sound; failed checks, review activity and due routines without sound. `mute = true` silences a project except for errors (a broken routine file, `gh` failing for ten minutes).
+- **Notifications** go out once per event, titled `<Project> · <thread>`: `needs you · ...` with Herdr's request sound; a new report or a merged pull request with the done sound; failed checks, review activity, merge conflicts and due routines without sound. `mute = true` silences a project except for errors (a broken routine file, `gh` failing for ten minutes).
 - **Nudges** (`nudge = true`, the default for new projects) prompt a coordinator with one line saying what happened (`[hp inbox] t-0040 PR merged; t-0043 blocked on a prompt`) once a set of new inbox items arrives. On Herdr 0.9.1 a prompt merges with text you have half-typed, so the ticker only prompts a coordinator whose state has not changed and been idle for 60 seconds and whose input box, read from its screen, has looked empty for 10 seconds, and picks the one that changed most recently when several qualify. A box it cannot read (a menu, a scrolled view, a harness other than Claude, Codex, Cursor, Gemini, OpenCode and Pi) counts as not empty, and the nudge waits. `thread prompt` refuses to type into a thread's box that holds a draft. `nudge = false` turns this off; notifications still come.
 
 ## Routines
@@ -301,7 +304,7 @@ Direct-child delivery for nested coordinators is event-driven and independent of
 A file `routines/<name>.md` with TOML front matter; the body is the prompt.
 
 - `schedule = "every <N>m|h|d"` or `"daily HH:MM"` (local time): the coordinator gets the body as an inbox item when it is due; while that item is unhandled, later runs add none. With no coordinator running (any agent in the project folder counts), a due run does nothing, runs no command and is not made up later; `routine list`, the popup and `doctor` show it as `skipped: no coordinator`. `routine list` shows each routine's last and next run. An optional `command` runs (`sh -c`, in the project folder, 60 second timeout) only when `routine_commands = true` and you have run `herdr-projects routine approve <project> <name>` in a terminal; its output reaches the coordinator capped at 4,000 characters inside a fence labelled as untrusted.
-- `on = "pr"`, optionally `events = ["opened", "checks-failed", "review", "merged"]`: fired by the ticker's pull request poll. The body goes to the thread whose pull request changed, as a prompt, with facts the binary generates (how many checks fail, how many comments, the `gh` commands to read them). It needs no coordinator, only the open thread.
+- `on = "pr"`, optionally `events = ["opened", "checks-failed", "review", "merged"]`: fired by the ticker's pull request poll. The body goes to the thread whose pull request changed, as a prompt, with facts the binary generates (how many checks fail, how many comments, the `gh` commands to read them). It needs no coordinator, only the open thread. A `checks-failed` or `review` event that `thread pr-action` already asked the thread about, for the same state of the pull request, is left out.
 - Every project has `routines/pr-followup.md` (`checks-failed`, `review`): it tells the thread to fix failing checks and address review comments. Turn it off in the Projects popup's routines section; `doctor --fix` puts it back if the file is missing.
 
 ## Cleanup

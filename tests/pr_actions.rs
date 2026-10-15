@@ -292,3 +292,117 @@ fn after_thread_merge_the_json_reports_a_blocker_until_the_ticker_reads_again() 
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(blocker(), "it is not open (state MERGED)");
 }
+
+fn printed(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{error}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            stderr(out)
+        )
+    })
+}
+
+#[test]
+fn pr_action_refuses_what_the_pull_request_does_not_call_for_and_says_why() {
+    let fixture = Fixture::new();
+    fixture.serve("APPROVED", r#"{"name":"build","conclusion":"SUCCESS"}"#);
+    let out = fixture.run(&["thread", "pr-action", "demo", "t-0001", "fix-ci", "--json"]);
+    assert!(!out.status.success());
+    let reason = "no check fails on its pull request (1 passed, 0 pending)";
+    assert_eq!(
+        printed(&out),
+        serde_json::json!({
+            "schema_version": 1, "ok": false, "id": "t-0001", "action": "fix-ci",
+            "pr": URL, "sent": false, "message": "", "reason": reason
+        })
+    );
+    assert!(stderr(&out).contains(reason), "{}", stderr(&out));
+
+    for (action, why) in [
+        (
+            "address-comments",
+            "no comments and no review asking for changes",
+        ),
+        ("resolve-conflicts", "no merge conflict"),
+    ] {
+        let out = fixture.run(&["thread", "pr-action", "demo", "t-0001", action, "--json"]);
+        assert!(!out.status.success(), "{action}");
+        let document = printed(&out);
+        assert_eq!(
+            (document["ok"].clone(), document["sent"].clone()),
+            (false.into(), false.into())
+        );
+        assert!(
+            document["reason"].as_str().unwrap().contains(why),
+            "{action}: {document}"
+        );
+    }
+
+    let out = fixture.run(&["thread", "pr-action", "demo", "t-0001", "fix-ci"]);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "text mode prints the refusal on stderr only"
+    );
+    assert!(stderr(&out).contains(reason), "{}", stderr(&out));
+
+    let out = fixture.run(&["thread", "pr-action", "demo", "t-0001", "merge"]);
+    assert!(
+        !out.status.success(),
+        "merging is `thread merge`, not a message"
+    );
+
+    let calls = fixture.gh_calls();
+    assert!(
+        calls.iter().all(|call| call.starts_with("pr view --json ")),
+        "{calls:?}"
+    );
+    assert!(
+        !fixture.inbox().contains("pr-action"),
+        "a refusal leaves no item"
+    );
+}
+
+#[test]
+fn pr_action_and_pr_create_refuse_without_what_they_need_and_never_reach_github() {
+    let fixture = Fixture::new();
+    let out = fixture.run(&["thread", "pr-create", "demo", "t-0001", "--json"]);
+    assert!(!out.status.success());
+    assert_eq!(
+        printed(&out),
+        serde_json::json!({
+            "schema_version": 1, "ok": false, "id": "t-0001", "pr": URL,
+            "reason": format!("it already has a pull request: {URL}")
+        })
+    );
+
+    let record = fixture.record().replace(&format!("pr = \"{URL}\"\n"), "");
+    let path = fixture.root.join("demo/threads/t-0001.toml");
+    std::fs::write(&path, &record).unwrap();
+    let out = fixture.run(&["thread", "pr-action", "demo", "t-0001", "fix-ci", "--json"]);
+    assert!(!out.status.success());
+    let document = printed(&out);
+    assert_eq!(document["pr"], "");
+    assert!(
+        document["reason"]
+            .as_str()
+            .unwrap()
+            .contains("has no pull request"),
+        "{document}"
+    );
+
+    let reason_of = |extra: &str| {
+        std::fs::write(&path, format!("{record}{extra}")).unwrap();
+        let out = fixture.run(&["thread", "pr-create", "demo", "t-0001", "--json"]);
+        assert!(!out.status.success(), "{extra}");
+        printed(&out)["reason"].as_str().unwrap().to_string()
+    };
+    assert!(reason_of("kind = \"tab\"\n").contains("worktree thread"));
+    assert!(reason_of("").contains("no report"));
+    assert!(
+        reason_of("report_hash = \"h\"\n").contains("did not answer"),
+        "the project was never opened, so its agent's state is unknown"
+    );
+    assert!(fixture.gh_calls().is_empty(), "{:?}", fixture.gh_calls());
+}

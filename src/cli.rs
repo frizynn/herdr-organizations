@@ -13,7 +13,9 @@ use crate::project::{self, Project, Status};
 use crate::runner::RealRunner;
 use crate::thread::{self, NodeRole};
 use crate::threads::{self, ResolveArgs, StartArgs};
-use crate::{actions, adopt, doctor, inbox, lifecycle, overview, pr, routine, steps, ticker};
+use crate::{
+    actions, adopt, doctor, inbox, lifecycle, overview, pr, pr_actions, routine, steps, ticker,
+};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_BIN_NAME"), version = crate::VERSION, about = "Recursive organizations for herdr")]
@@ -507,6 +509,24 @@ enum ThreadCommand {
         id: String,
         #[arg(long, value_enum, default_value_t = pr::MergeMethod::Squash)]
         method: pr::MergeMethod,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask a thread to fix CI, address review comments or resolve merge conflicts on its pull request: a follow-up with counts and `gh` commands read from GitHub now, refused when the pull request does not call for it
+    PrAction {
+        slug: String,
+        id: String,
+        #[arg(value_enum)]
+        action: pr_actions::Request,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the pull request of a thread whose agent is idle and whose branch is pushed without one: its title, and its report as the description
+    PrCreate {
+        slug: String,
+        id: String,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
@@ -1267,6 +1287,40 @@ pub fn run() -> Result<()> {
                     }));
                 }
                 println!("{id}: merged {}", record.pr);
+                Ok(())
+            }
+            ThreadCommand::PrAction {
+                slug,
+                id,
+                action,
+                json,
+            } => {
+                let outcome = pr_actions::ask(&ctx, &slug, &id, action)?;
+                if json {
+                    threads::print_json(&outcome)?;
+                } else if outcome.sent {
+                    println!(
+                        "sent to {id} (agent was {}):\n{}",
+                        outcome.agent_state, outcome.message
+                    );
+                } else if outcome.ok {
+                    println!("{id}: not sent: {}", outcome.reason);
+                }
+                if !outcome.ok {
+                    bail!("{id}: not sent: {}", outcome.reason);
+                }
+                Ok(())
+            }
+            ThreadCommand::PrCreate { slug, id, json } => {
+                let created = pr_actions::create(&ctx, &slug, &id)?;
+                if json {
+                    threads::print_json(&created)?;
+                } else if created.ok {
+                    println!("{id}: opened {}", created.pr);
+                }
+                if !created.ok {
+                    bail!("{id}: no pull request opened: {}", created.reason);
+                }
                 Ok(())
             }
             ThreadCommand::Set {

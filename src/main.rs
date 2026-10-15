@@ -22,6 +22,7 @@ mod overview;
 mod paths;
 mod popup;
 mod pr;
+mod pr_actions;
 mod profiles;
 mod progress;
 mod project;
