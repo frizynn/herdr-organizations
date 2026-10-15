@@ -263,7 +263,7 @@ fn a_profile_with_its_own_model_gives_way_to_the_model_chosen_at_open() {
         .unwrap();
     assert!(start.contains("--kind codex"), "{start}");
     assert!(
-        start.ends_with("-- --model gpt-5.6 -c model_reasoning_effort=\"high\""),
+        start.ends_with("-- --no-daemon --model gpt-5.6 -c model_reasoning_effort=\"high\""),
         "{start}"
     );
     assert!(!start.contains("gpt-5.5"), "{start}");

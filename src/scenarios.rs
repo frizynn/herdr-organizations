@@ -1727,6 +1727,7 @@ fn yolo_launches_each_thread_with_its_own_harness_flag() {
     assert!(
         call.args.ends_with(&strings(&[
             "--",
+            "--no-daemon",
             "-m",
             "gpt-5.5",
             "--dangerously-bypass-approvals-and-sandbox"
@@ -4379,7 +4380,9 @@ fn open_in_a_pane_resumes_the_recorded_session_and_starts_fresh_when_that_fails(
 #[test]
 fn a_codex_coordinator_run_in_this_pane_runs_in_its_own_process() {
     let h = Here::new(&[]);
-    let child = h.child_agent("w5:p1", "", "sess-7").replace("claude", "codex");
+    let child = h
+        .child_agent("w5:p1", "", "sess-7")
+        .replace("claude", "codex");
     let agents = h.world.agents.clone();
     h.world.runner.on_fn(
         |cmd| cmd.program == "codex",
@@ -5144,7 +5147,7 @@ fn a_remote_thread_launches_with_its_machines_own_profile() {
     let line = start.display();
     assert!(
         line.contains("--kind codex")
-            && line.contains("-- --model gpt-5.5 --config /Users/box/x.toml"),
+            && line.contains("-- --no-daemon --model gpt-5.5 --config /Users/box/x.toml"),
         "{line}"
     );
     assert_eq!(thread::load(&project, &id).unwrap().status, Status::Open);
