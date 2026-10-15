@@ -1982,6 +1982,150 @@ mod tests {
         }
 
         #[test]
+        fn a_conflict_is_announced_once_until_github_reports_it_cleared() {
+            let setup = Setup::new("idle", |_| {});
+            let mut state = State::default();
+            let mergeable = |value: &str| view("APPROVED", GREEN, 10).replace("MERGEABLE", value);
+            let conflicts = || {
+                setup
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event == "PR has conflicts")
+                    .collect::<Vec<_>>()
+            };
+            *setup.gh_view.borrow_mut() = mergeable("CONFLICTING");
+            setup.check(&mut state);
+            assert_eq!(conflicts().len(), 1);
+            assert!(conflicts()[0].summary.contains(URL));
+            assert!(conflicts()[0].summary.contains("merge conflicts"));
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = mergeable("UNKNOWN");
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = mergeable("CONFLICTING");
+            setup.check(&mut state);
+            assert_eq!(conflicts().len(), 1, "GitHub recomputing is no change");
+
+            *setup.gh_view.borrow_mut() = mergeable("MERGEABLE");
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = mergeable("CONFLICTING");
+            setup.check(&mut state);
+            assert_eq!(conflicts().len(), 2, "a new conflict after it cleared");
+            assert_eq!(setup.world.runner.count("agent prompt"), 0);
+        }
+
+        #[test]
+        fn auto_fix_and_a_pr_routine_do_not_repeat_what_pr_action_asked() {
+            let ask = |setup: &Setup| {
+                let outcome = crate::pr_actions::ask(
+                    &setup.world.ctx(),
+                    "demo",
+                    "t-0001",
+                    crate::pr_actions::Request::FixCi,
+                )
+                .unwrap();
+                assert!(outcome.sent, "{}", outcome.reason);
+            };
+            let setup = Setup::new("idle", |t| {
+                t.auto_fix_ci = true;
+                t.pr = URL.into();
+            });
+            *setup.gh_view.borrow_mut() = view("APPROVED", RED, 10);
+            ask(&setup);
+            let mut state = State::default();
+            setup.check(&mut state);
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("agent prompt"), 1, "auto-fix");
+
+            let setup = Setup::new("idle", |t| t.pr = URL.into());
+            crate::project::write_default_routine(&setup.project).unwrap();
+            *setup.gh_view.borrow_mut() = view("APPROVED", RED, 10);
+            ask(&setup);
+            setup.check(&mut State::default());
+            assert_eq!(setup.world.runner.count("agent prompt"), 1, "pr-followup");
+            assert!(
+                inbox::unhandled(&setup.project)
+                    .iter()
+                    .all(|item| item.kind != "routine"),
+                "the routine had nothing new to say"
+            );
+        }
+
+        #[test]
+        fn pr_action_does_not_repeat_what_auto_fix_or_a_routine_asked() {
+            let ask = |setup: &Setup| {
+                crate::pr_actions::ask(
+                    &setup.world.ctx(),
+                    "demo",
+                    "t-0001",
+                    crate::pr_actions::Request::FixCi,
+                )
+                .unwrap()
+            };
+            let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
+            *setup.gh_view.borrow_mut() = view("APPROVED", RED, 10);
+            setup.check(&mut State::default());
+            assert_eq!(setup.world.runner.count("agent prompt"), 1);
+            let outcome = ask(&setup);
+            assert!(outcome.ok && !outcome.sent);
+            assert!(
+                outcome.reason.starts_with("auto-fix already asked it"),
+                "{}",
+                outcome.reason
+            );
+            assert_eq!(setup.world.runner.count("agent prompt"), 1);
+            assert!(
+                setup
+                    .items()
+                    .iter()
+                    .any(|item| item.event == "fix CI already asked")
+            );
+
+            let setup = Setup::new("idle", |_| {});
+            crate::project::write_default_routine(&setup.project).unwrap();
+            *setup.gh_view.borrow_mut() = view("APPROVED", RED, 10);
+            setup.check(&mut State::default());
+            assert_eq!(setup.world.runner.count("agent prompt"), 1);
+            let outcome = ask(&setup);
+            assert!(!outcome.sent);
+            assert!(
+                outcome
+                    .reason
+                    .starts_with("routine pr-followup already asked it"),
+                "{}",
+                outcome.reason
+            );
+        }
+
+        #[test]
+        fn a_pushed_branch_with_no_pull_request_offers_create_pr() {
+            let setup = Setup::new("idle", |_| {});
+            let report = thread::home_report_path(&setup.project, "t-0001");
+            std::fs::write(&report, "## Report\nDone.\n").unwrap();
+            setup.world.runner.on("gh pr list", ok("[]"));
+            let refs = Rc::new(RefCell::new(format!(
+                "{HEAD} refs/heads/hp/demo/t-0001-task\n{HEAD} refs/remotes/origin/hp/demo/t-0001-task\n"
+            )));
+            let served = refs.clone();
+            setup.world.runner.on_fn(
+                |cmd| cmd.display().contains("for-each-ref"),
+                move |_| Ok(ok(&served.borrow())),
+            );
+            let mut state = State::default();
+            setup.check(&mut state);
+            assert_eq!(state.unopened.get("t-0001").map(String::as_str), Some(HEAD));
+            let actions = |state: &State| {
+                let rows = threads::rows(&setup.world.ctx(), &setup.project);
+                threads::thread_json(&setup.project, &rows[0], state).actions
+            };
+            assert_eq!(actions(&state), ["create-pr"]);
+
+            *refs.borrow_mut() = format!("{HEAD} refs/heads/hp/demo/t-0001-task\n");
+            setup.check(&mut state);
+            assert!(state.unopened.is_empty(), "not pushed any more");
+            assert!(actions(&state).is_empty());
+        }
+
+        #[test]
         fn a_diff_size_change_is_stored_without_an_inbox_item() {
             let setup = Setup::new("idle", |_| {});
             let mut state = State::default();
