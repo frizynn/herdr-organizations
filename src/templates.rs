@@ -150,17 +150,16 @@ impl Template {
 
     /// Gives a new node what its caller left unset: the role unless `role`
     /// chose one, its spawn permission while the role is the template's, the
-    /// profile (unless `--profile` or `--harness` chose one), the rules
-    /// (unless given) and the memory it starts with.
+    /// profile as a fallback (after `--profile`, `--harness` and a task's
+    /// owner), the rules (unless given) and the memory it starts with.
     pub fn fill(&self, args: &mut StartArgs, role: Option<NodeRole>) -> Result<()> {
         let node = &mut args.node;
         node.role = role.unwrap_or(self.spec.role);
         if node.can_spawn.is_none() && node.role == self.spec.role {
             node.can_spawn = Some(self.spec.can_spawn);
         }
-        if args.profile.is_none() && node.profile.harness.is_none() && !self.spec.profile.is_empty()
-        {
-            args.profile = Some(self.spec.profile.clone());
+        if !self.spec.profile.is_empty() {
+            node.template_profile = Some(self.spec.profile.clone());
         }
         if node.rules.trim().is_empty() {
             node.rules = self.rules()?;
@@ -447,7 +446,7 @@ mod tests {
             .unwrap()
             .fill(&mut args, None)
             .unwrap();
-        assert_eq!(args.profile.as_deref(), Some("deep"));
+        assert_eq!(args.node.template_profile.as_deref(), Some("deep"));
         assert_eq!(args.node.role, NodeRole::Coordinator);
         assert_eq!(args.node.can_spawn, Some(false));
         assert_eq!(args.node.rules, "Keep changes accessible.\n");
@@ -475,14 +474,12 @@ mod tests {
         assert_eq!(args.node.role, NodeRole::Worker);
         // A worker does not take a coordinator's spawn permission.
         assert_eq!(args.node.can_spawn, None);
-        assert_eq!(args.profile, None);
         assert_eq!(args.node.rules, "Own rules.");
         assert_eq!(args.node.memory.files.len(), 1);
-
-        let mut args = start_args();
-        args.profile = Some("luna".into());
-        template.fill(&mut args, None).unwrap();
-        assert_eq!(args.profile.as_deref(), Some("luna"));
+        // The template's profile is only a fallback: `--profile` and
+        // `--harness` stay as given and win in `threads::start`.
+        assert_eq!(args.profile, None);
+        assert_eq!(args.node.profile.harness.as_deref(), Some("claude"));
     }
 
     #[test]

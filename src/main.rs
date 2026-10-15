@@ -9,6 +9,7 @@ mod command_link;
 mod coordinator;
 mod dock;
 mod doctor;
+mod drift;
 mod events;
 mod grouping;
 mod herdr;

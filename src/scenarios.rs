@@ -498,6 +498,29 @@ fn a_node_started_from_a_template_gets_its_role_profile_rules_and_memory() {
         (node.profile.as_str(), node.agent.as_str()),
         ("deep", "codex")
     );
+
+    // Delegated from a task: the owner's profile wins over the template's,
+    // which still serves an unassigned task.
+    std::fs::write(
+        project.dir().join("TASKS.md"),
+        "## A\n- [ ] Owned (claude)\n- [ ] Open\n",
+    )
+    .unwrap();
+    for (task, profile) in [("Owned", "claude"), ("Open", "deep")] {
+        let mut delegated = args(
+            task,
+            crate::organizations::NodeRequest {
+                from_task: Some(task.into()),
+                ..crate::organizations::NodeRequest::default()
+            },
+        );
+        crate::templates::resolve(&ctx, Some("demo"), "frontend")
+            .unwrap()
+            .fill(&mut delegated, None)
+            .unwrap();
+        let node = threads::start(&ctx, "demo", delegated).unwrap();
+        assert_eq!((node.profile.as_str(), node.task.as_str()), (profile, task));
+    }
     assert_eq!(
         crate::organizations::node_rules(&project, &node.id).unwrap(),
         "# Node instructions\n\nKeep changes accessible.\n"
@@ -2305,6 +2328,110 @@ fn a_merged_thread_whose_agent_stays_idle_is_resolved_after_the_grace_period() {
     );
 }
 
+/// Resolve-on-merge with the delegated task still in TASKS.md: the
+/// coordinator gets one `task` item instead of having to notice.
+#[test]
+fn a_merged_thread_resolved_with_its_task_still_open_leaves_a_task_item() {
+    let (world, project) = merged_world("idle");
+    std::fs::write(
+        project.dir().join("TASKS.md"),
+        "# Tasks\n\n## Backlog\n- [ ] Task (claude) · t-0001\n",
+    )
+    .unwrap();
+    let ctx = world.ctx();
+    ticker::tick_project(&ctx, &project).unwrap();
+    merged_seen_ago(&project, crate::steps::MERGE_GRACE_SECS);
+    ticker::tick_project(&ctx, &project).unwrap();
+    let items = items_of(&project, "task");
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].subject.as_str(), items[0].event.as_str()),
+        ("t-0001", "PR merged, task open")
+    );
+    assert_eq!(
+        crate::steps::nudge_text(&items),
+        "[hp inbox] t-0001 PR merged, task open"
+    );
+}
+
+/// The ticker stops reading a pull request once its thread is resolved, so a
+/// thread resolved by hand before its merge kept `OPEN` for good. Such a
+/// record is read again, at most once an hour, and nothing is announced.
+#[test]
+fn a_resolved_thread_whose_pull_request_was_left_open_is_read_again() {
+    let (world, project) = pr_world(MERGED_JSON);
+    thread::update(&project, "t-0001", |t| {
+        t.status = Status::Resolved;
+        t.resolved_reason = "manual".into();
+        t.pr = PR_URL.into();
+        t.pr_state = "OPEN".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    ticker::tick_project(&ctx, &project).unwrap();
+    let t = thread::load(&project, "t-0001").unwrap();
+    assert_eq!(
+        (t.status, t.pr_state.as_str(), t.pr_review.as_str()),
+        (Status::Resolved, "MERGED", "APPROVED")
+    );
+    assert_eq!(world.runner.count("gh pr view"), 1);
+    assert!(items_of(&project, "pr").is_empty());
+
+    // The two-minute pass comes round again within the hour: no new read.
+    thread::update(&project, "t-0001", |t| t.pr_state = "OPEN".into()).unwrap();
+    let mut state = crate::steps::load_state(&project);
+    state.last_pr_check = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(&project, &state).unwrap();
+    ticker::tick_project(&ctx, &project).unwrap();
+    assert_eq!(world.runner.count("gh pr view"), 1);
+}
+
+/// Up to 20 a pass, round robin; a pull request that cannot be read is
+/// skipped and raises no `gh` outage.
+#[test]
+fn resolved_pull_requests_are_read_in_batches_and_a_failure_is_skipped() {
+    let (world, project) = pr_world(MERGED_JSON);
+    thread::update(&project, "t-0001", |t| t.status = Status::Resolved).unwrap();
+    for n in 1..=22 {
+        let id = format!("t-{n:04}");
+        if n > 1 {
+            thread::allocate(&project, |t| t.title = id.clone()).unwrap();
+        }
+        // t-0002's cannot be read: `view_state` refuses it before `gh`.
+        let url = if n == 2 {
+            "https://example.com/owner/gone/1".to_string()
+        } else {
+            PR_URL.to_string()
+        };
+        thread::update(&project, &id, |t| {
+            t.status = Status::Resolved;
+            t.pr = url;
+            t.pr_state = "OPEN".into();
+        })
+        .unwrap();
+    }
+    let ctx = world.ctx();
+    let open = |project: &Project| {
+        thread::list(project)
+            .iter()
+            .filter(|t| t.pr_state == "OPEN")
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+    };
+    ticker::tick_project(&ctx, &project).unwrap_err();
+    assert_eq!(open(&project), ["t-0002", "t-0021", "t-0022"]);
+    assert!(items_of(&project, "outage").is_empty());
+
+    // An hour later the next batch starts after the last one read.
+    let mut state = crate::steps::load_state(&project);
+    state.last_pr_check = "2026-01-01T00:00:00Z".into();
+    state.last_resolved_pr_check = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(&project, &state).unwrap();
+    ticker::tick_project(&ctx, &project).unwrap_err();
+    assert_eq!(open(&project), ["t-0002"]);
+    assert!(items_of(&project, "outage").is_empty());
+}
+
 /// The agent's own progress report, as `herdr-projects report` writes it. The
 /// thread's pane is listed too, or the ticker drops the record as stale.
 fn thread_progress(world: &World, project: &Project, percent: u8, activity: &str) {
@@ -3655,12 +3782,6 @@ fn a_tab_thread_gets_a_brief_with_the_project_header_and_prompts_are_recorded() 
         "# Tasks\n\n## Backlog\n- [ ] Research (agent)\n  Start with the 2025 papers.\n",
     )
     .unwrap();
-    let task = crate::tasks::delegated(
-        &crate::tasks::read(&project.dir()),
-        "Research",
-        "Look into it.",
-    )
-    .unwrap();
     let t = threads::start(
         &ctx,
         "demo",
@@ -3671,12 +3792,24 @@ fn a_tab_thread_gets_a_brief_with_the_project_header_and_prompts_are_recorded() 
             profile: None,
             kind: Some(Kind::Tab),
             base: None,
-            task,
-            node: Default::default(),
+            task: "Look into it.".into(),
+            node: crate::organizations::NodeRequest {
+                from_task: Some("research".into()),
+                ..Default::default()
+            },
         },
     )
     .unwrap();
     assert_eq!(t.kind, Kind::Tab);
+    // The binary links the task line and the record, with the title as written.
+    assert_eq!(
+        std::fs::read_to_string(project.dir().join("TASKS.md")).unwrap(),
+        "# Tasks\n\n## Backlog\n- [ ] Research (agent) · t-0001\n  Start with the 2025 papers.\n"
+    );
+    assert_eq!(
+        (t.task.as_str(), t.task_origin.as_str()),
+        ("Research", "task")
+    );
     let brief = std::fs::read_to_string(Path::new(&t.thread_dir).join("brief.md")).unwrap();
     assert!(
         brief.contains(

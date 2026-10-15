@@ -29,6 +29,10 @@ pub const PR_INTERVAL_SECS: i64 = 120;
 /// A merged thread whose agent is not busy, reports no progress and wrote no
 /// report since the merge is resolved after this long.
 pub const MERGE_GRACE_SECS: i64 = 600;
+/// How often, and how many at a time, resolved threads whose record still
+/// says `OPEN` have their pull request read again.
+const RESOLVED_PR_INTERVAL_SECS: i64 = 3_600;
+const RESOLVED_PR_BATCH: usize = 20;
 pub const DONE_RETENTION_DAYS: u64 = 30;
 const DEFAULT_OUTAGE_SECS: i64 = 600;
 
@@ -63,6 +67,10 @@ pub struct State {
     /// a refused merge is retried only when its head commit, review,
     /// mergeability or check counts change.
     pub auto_merge_tried: BTreeMap<String, String>,
+    /// When resolved threads' pull requests left `OPEN` were last read, and
+    /// the last thread read, so the next batch starts after it.
+    pub last_resolved_pr_check: String,
+    pub resolved_pr_cursor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -870,6 +878,59 @@ pub fn pull_requests(
             }
         }
     }
+    errors.extend(resolved_pull_requests(ctx, project, state, now));
+    errors
+}
+
+/// The pass above reads open threads only, so a thread resolved while its
+/// pull request was open keeps `OPEN` in its record for good. Once an hour, up
+/// to a batch of such records (round robin) are read again. Nothing is
+/// announced: the thread is finished; only its record is corrected.
+fn resolved_pull_requests(
+    ctx: &Ctx,
+    project: &Project,
+    state: &mut State,
+    now: jiff::Timestamp,
+) -> Vec<anyhow::Error> {
+    let mut errors = Vec::new();
+    if !state.last_resolved_pr_check.is_empty()
+        && thread::seconds_since(&state.last_resolved_pr_check, now) < RESOLVED_PR_INTERVAL_SECS
+    {
+        return errors;
+    }
+    state.last_resolved_pr_check = now.to_string();
+    let mut stale: Vec<Thread> = thread::list(project)
+        .into_iter()
+        .filter(|t| {
+            t.status == Status::Resolved
+                && !t.pr.is_empty()
+                && t.pr_state.eq_ignore_ascii_case("open")
+        })
+        .collect();
+    let after = stale
+        .iter()
+        .position(|t| t.id > state.resolved_pr_cursor)
+        .unwrap_or(0);
+    stale.rotate_left(after);
+    // A pull request that cannot be read any more (a deleted repository, lost
+    // access) is logged and skipped; it says nothing about `gh` as a whole,
+    // which the pass above follows.
+    for t in stale.into_iter().take(RESOLVED_PR_BATCH) {
+        state.resolved_pr_cursor = t.id.clone();
+        match pr::view_state(ctx.runner, &t.pr, &t.origin) {
+            Ok((pr_state, review)) if pr_state != t.pr_state || review != t.pr_review => {
+                errors.extend(
+                    thread::update(project, &t.id, |t| {
+                        t.pr_state = pr_state;
+                        t.pr_review = review;
+                    })
+                    .err(),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(error.context(format!("{}: resolved thread's PR", t.id))),
+        }
+    }
     errors
 }
 
@@ -1275,6 +1336,7 @@ fn resolve_after_copy(
         &format!("{}: {why}: {}", thread_label(t), notes.join("; ")),
         "",
     )?;
+    threads::note_open_task(project, &resolved)?;
     Ok(true)
 }
 
