@@ -1046,9 +1046,10 @@ mod tests {
             .iter()
             .map(|(_, a)| a.ask.text.as_str())
             .collect();
-        // What does not close stays, what it left open stays, and nothing
-        // in a resolved coordinator's file waits on the user any more.
-        assert_eq!(listed, ["Card tokens", "Left"]);
+        // What does not close stays and what it left open stays, its
+        // unanswered decision ask too, but with the open ones: nothing in a
+        // resolved coordinator's file waits on the user any more.
+        assert_eq!(listed, ["Card tokens", "Left", "Which bank"]);
         let view = snapshot.project("demo").unwrap();
         let card = view.card("t-0001").unwrap();
         let shown: Vec<&str> = card.asks.iter().map(|a| a.text.as_str()).collect();
