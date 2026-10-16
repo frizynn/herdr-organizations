@@ -20,9 +20,10 @@ pub const ACTIVITY_TTL_MS: u64 = 300_000;
 pub const CHECK_IN_SECS: i64 = 300;
 /// Prompts that start with one of these were typed by the ticker or the
 /// harness, not by the user: they get no reminder.
-const AUTOMATED_PROMPTS: [&str; 4] = [
+const AUTOMATED_PROMPTS: [&str; 5] = [
     "[hp inbox]",
     "[hp ticker]",
+    "[hp routine ",
     "[herdr-projects ticker",
     "<task-notification>",
 ];
