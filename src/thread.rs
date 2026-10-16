@@ -255,6 +255,11 @@ pub fn home_report_in(project_dir: &Path, id: &str) -> PathBuf {
     project_dir.join("threads").join(format!("{id}.md"))
 }
 
+/// The home copy of the files a thread produced.
+pub fn home_library_path(project: &Project, id: &str) -> PathBuf {
+    project.dir().join("library").join(id)
+}
+
 pub fn load(project: &Project, id: &str) -> Result<Thread> {
     validate_id(id)?;
     let path = record_path(project, id);
@@ -1813,6 +1818,43 @@ mod tests {
         let copied = copy_home_local(&project, &t, true, &RealRunner);
         assert!(matches!(copied.outcome, CopyOutcome::Partial(_)));
         assert!(!project.dir().join("library/t-0001/link").exists());
+    }
+
+    #[test]
+    fn copies_report_and_library_into_the_records_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let vault = work.path().join("vault");
+        std::fs::create_dir_all(vault.join("threads")).unwrap();
+        std::fs::create_dir_all(vault.join("library")).unwrap();
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen(
+                "+++\n",
+                &format!("+++\nrecords = \"{}\"\n", vault.display()),
+                1,
+            ),
+        )
+        .unwrap();
+        let dir = work.path().join(".herdr-project/demo-t-0001");
+        let t = local_thread(&project, &dir);
+        std::fs::write(dir.join("report.md"), "## Report\nok\n").unwrap();
+        std::fs::write(dir.join("library/out.txt"), "data").unwrap();
+
+        let copied = copy_home_local(&project, &t, true, &RealRunner);
+        assert_eq!(copied.outcome, CopyOutcome::Complete);
+        assert_eq!(
+            std::fs::read_to_string(vault.join("threads/t-0001.md")).unwrap(),
+            "## Report\nok\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault.join("library/t-0001/out.txt")).unwrap(),
+            "data"
+        );
+        assert!(!project.dir().join("threads/t-0001.md").exists());
+        assert!(!project.dir().join("library/t-0001").exists());
     }
 
     #[test]

@@ -530,6 +530,98 @@ fn the_root_status_file_is_null_without_status_md() {
     assert_eq!(threads["threads"][0]["status_file"], Value::Null);
 }
 
+/// With `records` set, the reports, task files, Next lines, libraries and
+/// status files move there, and every view reads them there; clearing it
+/// brings them back.
+#[test]
+fn records_move_where_project_md_says_and_every_view_reads_them_there() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "threads/t-0002.md",
+        "Status: done\n## Summary\nShipped.\n## Next\n- Merge\n",
+    );
+    write(&fixture, "threads/t-0002.next.md", "- Tell the user\n");
+    write(&fixture, "threads/t-0002.task.md", "Fix the copy.\n");
+    write(&fixture, "library/t-0002/informe.html", "x");
+    let dir = Path::new(&fixture.dir()).to_path_buf();
+    let vault = fixture.home.path().join("vault/demo");
+    let v = vault.display().to_string();
+    fixture.text(&["set", "demo", "records", &v]);
+    for moved in [
+        "threads/t-0002.md",
+        "threads/t-0002.next.md",
+        "threads/t-0002.task.md",
+        "library/t-0002/informe.html",
+        "STATUS.md",
+        "nodes/t-0001/STATUS.md",
+    ] {
+        assert!(vault.join(moved).is_file(), "{moved}");
+        assert!(!dir.join(moved).exists(), "{moved}");
+    }
+    assert!(dir.join("threads/t-0002.toml").is_file());
+    assert_eq!(
+        std::fs::read_to_string(vault.join("STATUS.md")).unwrap(),
+        ROOT_STATUS
+    );
+
+    let thread = &fixture.json(&["thread", "show", "demo", "t-0002", "--json"])["thread"];
+    assert_eq!(thread["report"], format!("{v}/threads/t-0002.md"));
+    assert_eq!(thread["library"], format!("{v}/library/t-0002"));
+    assert_eq!(thread["verdict"], "done");
+    assert_eq!(thread["summary"], "Shipped.");
+    assert_eq!(thread["next"], json!(["Merge", "Tell the user"]));
+    assert_eq!(
+        thread["deliverables"],
+        json!([{"path": format!("{v}/library/t-0002/informe.html"), "kind": "html"}])
+    );
+    let node = &fixture.json(&["node", "show", "demo", "t-0001", "--json"])["thread"];
+    assert_eq!(
+        node["status_file"],
+        json!({
+            "path": format!("{v}/nodes/t-0001/STATUS.md"),
+            "text": NODE_STATUS,
+            "updated": "2026-10-02T09:00:00Z"
+        })
+    );
+    let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
+    assert!(
+        shown.contains(&format!("# status: {v}/nodes/t-0001/STATUS.md\n")),
+        "{shown}"
+    );
+    let project = &fixture.json(&["project", "show", "demo", "--json"])["project"];
+    assert_eq!(project["records"], v);
+    assert_eq!(
+        project["status_file"],
+        json!({
+            "path": format!("{v}/STATUS.md"),
+            "text": ROOT_STATUS,
+            "updated": "2026-10-02T08:00:00Z"
+        })
+    );
+    let context = fixture.text(&["context", "demo", "--peek"]);
+    assert!(
+        context.contains(&format!("## Status ({v}/STATUS.md)\nObjective: Ship it")),
+        "{context}"
+    );
+    assert!(context.contains(&format!(" records={v}")), "{context}");
+
+    fixture.text(&["thread", "next", "demo", "t-0002", "--add", "Close it"]);
+    assert_eq!(
+        std::fs::read_to_string(vault.join("threads/t-0002.next.md")).unwrap(),
+        "- Tell the user\n- Close it\n"
+    );
+
+    fixture.text(&["set", "demo", "records", ""]);
+    assert!(dir.join("threads/t-0002.next.md").is_file());
+    assert!(!vault.join("threads/t-0002.next.md").exists());
+    let thread = &fixture.json(&["thread", "show", "demo", "t-0002", "--json"])["thread"];
+    assert_eq!(
+        thread["report"],
+        format!("{}/threads/t-0002.md", fixture.dir())
+    );
+}
+
 #[test]
 fn text_output_is_unchanged() {
     let fixture = fixture();
@@ -702,7 +794,10 @@ Ship small PRs.
         "max_parallel_threads": 4,
         "auto_resolve_days": 7,
         "nudge": true,
-        "mute": false
+        "mute": false,
+        "progress": true,
+        "turn_reminder": true,
+        "records": fixture.dir()
     });
     for (key, value) in fields.as_object().unwrap() {
         expected[key] = value.clone();

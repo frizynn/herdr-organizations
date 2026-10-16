@@ -2174,6 +2174,58 @@ mod tests {
         assert!(restarted.contains(&format!("STATUS-SENTINEL-{}", coordinator.id)));
     }
 
+    /// With `records` set, a new node's task file is written there, and a
+    /// spawning coordinator's brief names and inlines its status file from
+    /// there; its scope stays in the project folder.
+    #[test]
+    fn a_nodes_task_and_status_file_live_in_the_records_folder() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let vault = world.home.path().join("vault");
+        std::fs::create_dir_all(vault.join("threads")).unwrap();
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen(
+                "+++\n",
+                &format!("+++\nrecords = \"{}\"\n", vault.display()),
+                1,
+            ),
+        )
+        .unwrap();
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        assert_eq!(
+            std::fs::read_to_string(vault.join(format!("threads/{}.task.md", coordinator.id)))
+                .unwrap(),
+            "task"
+        );
+        assert!(
+            !project
+                .dir()
+                .join("threads")
+                .join(format!("{}.task.md", coordinator.id))
+                .exists()
+        );
+        assert!(
+            node_scope_dir(&project, &coordinator.id)
+                .join("INSTRUCTIONS.md")
+                .is_file()
+        );
+        let status = vault.join("nodes").join(&coordinator.id).join("STATUS.md");
+        assert!(
+            status.parent().unwrap().is_dir(),
+            "its status folder is made"
+        );
+        std::fs::write(&status, "VAULT-STATUS").unwrap();
+        let own = brief(&project, &coordinator);
+        assert!(own.contains(&format!("`{}`", status.display())), "{own}");
+        assert!(own.contains("VAULT-STATUS"), "{own}");
+        assert_eq!(
+            node_status_json(&project, &coordinator).map(|s| s.text),
+            Some("VAULT-STATUS".into())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_status_file_is_read_with_the_scoped_memory_rules() {

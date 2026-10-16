@@ -27,6 +27,7 @@ mod profiles;
 mod progress;
 mod project;
 mod prompt_box;
+mod records;
 mod remote;
 mod rename;
 mod report;

@@ -161,7 +161,24 @@ pub struct Settings {
     pub icon: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tone: String,
+    /// Where the records a person reads later go (`crate::records`): an
+    /// absolute folder outside the projects root. Empty, the default: the
+    /// project folder.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub records: String,
+    /// Progress self-reporting in the project's panes: the hooks'
+    /// instructions and reminders, and the briefs' progress section.
+    #[serde(skip_serializing_if = "is_true")]
+    pub progress: bool,
+    /// What the hook adds after a prompt the user typed: the progress
+    /// reminder and a coordinator node's stale status line.
+    #[serde(skip_serializing_if = "is_true")]
+    pub turn_reminder: bool,
     pub repos: Vec<Repo>,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for Settings {
@@ -180,6 +197,9 @@ impl Default for Settings {
             mute: false,
             icon: String::new(),
             tone: String::new(),
+            records: String::new(),
+            progress: true,
+            turn_reminder: true,
             repos: Vec::new(),
         }
     }
@@ -360,6 +380,17 @@ impl Project {
 
     pub fn state_dir(&self) -> PathBuf {
         self.dir().join(".state")
+    }
+
+    /// The folder of the records a person reads later (`crate::records`):
+    /// `records` in PROJECT.md, else the project folder. Read from the file
+    /// on every call, so a `set` takes effect at once.
+    pub fn records_dir(&self) -> PathBuf {
+        let value = self
+            .read_project_md()
+            .map(|(settings, _)| settings.records)
+            .unwrap_or_default();
+        crate::records::resolve(&self.dir(), &value)
     }
 
     /// The canonical folder (symlinks resolved): the key of the project's

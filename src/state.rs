@@ -193,6 +193,9 @@ pub struct ProjectView {
     pub slug: String,
     pub name: String,
     pub dir: String,
+    /// Where its reports and status files are (`crate::records`); empty in a
+    /// view written before the setting: the project folder.
+    pub records: String,
     pub repo: String,
     pub status: String,
     pub socket: String,
@@ -592,6 +595,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         slug: project.slug.clone(),
         name: project::display_name(&settings.name, &project.slug),
         dir: project.dir().to_string_lossy().into_owned(),
+        records: String::new(),
         repo: settings
             .repos
             .first()

@@ -4645,6 +4645,48 @@ mod tests {
         assert!(!app.close);
     }
 
+    /// With `records` set, a coordinator's status file and a thread's report
+    /// are read from there.
+    #[test]
+    fn the_detail_reads_status_files_and_reports_from_the_records_folder() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        let vault = world.home.path().join("vault");
+        std::fs::create_dir_all(dir.join("nodes/t-0001")).unwrap();
+        std::fs::create_dir_all(vault.join("nodes/t-0001")).unwrap();
+        std::fs::create_dir_all(vault.join("threads")).unwrap();
+        std::fs::write(
+            vault.join("nodes/t-0001/STATUS.md"),
+            "Objective: VAULT-NODE\n",
+        )
+        .unwrap();
+        std::fs::write(vault.join("STATUS.md"), "Objective: VAULT-ROOT\n").unwrap();
+        std::fs::write(dir.join("STATUS.md"), "Objective: OLD-ROOT\n").unwrap();
+        std::fs::write(
+            vault.join("threads/t-0004.md"),
+            "Status: done\n## Summary\nVAULT-SUMMARY\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].records = vault.to_string_lossy().into_owned();
+
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0001");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: VAULT-NODE"), "{text}");
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "root");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: VAULT-ROOT"), "{text}");
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("VAULT-SUMMARY"), "{text}");
+    }
+
     /// A thread's details name its report's verdict and the first line of its
     /// summary; its tree row starts with the verdict.
     #[test]
