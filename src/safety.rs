@@ -110,6 +110,12 @@ fn parse_on_off(value: &str) -> Result<bool> {
 /// key so the table below applies. Argument lists split on whitespace, and no
 /// words at all is the empty list.
 fn value_item(key: &str, words: &[String]) -> Result<Option<Item>> {
+    // Before `default`: removing a key can drop a project's opt-out.
+    if HAND_EDITED.contains(&key) {
+        bail!(
+            "`{key}` is changed only by editing the project's or the default [safety] table of config.toml by hand"
+        );
+    }
     if words.len() == 1 && words[0] == "default" {
         return Ok(None);
     }
@@ -136,9 +142,6 @@ fn value_item(key: &str, words: &[String]) -> Result<Option<Item>> {
             }
             toml_edit::value(array)
         }
-        other if HAND_EDITED.contains(&other) => bail!(
-            "`{other}` is changed only by editing the project's or the default [safety] table of config.toml by hand"
-        ),
         other => bail!(
             "unknown safety setting `{other}`; one of: {}",
             KEYS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")

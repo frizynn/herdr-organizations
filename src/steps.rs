@@ -1415,27 +1415,30 @@ fn auto_actions(
         && (state.auto_merge_tried.get(&t.id) != Some(&attempt) || gate_refused)
     {
         state.auto_merge_tried.insert(t.id.clone(), attempt);
-        let (event, text) = match merge_pull_request(ctx, project, &t.id, safety.merge_method) {
-            Ok(_) => (
+        let outcome = match merge_pull_request(ctx, project, &t.id, safety.merge_method) {
+            Ok(_) => Some((
                 "auto-merged",
                 format!(
                     "{}: pull request {url} was merged by the ticker because auto-merge is on",
                     thread_label(&t)
                 ),
-            ),
-            // Its item was written once per reason.
-            Err(error) if error.is::<merge_gate::Refused>() => return errors,
-            Err(error) => (
+            )),
+            // Its item was written once per reason, and the review that
+            // keeps the gate refusing may ask for fixes: auto-fix goes on.
+            Err(error) if error.is::<merge_gate::Refused>() => None,
+            Err(error) => Some((
                 "auto-merge refused",
                 format!(
                     "{}: auto-merge did not merge {url}: {}",
                     thread_label(&t),
                     pr::sanitize(&format!("{error:#}"))
                 ),
-            ),
+            )),
         };
-        errors.extend(inbox::write(project, "pr", &t.id, event, &text, "").err());
-        return errors;
+        if let Some((event, text)) = outcome {
+            errors.extend(inbox::write(project, "pr", &t.id, event, &text, "").err());
+            return errors;
+        }
     }
     if t.auto_fix_ci {
         errors.extend(auto_fix(ctx, project, state, &t, url, summary).err());

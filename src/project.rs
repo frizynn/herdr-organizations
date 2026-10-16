@@ -559,8 +559,15 @@ pub fn load_safety_layers(
     canonical_project_dir: &Path,
 ) -> Result<(SafetyLayer, SafetyLayer)> {
     let file = config_dir.join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return Ok(Default::default());
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Default::default());
+        }
+        // Read as no settings, a file the user cannot read would drop a gate.
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} could not be read", file.display()));
+        }
     };
     load_safety_layers_from(&text, &file.display().to_string(), canonical_project_dir)
 }
@@ -597,12 +604,19 @@ pub fn load_safety_layers_from(
         {
             bail!("{file}: trust_screens must be \"coordinator\" or \"user\", not {value:?}");
         }
-        if let Some(argv) = &layer.merge_gate
-            && argv.first().is_none_or(|program| program.is_empty())
-        {
-            bail!(
-                "{file}: merge_gate must be a command and its arguments, such as [\"./approve.sh\"], not {argv:?}"
-            );
+        if let Some(argv) = &layer.merge_gate {
+            let Some(program) = argv.first().filter(|p| !p.is_empty()) else {
+                bail!(
+                    "{file}: merge_gate must be a command and its arguments, such as [\"/usr/local/bin/approve-merge\"], not {argv:?}"
+                );
+            };
+            // A relative path would resolve in the thread's repository or
+            // the project folder, which agents write.
+            if program.contains('/') && !Path::new(program).is_absolute() {
+                bail!(
+                    "{file}: merge_gate's program must be an absolute path or a name looked up on PATH, not {program:?}"
+                );
+            }
         }
         if let Some(secs) = layer.merge_gate_timeout
             && !(1..=3600).contains(&secs)
