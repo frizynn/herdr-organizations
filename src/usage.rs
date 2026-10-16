@@ -183,38 +183,33 @@ pub struct Caps {
     pub tokens_warn: u64,
 }
 
-impl Caps {
-    /// The caps `usage` is at or above, by their config.toml keys.
-    pub fn over(&self, usage: &Usage) -> Vec<String> {
-        self.levels(usage)
-            .into_iter()
-            .filter(|(_, cap, value)| *cap > 0 && value >= cap)
-            .map(|(key, ..)| key.to_string())
-            .collect()
-    }
+/// A cap `usage` is at or above: its config.toml key and the notification.
+struct Reached {
+    key: &'static str,
+    text: String,
+}
 
-    /// Each cap's key, limit and the value it is compared with.
-    fn levels(&self, usage: &Usage) -> [(&'static str, u64, u64); 3] {
+impl Caps {
+    fn reached(&self, usage: &Usage) -> Vec<Reached> {
         [
             ("context_warn", self.context_warn, usage.context),
             ("compaction_warn", self.compaction_warn, usage.compactions),
             ("tokens_warn", self.tokens_warn, usage.tokens()),
         ]
-    }
-
-    /// The notification for reaching cap `key`.
-    fn describe(&self, key: &str, usage: &Usage) -> String {
-        let (_, cap, value) = self
-            .levels(usage)
-            .into_iter()
-            .find(|(k, ..)| *k == key)
-            .unwrap_or_default();
-        let what = match key {
-            "context_warn" => format!("context {} tokens", short(value)),
-            "compaction_warn" => plural(value, "compaction"),
-            _ => format!("{} tokens used", short(value)),
-        };
-        format!("{what}, at or above its cap of {}", short(cap))
+        .into_iter()
+        .filter(|(_, cap, value)| *cap > 0 && value >= cap)
+        .map(|(key, cap, value)| {
+            let what = match key {
+                "context_warn" => format!("context {} tokens", short(value)),
+                "compaction_warn" => plural(value, "compaction"),
+                _ => format!("{} tokens used", short(value)),
+            };
+            Reached {
+                key,
+                text: format!("{what}, at or above its cap of {}", short(cap)),
+            }
+        })
+        .collect()
     }
 }
 
@@ -238,13 +233,14 @@ pub fn refresh(ctx: &Ctx, project: &Project) -> Result<Store> {
         for node in local_nodes(project) {
             let mut entry = store.nodes.remove(&node.id).unwrap_or_default();
             read_node(ctx, &node, &mut entry);
-            let usage = entry.usage();
-            let over = usage.as_ref().map(|u| caps.over(u)).unwrap_or_default();
-            for key in over.iter().filter(|key| !entry.over.contains(key)) {
-                let usage = usage.clone().unwrap_or_default();
-                reached.push((node.id.clone(), caps.describe(key, &usage)));
+            let now = entry.usage().map(|u| caps.reached(&u)).unwrap_or_default();
+            for cap in now
+                .iter()
+                .filter(|c| !entry.over.iter().any(|k| k == c.key))
+            {
+                reached.push((node.id.clone(), cap.text.clone()));
             }
-            entry.over = over;
+            entry.over = now.iter().map(|c| c.key.to_string()).collect();
             if !entry.files.is_empty() {
                 store.nodes.insert(node.id, entry);
             }
@@ -989,7 +985,6 @@ mod tests {
         *world.agents.borrow_mut() = agents("root-1", "t-a");
         crate::ticker::tick_for_test(&world.ctx(), &mut memory);
         *world.agents.borrow_mut() = agents("root-1", "t-b");
-        crate::ticker::tick_for_test(&world.ctx(), &mut memory);
         crate::ticker::tick_for_test(&world.ctx(), &mut memory);
         assert_eq!(
             crate::thread::load(&project, &t.id).unwrap().sessions,
