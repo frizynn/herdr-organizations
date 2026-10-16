@@ -222,6 +222,7 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "deliverables": [],
         "task": "Checkout",
         "task_origin": "task",
+        "usage": null,
         "status_file": {
             "path": format!("{}/nodes/t-0001/STATUS.md", fixture.dir()),
             "text": NODE_STATUS,
@@ -284,6 +285,7 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "deliverables": [],
         "task": "",
         "task_origin": "",
+        "usage": null,
         "status_file": null
     })
 }
@@ -298,6 +300,7 @@ fn project(fixture: &Fixture) -> Value {
         "counts": {"ready-for-review": 1, "resolved": 1},
         "icon": "",
         "tone": "",
+        "usage": null,
         "status_file": {
             "path": format!("{}/STATUS.md", fixture.dir()),
             "text": ROOT_STATUS,
@@ -388,6 +391,7 @@ fn project_list_overview_and_new_share_the_project_shape() {
                 "counts": {},
                 "icon": "",
                 "tone": "",
+                "usage": null,
                 "status_file": {
                     "path": format!("{}/other/STATUS.md", fixture.root),
                     "text": NEW_STATUS,
@@ -1368,5 +1372,88 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
             ],
             "next": [{"thread": "t-0003", "line": "Pick a library"}]
         })
+    );
+}
+
+/// Claude Code's folder for a session run in `cwd`, under `home`.
+fn claude_transcript(home: &Path, cwd: &Path, session: &str) -> std::path::PathBuf {
+    let folder: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = home.join(".claude/projects").join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(format!("{session}.jsonl"))
+}
+
+/// `node usage` reads each local node's transcripts (synthetic here) and
+/// prints one row per node, the root first; the thread and project documents
+/// then carry the same numbers, and a node with nothing read is `null`.
+#[test]
+fn node_usage_prints_a_row_per_node_and_the_documents_carry_it() {
+    let fixture = fixture();
+    let dir = std::fs::canonicalize(fixture.dir()).unwrap();
+    std::fs::write(
+        dir.join(".state/coordinator.json"),
+        json!({"agent": "claude", "cwd": dir, "sessions": ["root-1"]}).to_string(),
+    )
+    .unwrap();
+    let row = |id: &str, at: &str, usage: Value| {
+        json!({"type": "assistant", "timestamp": at, "requestId": format!("r-{id}"),
+            "message": {"id": id, "content": [], "usage": usage}})
+        .to_string()
+    };
+    std::fs::write(
+        claude_transcript(fixture.home.path(), &dir, "root-1"),
+        [
+            row(
+                "m1",
+                "2026-10-16T10:00:00.250Z",
+                json!({"input_tokens": 200, "output_tokens": 1000,
+                "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 100}),
+            ),
+            json!({"type": "system", "subtype": "compact_boundary"}).to_string(),
+            String::new(),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let mut record = std::fs::read_to_string(dir.join("threads/t-0001.toml")).unwrap();
+    record.push_str("sessions = [\"0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b\"]\n");
+    std::fs::write(dir.join("threads/t-0001.toml"), record).unwrap();
+    let rollouts = fixture.home.path().join(".codex/sessions/2026/10/16");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    std::fs::write(
+        rollouts.join("rollout-2026-10-16T09-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl"),
+        format!(
+            "{}\n",
+            json!({"timestamp": "2026-10-16T09:30:00Z", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 5000, "cached_input_tokens": 4000, "output_tokens": 300},
+                "last_token_usage": {"input_tokens": 5000, "cached_input_tokens": 4000, "output_tokens": 300}}}})
+        ),
+    )
+    .unwrap();
+
+    let root = json!({"input": 200, "output": 1000, "cache_read": 1_000_000, "cache_write": 100,
+        "context": 1_000_300, "peak_context": 1_000_300, "compactions": 1,
+        "updated": "2026-10-16T10:00:00Z", "over_cap": []});
+    let checkout = json!({"input": 1000, "output": 300, "cache_read": 4000, "cache_write": 0,
+        "context": 5000, "peak_context": 5000, "compactions": 0,
+        "updated": "2026-10-16T09:30:00Z", "over_cap": []});
+    assert_eq!(
+        fixture.json(&["node", "usage", "demo", "--json"]),
+        json!({"schema_version": 1, "project": "demo", "nodes": [
+            {"id": "root", "title": "Coordinator", "usage": root},
+            {"id": "t-0001", "title": "Checkout", "usage": checkout},
+            {"id": "t-0002", "title": "Copy fix", "usage": null}
+        ]})
+    );
+    let threads = fixture.json(&["thread", "list", "demo", "--json"]);
+    assert_eq!(threads["threads"][0]["usage"], checkout);
+    assert_eq!(threads["threads"][1]["usage"], Value::Null);
+    assert_eq!(
+        fixture.json(&["list", "--json"])["projects"][0]["usage"],
+        root
     );
 }

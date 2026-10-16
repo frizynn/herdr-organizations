@@ -181,6 +181,9 @@ pub struct Node {
     pub verdict: Option<report::Verdict>,
     /// Subtree counts; only filled for coordinators.
     pub counts: Counts,
+    /// The token caps it reached at its last read (`usage.rs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub over_cap: Vec<String>,
     /// A coordinator's status file while it exists; `None` for a thread and
     /// in a model written before it.
     pub status_file: Option<StatusCard>,
@@ -574,6 +577,7 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
     let live = lives.iter().find(|l| l.socket == record.socket);
     let now = jiff::Timestamp::now();
     let prs = steps::load_state(project).prs;
+    let usage = crate::usage::load(project);
     let entries = organizations::tree(project).unwrap_or_default();
     let records: BTreeMap<&str, &Thread> = entries
         .iter()
@@ -614,6 +618,7 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
         agent_state: root_agent
             .map(|a| a.agent_status.clone())
             .unwrap_or_default(),
+        over_cap: usage.over(ROOT_ID),
         ..Node::default()
     };
     root.status = match root.agent_state.as_str() {
@@ -700,6 +705,7 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
             verdict: (t.status != thread::Status::Resolved)
                 .then(|| report::verdict(&report::home_text(&records_dir, &t.id)))
                 .flatten(),
+            over_cap: usage.over(&t.id),
             ..Node::default()
         };
         if let Some(live) = local_live {

@@ -61,6 +61,7 @@ mod tui_config;
 mod ui;
 mod ui_ops;
 mod update;
+mod usage;
 mod watch;
 
 /// Crate version plus a build identifier (short git hash and build time), so a

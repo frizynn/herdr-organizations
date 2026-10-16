@@ -115,6 +115,7 @@ Commands you are likely to use yourself:
 | `herdr-organizations open <slug>` | Start the project's coordinator, or focus it if one is running. `--harness <kind> --model <m> --reasoning-effort <e>` chooses what it runs. |
 | `herdr-organizations overview [<slug>]` | Threads grouped by what needs you. |
 | `herdr-organizations node list <slug>` | The organization tree, with role, parent and live state. |
+| `herdr-organizations node usage <slug>` | Each node's token use read from its agent's transcripts: context now, its peak, compactions and totals. |
 | `herdr-organizations thread show <slug> <id>` | One thread's record, group, note and Next list. |
 | `herdr-organizations thread read <slug> <id>` | What a thread's pane shows now, such as a question or a permission prompt. |
 | `herdr-organizations thread merge <slug> <id>` | Merge the thread's pull request, only if it is open, approved, free of conflicts and every check passed. A project can replace the approval and the need for checks with a [merge gate](docs/operations.md#merge-gate), a command of yours that decides. |
@@ -146,6 +147,7 @@ TASK
 | Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
 | Merge settings (a [merge gate](docs/operations.md#merge-gate) command, the merge method, auto-merge for every thread of a project) | The same safety tables of `config.toml` | By hand only |
 | A tracker that holds the project's tasks instead of `TASKS.md`: a `list` command and an optional `link` command | `~/.config/herdr-projects/config.toml`, `[tracker."<project folder>"]` | By hand; see [Tasks from a tracker](docs/operations.md#tasks-from-a-tracker) |
+| Token caps that notify you when a node's context, compactions or tokens reach them | `~/.config/herdr-projects/config.toml`, `[usage."<project folder>"]` and `[usage.default]` | By hand; see [Token use](docs/operations.md#token-use) |
 | Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
 | Sidebar rows and the popup key | `~/.config/herdr/config.toml` | `configure` and `sidebar install` |
 | Projects root | `~/.herdr-projects` by default | `--root`, `HERDR_PROJECTS_ROOT`, or `config.toml` |
@@ -188,6 +190,7 @@ herdr-organizations overview --json
 | `task lint <slug> --json` | Where the tasks disagree with the thread records |
 | `project status <slug> --json` | Tasks and open threads with their state, pull requests, drift and Next lines, computed on every call |
 | `routine list <slug> --json` | Routines with their schedule, command status and last and next run |
+| `node usage <slug> --json` | Each node's token use, read from its transcripts on the call |
 
 [docs/json.md](docs/json.md) defines every field.
 
