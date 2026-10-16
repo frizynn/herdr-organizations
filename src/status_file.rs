@@ -40,7 +40,9 @@ pub fn root_text(project: &Project) -> String {
     std::fs::read_to_string(root(project)).unwrap_or_default()
 }
 
-/// A status file in the `--json` contract (docs/json.md).
+/// A status file in the `--json` contract (docs/json.md). What it says is
+/// filled in by [`StatusJson::confirmed`], and each part is left out while
+/// empty, so a file without them prints what it printed before them.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StatusJson {
     pub path: String,
@@ -48,6 +50,26 @@ pub struct StatusJson {
     pub text: String,
     /// RFC 3339 modification time.
     pub updated: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub objective: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<crate::asks::Ask>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub needs_decision: Vec<String>,
+}
+
+impl StatusJson {
+    /// With its objective, decisions and asks, each ask confirmed against
+    /// `records`.
+    pub fn confirmed(self, records: &crate::asks::Records) -> StatusJson {
+        let contents = crate::asks::read(&self.text, records);
+        StatusJson {
+            objective: contents.objective,
+            asks: contents.asks,
+            needs_decision: contents.needs_decision,
+            ..self
+        }
+    }
 }
 
 /// The file as `--json` and the popup show it: a regular file opened without
@@ -71,6 +93,9 @@ pub fn read(path: &Path) -> Option<StatusJson> {
             .take(MAX_CHARS)
             .collect(),
         updated: updated.map(rfc3339).unwrap_or_default(),
+        objective: String::new(),
+        asks: Vec::new(),
+        needs_decision: Vec::new(),
     })
 }
 

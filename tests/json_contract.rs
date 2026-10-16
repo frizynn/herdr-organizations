@@ -684,7 +684,7 @@ fn a_project_names_its_coordinator() {
 
 /// Every coordinator's asks, the root's and a node's, of two projects: what
 /// waits on the user first, then what does not close, what is in progress
-/// and what is done. A done ask on a thread whose pull request is open does
+/// and what is done, each in project, coordinator and line order. A done ask on a thread whose pull request is open does
 /// not close.
 #[test]
 fn asks_json_lists_every_coordinators_asks_in_order() {
@@ -731,16 +731,31 @@ fn asks_json_lists_every_coordinators_asks_in_order() {
     assert_eq!(
         rows,
         [
-            row("demo", "root", "needs-decision", "", "", "Pilot or not"),
             row("beta", "root", "needs-decision", "", "", "Budget"),
-            row("demo", "root", "done", "in-progress", "a linked PR is still open", "Ship the checkout"),
-            row("demo", "t-0001", "working", "done", "a linked thread is resolved", "Copy fix"),
-            row("demo", "t-0001", "open", "", "", "Docs"),
+            row("demo", "root", "needs-decision", "", "", "Pilot or not"),
+            row(
+                "demo",
+                "root",
+                "done",
+                "in-progress",
+                "a linked PR is still open",
+                "Ship the checkout"
+            ),
+            row(
+                "demo",
+                "t-0001",
+                "working",
+                "done",
+                "a linked thread is resolved",
+                "Copy fix"
+            ),
             row("beta", "root", "working", "", "", "Research"),
+            row("demo", "t-0001", "open", "", "", "Docs"),
             row("demo", "root", "answered", "", "", "Is it fast?"),
         ]
     );
     let first = &listed["asks"][2];
+    assert_eq!(first["project"], "demo");
     assert_eq!(first["coordinator"], json!({"id": "root", "title": ""}));
     assert_eq!(first["line"], 4);
     assert_eq!(first["answer"], "merged");
@@ -758,7 +773,7 @@ fn asks_json_lists_every_coordinators_asks_in_order() {
         "demo\troot\tneeds-decision\t\t\tPilot or not : yes or no\t"
     );
     assert!(
-        text.contains("demo\troot\tdone\tin-progress\ta linked PR is still open\tShip the checkout : merged\tt-0001 ready-for-review, PR open\n"),
+        text.contains("demo\troot\tdone\tin-progress\ta linked PR is still open\tShip the checkout : merged\tt-0001 ready-for-review (PR open)\n"),
         "{text}"
     );
     assert!(

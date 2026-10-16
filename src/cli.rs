@@ -156,6 +156,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List what you asked every coordinator, with the state it wrote and the one its links confirm
+    Asks {
+        /// Only this project's coordinators; every project that is not archived by default
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Show only one project's panes in the sidebar, sorted by attention
     Focus { slug: Option<String> },
     /// Clear the sidebar view (herdr holds one, so this clears any tool's view)
@@ -1086,7 +1095,7 @@ pub fn run() -> Result<()> {
             if json {
                 return threads::print_json(&serde_json::json!({
                     "schema_version": threads::JSON_SCHEMA_VERSION,
-                    "project": overview::project_json(&project, &[]),
+                    "project": overview::project_json(&ctx, &project, &[]),
                     "next": next,
                 }));
             }
@@ -1104,7 +1113,7 @@ pub fn run() -> Result<()> {
                 }
                 let rows = threads::rows(&ctx, &project);
                 if json {
-                    projects.push(overview::project_json(&project, &rows));
+                    projects.push(overview::project_json(&ctx, &project, &rows));
                     continue;
                 }
                 let summary: Vec<String> = overview::group_counts(&rows)
@@ -1178,6 +1187,7 @@ pub fn run() -> Result<()> {
             refresh,
             check,
         } => crate::assign::run(&ctx, &slug, refresh, check.as_deref()),
+        Command::Asks { project, json } => crate::asks::print(&ctx, project.as_deref(), json),
         Command::Overview { slug, wait, json } => {
             if json {
                 overview::run_json(&ctx, slug.as_deref())

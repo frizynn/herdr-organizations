@@ -6,10 +6,13 @@
 //! of an ask is the user's and the coordinator's words: it is shown, and it
 //! never goes into a prompt.
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::organizations::{self, ROOT_ID};
 use crate::paths::Ctx;
-use crate::project::Project;
+use crate::project::{self, Project};
+use crate::status_file::{self, StatusJson};
 use crate::tasks::{self, Task};
 use crate::thread::{self, Group, Thread};
 use crate::{pr, sidebar, threads};
@@ -74,6 +77,18 @@ pub enum Confirmed {
     InProgress,
 }
 
+impl Confirmed {
+    pub fn word(self) -> &'static str {
+        match self {
+            Confirmed::Unconfirmed => "",
+            Confirmed::Done => "done",
+            Confirmed::Failed => "failed",
+            Confirmed::Stopped => "stopped",
+            Confirmed::InProgress => "in-progress",
+        }
+    }
+}
+
 /// One link of an ask, and what the records say about it.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -129,6 +144,13 @@ impl Ask {
     }
 }
 
+/// Whether a list of asks shows it: a resolved coordinator can no longer
+/// update its file, so its answered and done asks are history, while what
+/// it left open still shows.
+pub fn listed(ask: &Ask, coordinator_resolved: bool) -> bool {
+    !(coordinator_resolved && matches!(ask.state, State::Answered | State::Done))
+}
+
 /// What a status file says, each ask confirmed against the records.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Contents {
@@ -153,6 +175,20 @@ impl Records {
     }
 }
 
+impl Link {
+    /// `t-0007 working (PR open)`, `#12 merged`, `task:3 done`, a page's URL.
+    pub fn words(&self) -> String {
+        let mut words = self.text.clone();
+        if !self.state.is_empty() {
+            words = format!("{words} {}", self.state);
+        }
+        if self.kind == LinkKind::Thread && !self.pr_state.is_empty() {
+            words = format!("{words} (PR {})", self.pr_state);
+        }
+        words
+    }
+}
+
 impl Records {
     pub fn load(ctx: &Ctx, project: &Project) -> Records {
         Records::new(thread::list(project), tasks::on_disk(ctx, project))
@@ -169,6 +205,125 @@ impl Records {
             .rev()
             .find(|t| !t.pr.is_empty() && is_it(&t.pr))
     }
+}
+
+/// A coordinator's status file, with what it says.
+pub struct Sheet {
+    /// `root` or the coordinator node's id.
+    pub coordinator: String,
+    /// The node's title, empty for the root.
+    pub title: String,
+    pub resolved: bool,
+    pub status: StatusJson,
+}
+
+/// The status files of a project's coordinators that exist: the root's,
+/// then each spawning coordinator node's in tree order. Read the way
+/// `--json` reads them (`status_file::read`), through the path functions.
+pub fn sheets(project: &Project, records: &Records) -> Vec<Sheet> {
+    let root = status_file::read(&status_file::root(project)).map(|status| Sheet {
+        coordinator: ROOT_ID.into(),
+        title: String::new(),
+        resolved: false,
+        status,
+    });
+    let nodes = organizations::tree(project)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let t = entry.thread;
+            let status = organizations::node_status_json(project, &t)?;
+            Some(Sheet {
+                coordinator: t.id.clone(),
+                title: clean(&t.title),
+                resolved: t.status == thread::Status::Resolved,
+                status,
+            })
+        });
+    root.into_iter()
+        .chain(nodes)
+        .map(|sheet| Sheet {
+            status: sheet.status.confirmed(records),
+            ..sheet
+        })
+        .collect()
+}
+
+/// One row of `asks --json` (docs/json.md).
+#[derive(Serialize)]
+struct Row {
+    project: String,
+    coordinator: CoordinatorRef,
+    #[serde(flatten)]
+    ask: Ask,
+}
+
+#[derive(Serialize)]
+struct CoordinatorRef {
+    id: String,
+    title: String,
+}
+
+/// `asks [--project P] [--json]`: every listed ask of every project that is
+/// not archived, or of one, most pressing first (`Ask::rank`), else in
+/// project, coordinator and line order. It only reads.
+pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
+    let slugs = match slug {
+        Some(slug) => {
+            project::validate_slug(slug)?;
+            vec![slug.to_string()]
+        }
+        None => crate::overview::visible_slugs(ctx),
+    };
+    let mut rows = Vec::new();
+    for slug in slugs {
+        let project = Project::load(&ctx.root, &slug)?;
+        let records = Records::load(ctx, &project);
+        for sheet in sheets(&project, &records) {
+            for ask in sheet.status.asks {
+                if listed(&ask, sheet.resolved) {
+                    rows.push(Row {
+                        project: project.slug.clone(),
+                        coordinator: CoordinatorRef {
+                            id: sheet.coordinator.clone(),
+                            title: sheet.title.clone(),
+                        },
+                        ask,
+                    });
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|row| row.ask.rank());
+    if json {
+        return threads::print_json(&serde_json::json!({
+            "schema_version": threads::JSON_SCHEMA_VERSION,
+            "asks": rows,
+        }));
+    }
+    for row in &rows {
+        let coordinator = if row.coordinator.title.is_empty() {
+            row.coordinator.id.clone()
+        } else {
+            format!("{} {}", row.coordinator.id, row.coordinator.title)
+        };
+        let ask = &row.ask;
+        let said = if ask.answer.is_empty() {
+            ask.text.clone()
+        } else {
+            format!("{} : {}", ask.text, ask.answer)
+        };
+        let links: Vec<String> = ask.links.iter().map(Link::words).collect();
+        println!(
+            "{}\t{coordinator}\t{}\t{}\t{}\t{said}\t{}",
+            row.project,
+            ask.state.word(),
+            ask.confirmed.word(),
+            ask.mismatch,
+            links.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Reads a status file's text. It never fails: a line under `## Asked` that
