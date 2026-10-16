@@ -29,6 +29,7 @@ mod project;
 mod prompt_box;
 mod remote;
 mod rename;
+mod report;
 mod routine;
 mod runner;
 mod safety;

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::organizations::ROOT_ID;
 use crate::paths::Ctx;
+use crate::report::{self, Verdict};
 use crate::state::{self, Counts, Node, ProjectView, Snapshot, Status};
 use crate::term::{
     self, BLUE, BOLD, CYAN, DIM, Frame, GREEN, GREY, HEAD, Input, PRIMARY, RED, SELECTED, Style,
@@ -532,6 +533,35 @@ fn counts_header(counts: &Counts) -> Line {
         x += 2 + text.chars().count() as isize + 3;
     }
     line
+}
+
+/// A report's verdict: done is green, a decision yellow, blocked and failed red.
+fn verdict_style(verdict: Verdict) -> Style {
+    match verdict {
+        Verdict::Done => GREEN,
+        Verdict::NeedsDecision => YELLOW,
+        Verdict::Blocked | Verdict::Failed => RED,
+    }
+}
+
+/// A tree row's text column: its report's verdict first, when it has one.
+fn text_column(line: Line, node: &Node) -> Line {
+    const AT: isize = 41;
+    const WIDTH: usize = 40;
+    let Some(verdict) = node.verdict else {
+        return line.at(AT, term::fit(&node.text, WIDTH), Style::PLAIN);
+    };
+    let words = verdict.words();
+    let line = line.at(AT, words, verdict_style(verdict));
+    if node.text.is_empty() {
+        return line;
+    }
+    let x = AT + words.len() as isize;
+    line.at(x + 1, "·", DIM).at(
+        x + 3,
+        term::fit(&node.text, WIDTH.saturating_sub(words.len() + 3)),
+        Style::PLAIN,
+    )
 }
 
 /// A node as the screens name it: the root is "Coordinator".
@@ -1154,9 +1184,8 @@ impl<'a> App<'a> {
                     term::fit(&node.title, 26usize.saturating_sub(2 * depth)),
                     if coordinator { BOLD } else { Style::PLAIN },
                 )
-                .at(30, node.status.word(), style)
-                .at(41, term::fit(&node.text, 40), Style::PLAIN)
-                .at(-2, state::age(&node.since), DIM);
+                .at(30, node.status.word(), style);
+            line = text_column(line, node).at(-2, state::age(&node.since), DIM);
             lines.push(line.target(Target::Node(project.slug.clone(), node.id.clone())));
         }
         lines.push(Line::new());
@@ -1628,6 +1657,24 @@ impl<'a> App<'a> {
                     DIM,
                 );
                 y += 1;
+            }
+            y += 3;
+        }
+        let report_text = report::home_text(std::path::Path::new(&project.dir), &node.id);
+        let verdict = report::verdict(&report_text);
+        let summary = report::summary(&report_text);
+        let first_line = summary.as_deref().and_then(|s| s.lines().next());
+        if verdict.is_some() || first_line.is_some() {
+            frame.put(1, y, "REPORT", HEAD);
+            let mut x = 1;
+            if let Some(verdict) = verdict {
+                x = frame.put(x, y + 1, verdict.words(), verdict_style(verdict));
+                if first_line.is_some() {
+                    x = frame.put(x + 1, y + 1, "·", DIM) + 1;
+                }
+            }
+            if let Some(line) = first_line {
+                frame.put(x, y + 1, line, Style::PLAIN);
             }
             y += 3;
         }
@@ -4596,6 +4643,54 @@ mod tests {
         assert!(!text.contains("STATUS"), "{text}");
         press(&mut app, crossterm::event::KeyCode::Enter);
         assert!(!app.close);
+    }
+
+    /// A thread's details name its report's verdict and the first line of its
+    /// summary; its tree row starts with the verdict.
+    #[test]
+    fn a_threads_verdict_and_summary_show_in_its_detail_and_tree_row() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("threads")).unwrap();
+        std::fs::write(
+            dir.join("threads/t-0004.md"),
+            "Status: needs-decision\n## Summary\n\nPick the coupon rule.\nSECOND-LINE\n## Report\nx\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].threads[2].verdict = Some(Verdict::NeedsDecision);
+        app.stack = vec![View::Launcher { sel: 0 }];
+
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("REPORT"), "{text}");
+        assert!(
+            text.contains("needs decision · Pick the coupon rule."),
+            "{text}"
+        );
+        assert!(!text.contains("SECOND-LINE"), "{text}");
+
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0002");
+        let text = app.render(84, 30).text();
+        assert!(
+            !text.contains("REPORT"),
+            "a thread without a report: {text}"
+        );
+
+        app.open_tree("acme", None);
+        let text = app.render(100, 20).text();
+        let row = text.lines().find(|l| l.contains("billing api")).unwrap();
+        assert!(row.contains("needs decision · billing api text"), "{row}");
+        let row = text.lines().find(|l| l.contains("billing ui")).unwrap();
+        assert!(row.contains("billing ui text"), "{row}");
+        assert!(
+            !row.contains("· billing ui text"),
+            "no verdict, no prefix: {row}"
+        );
     }
 
     #[test]

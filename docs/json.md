@@ -112,6 +112,10 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `next` | [string] | The `## Next` list of its report, then lines the coordinator added. |
 | `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. |
 | `library` | string | Absolute path of the folder for files it produced. |
+| `verdict` | `"done"`, `"needs-decision"`, `"blocked"`, `"failed"` or `null` | The `Status:` line of its report, above the first `##` section. Any other value, or no such line, is `null`. |
+| `summary` | string or `null` | The `## Summary` section of its report, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
+| `captures` | `[{path, caption}]` | The images listed under `## Captures` in its report, as `- <path> - <caption>` (an em dash also separates), the path relative to `library`. Kept only when the file is a regular png, jpg, jpeg, webp or gif file inside `library`, reached without `..`, an absolute path or a symbolic link; at most 24, in the report's order. Without a `## Captures` list, the 12 most recently modified such images anywhere under `library`, with an empty caption. `path` is absolute. |
+| `deliverables` | `[{path, kind}]` | Regular `html`, `pdf` and `md` files directly in `library` (not in subfolders, not hidden), `kind` being the extension in lower case; at most 10, by name. `path` is absolute. |
 | `task` | string | The title of the `TASKS.md` task it was delegated from (`--from-task`), as written there when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 | `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md`. `null` for every other node and while the file is missing. |

@@ -536,6 +536,9 @@ mod progress_hooks {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
 
+    /// What a `pr` routine types into a thread's pane: the ticker's, not the user's.
+    const ROUTINE_PROMPT: &str = "[hp routine pr-followup] Your pull request https://github.com/o/r/pull/4 changed: it was merged.\n\nClean up.";
+
     /// What the hook does in the pane under test.
     #[derive(Clone, Copy, PartialEq)]
     enum Speaks {
@@ -764,6 +767,7 @@ mod progress_hooks {
             .stdout
         };
         assert!(prompt("[hp inbox] t-0001 new report").is_empty());
+        assert!(prompt(ROUTINE_PROMPT).is_empty());
         assert!(prompt("<task-notification>\n<status>completed</status>").is_empty());
         assert!(!prompt("Start the release").is_empty());
     }
@@ -959,6 +963,7 @@ mod progress_hooks {
         said(&h, "FIRST-QUESTION is it in the skill?");
         assert!(!context().contains("status-stale"), "{}", context());
         said(&h, "[hp inbox] t-0001 new report");
+        said(&h, ROUTINE_PROMPT);
         said(&h, "<task-notification>\n<status>completed</status>");
         assert!(
             !context().contains("status-stale"),

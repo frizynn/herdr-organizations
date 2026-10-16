@@ -13,7 +13,7 @@ use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::runner::{Cmd, Runner};
 use crate::thread::{self, CopyOutcome, Group, Kind, Live, Status, Thread};
-use crate::{coordinator, pr, remote, steps, ticker};
+use crate::{coordinator, pr, remote, report, steps, ticker};
 
 /// The version of every `--json` document; see docs/json.md. Adding a field
 /// keeps it; renaming, removing or changing the meaning of one bumps it.
@@ -1821,6 +1821,14 @@ pub struct ThreadJson {
     pub report: Option<String>,
     /// Files it produced for the user.
     pub library: String,
+    /// The `Status:` line of its report, `null` without a valid one.
+    pub verdict: Option<report::Verdict>,
+    /// Its report's `## Summary`, at most 600 characters. Agent-written.
+    pub summary: Option<String>,
+    /// The library images its report lists, else the newest ones.
+    pub captures: Vec<report::Capture>,
+    /// The documents at the top of its library.
+    pub deliverables: Vec<report::Deliverable>,
     /// The TASKS.md task it was delegated from, and `task`, `chat` or empty.
     pub task: String,
     pub task_origin: String,
@@ -1891,6 +1899,9 @@ pub fn merge_blocker(t: &Thread, summary: &pr::Summary) -> Option<String> {
 
 pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> ThreadJson {
     let t = &row.thread;
+    let report_path = thread::home_report_path(project, &t.id);
+    let report_text = std::fs::read_to_string(&report_path).unwrap_or_default();
+    let library = project.dir().join("library").join(&t.id);
     let prs = &state.prs;
     let pr = (!t.pr.is_empty()).then(|| {
         // A summary stored before the counts existed has no head commit.
@@ -1968,18 +1979,14 @@ pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> Thread
         activity: t.activity.clone(),
         percent: t.percent,
         next: thread::all_next(project, &t.id),
-        report: {
-            let report = thread::home_report_path(project, &t.id);
-            report
-                .is_file()
-                .then(|| report.to_string_lossy().into_owned())
-        },
-        library: project
-            .dir()
-            .join("library")
-            .join(&t.id)
-            .to_string_lossy()
-            .into_owned(),
+        report: report_path
+            .is_file()
+            .then(|| report_path.to_string_lossy().into_owned()),
+        library: library.to_string_lossy().into_owned(),
+        verdict: report::verdict(&report_text),
+        summary: report::summary(&report_text),
+        captures: report::captures(&report_text, &library),
+        deliverables: report::deliverables(&library),
         task: t.task.clone(),
         task_origin: t.task_origin.clone(),
         status_file: organizations::node_status_json(project, t),
@@ -2122,6 +2129,16 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
     let report = thread::home_report_path(&project, id);
     if report.is_file() {
         println!("# home copy of the report: {}", report.display());
+        let text = std::fs::read_to_string(&report).unwrap_or_default();
+        if let Some(verdict) = report::verdict(&text) {
+            println!("# verdict: {}", verdict.words());
+        }
+        if let Some(summary) = report::summary(&text) {
+            println!("# summary:");
+            for line in summary.lines() {
+                println!("#   {line}");
+            }
+        }
     }
     if record.is_spawning_coordinator() {
         let status = organizations::status_path(&project, id);

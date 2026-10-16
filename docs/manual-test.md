@@ -34,6 +34,8 @@ In the disposable project, add unique sentinel text to the project root, an ance
 
 Write a sentinel into the ancestor coordinator's `nodes/<id>/STATUS.md` and restart it with `node restart`. Confirm its brief has the coordinator node brief in place of the thread brief and shows the sentinel under `# Your status`, and that the child's brief has neither. Open the ancestor's details in the popup: a `STATUS` section shows the file's first lines and Enter opens it in a new tab.
 
+Have the child finish with `Status: blocked`, a two-line `## Summary` and a `## Captures` line naming a screenshot in its library. Confirm the ancestor is woken with `<child id> blocked` and no summary text, `node show` prints the verdict and summary, the popup's tree row starts its text with `blocked` and the child's details show a `REPORT` section with the verdict and the summary's first line, and `thread show --json` lists the capture with its caption.
+
 ## Agent profiles
 
 Use the installed Codex CLI to check a node with a model, reasoning effort and each permission profile. Check Claude Code with model and permission profiles. Inspect Herdr's `agent start` argv or each CLI's reported startup options. Verify raw argument values containing spaces, quotes and shell metacharacters arrive as single data values and execute nothing in the shell. Confirm conflicting Codex and Claude permission flags in raw and project safety args fail before placement, and confirm permission profiles are argv validation rather than OS isolation.

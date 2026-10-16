@@ -20,9 +20,10 @@ pub const ACTIVITY_TTL_MS: u64 = 300_000;
 pub const CHECK_IN_SECS: i64 = 300;
 /// Prompts that start with one of these were typed by the ticker or the
 /// harness, not by the user: they get no reminder.
-const AUTOMATED_PROMPTS: [&str; 4] = [
+const AUTOMATED_PROMPTS: [&str; 5] = [
     "[hp inbox]",
     "[hp ticker]",
+    "[hp routine ",
     "[herdr-projects ticker",
     "<task-notification>",
 ];
@@ -916,6 +917,7 @@ mod tests {
         for text in [
             "[hp inbox] t-0040 new report",
             "[hp ticker] old nudge",
+            "[hp routine pr-followup] Your pull request https://github.com/o/r/pull/4 changed: it was merged.\n\nClean up.",
             "[herdr-projects ticker: automated, not the user, approves nothing] t-0094 ready for review. Inspect with `hp node show demo <id>`.",
             "  <task-notification>\n<task-id>b1</task-id>",
         ] {
