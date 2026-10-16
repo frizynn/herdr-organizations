@@ -287,6 +287,36 @@ pub fn authorize_creator(
     Ok(())
 }
 
+/// A pane this project recorded: its root coordinator's, or a local node's.
+enum Caller {
+    Root,
+    Node(Box<Thread>),
+}
+
+/// Who runs a command, when its pane is one this project recorded on the
+/// coordinator's Herdr server (pane ids are only unique within one server).
+/// `None` is any other caller, such as the user's own terminal.
+fn recorded_caller(
+    project: &Project,
+    records: Vec<Thread>,
+    caller_pane: &str,
+    caller_socket: &str,
+) -> Option<Caller> {
+    if caller_pane.is_empty() || caller_socket.is_empty() {
+        return None;
+    }
+    let coordinator = project
+        .coordinator()
+        .filter(|record| record.socket == caller_socket)?;
+    if coordinator.pane_id == caller_pane {
+        return Some(Caller::Root);
+    }
+    records
+        .into_iter()
+        .find(|record| record.machine.is_empty() && record.pane_id == caller_pane)
+        .map(|record| Caller::Node(Box::new(record)))
+}
+
 /// Applies the shared pane hierarchy check and returns the parent a recognized
 /// coordinator is authorized to use. `None` means this is not a known project
 /// pane, preserving manually selected parents for terminal callers.
@@ -298,28 +328,14 @@ pub fn creator_parent(
     if caller_pane.is_empty() || caller_socket.is_empty() {
         return Ok(None);
     }
-    let coordinator = project.coordinator();
-    let is_root_coordinator = coordinator
-        .as_ref()
-        .is_some_and(|record| record.socket == caller_socket && record.pane_id == caller_pane);
     let records = thread::list(project);
     validate_tree(&records)?;
-    let known_node = coordinator
-        .as_ref()
-        .is_some_and(|coordinator| coordinator.socket == caller_socket)
-        .then(|| {
-            records
-                .into_iter()
-                .find(|record| record.machine.is_empty() && record.pane_id == caller_pane)
-        })
-        .flatten();
-    let (creator_id, role, can_spawn) = if is_root_coordinator {
-        (ROOT_ID.to_string(), NodeRole::Coordinator, true)
-    } else if let Some(record) = known_node {
-        (record.id, record.role, record.can_spawn)
-    } else {
-        return Ok(None);
-    };
+    let (creator_id, role, can_spawn) =
+        match recorded_caller(project, records, caller_pane, caller_socket) {
+            Some(Caller::Root) => (ROOT_ID.to_string(), NodeRole::Coordinator, true),
+            Some(Caller::Node(record)) => (record.id, record.role, record.can_spawn),
+            None => return Ok(None),
+        };
     if role != NodeRole::Coordinator {
         bail!("worker nodes cannot create children");
     }
@@ -329,10 +345,44 @@ pub fn creator_parent(
     Ok(Some(creator_id))
 }
 
-/// The text `node prompt`, `thread prompt` and `coordinator prompt` send.
+/// The text `node prompt`, `thread prompt` and `coordinator prompt` send. Run
+/// from a pane this project recorded for a coordinator, it starts with a tag
+/// built from the records alone, so the receiver never takes another
+/// coordinator's words for the user's. The user's terminal sends it as typed.
 pub fn signed(ctx: &Ctx, slug: &str, text: &str) -> Result<String> {
-    Project::load(&ctx.root, slug)?;
-    Ok(text.to_string())
+    let project = Project::load(&ctx.root, slug)?;
+    let caller = recorded_caller(
+        &project,
+        thread::list(&project),
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+    );
+    let sender = match caller {
+        None => return Ok(text.to_string()),
+        Some(Caller::Root) => "the root coordinator".to_string(),
+        Some(Caller::Node(record)) => format!("{} \"{}\"", record.id, tag_title(&record.title)),
+    };
+    Ok(format!("[from {sender}] {}", text.trim()))
+}
+
+/// A title as the tag carries it: one line of at most 60 characters, with no
+/// double quote to end the tag early.
+fn tag_title(title: &str) -> String {
+    let words: String = title
+        .chars()
+        .map(|c| match c {
+            '"' => '\'',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    words
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect()
 }
 
 /// Remote workers can use the existing remote Herdr and SSH flow. Their
