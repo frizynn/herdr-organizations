@@ -137,7 +137,7 @@ fn live_agents(project: &Project, view: &crate::threads::SessionView, dirs: &[&P
 }
 
 /// Claude Code's folder for conversations run in `dir`.
-fn claude_projects(ctx: &Ctx, dir: &Path) -> PathBuf {
+pub(crate) fn claude_projects(ctx: &Ctx, dir: &Path) -> PathBuf {
     let base = match ctx.env.var("CLAUDE_CONFIG_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => ctx.env.home.join(".claude"),

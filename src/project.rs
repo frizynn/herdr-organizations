@@ -278,6 +278,10 @@ pub struct Coordinator {
     pub reasoning_effort: String,
     /// The last native session id Herdr reported for that kind, for resume.
     pub agent_session: String,
+    /// Every session id Herdr reported for its pane, oldest first and each
+    /// once: the transcripts its token use is read from (`usage.rs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
     pub updated: String,
 }
 
@@ -515,6 +519,11 @@ impl Project {
     pub fn tracker(&self, config_dir: &Path) -> Result<Option<crate::tracker::Config>> {
         load_tracker(config_dir, &self.canonical_dir())
     }
+
+    /// Its token caps; none without a `[usage]` table.
+    pub fn usage_caps(&self, config_dir: &Path) -> Result<crate::usage::Caps> {
+        load_usage_caps(config_dir, &self.canonical_dir())
+    }
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -674,37 +683,47 @@ struct TrackerLayer {
     timeout: Option<u64>,
 }
 
-/// The tracker of the project at `canonical_project_dir`, resolved as the
-/// safety tables are: its own `[tracker."<path>"]`, then `[tracker.default]`.
-/// No `list`, or an empty one, means TASKS.md. A config.toml that does not
-/// parse has no tracker here: the safety settings already report it, and a
-/// project that never named a tracker keeps reading TASKS.md.
-pub fn load_tracker(
+/// `[<table>.default]` and the project's own `[<table>."<canonical path>"]`
+/// in config.toml, as written; a missing one is empty. A config.toml that is
+/// missing or does not parse has neither: the safety settings already
+/// report it, and a project that never named the table keeps its defaults.
+fn config_layers<T: serde::de::DeserializeOwned + Default>(
     config_dir: &Path,
+    table: &str,
     canonical_project_dir: &Path,
-) -> Result<Option<crate::tracker::Config>> {
-    #[derive(Deserialize)]
-    struct Config {
-        #[serde(default)]
-        tracker: std::collections::BTreeMap<String, toml::Value>,
-    }
+) -> Result<(T, T)> {
     let file = config_dir.join("config.toml");
     let Ok(text) = std::fs::read_to_string(&file) else {
-        return Ok(None);
+        return Ok(Default::default());
     };
-    let Ok(mut config) = toml::from_str::<Config>(&text) else {
-        return Ok(None);
+    let Ok(mut config) = toml::from_str::<toml::Table>(&text) else {
+        return Ok(Default::default());
     };
-    let mut layer = |key: &str| -> Result<TrackerLayer> {
-        match config.tracker.remove(key) {
+    let Some(toml::Value::Table(mut tables)) = config.remove(table) else {
+        return Ok(Default::default());
+    };
+    let mut layer = |key: &str| -> Result<T> {
+        match tables.remove(key) {
             Some(value) => value
                 .try_into()
-                .with_context(|| format!("{}: [tracker.{key:?}]", file.display())),
-            None => Ok(TrackerLayer::default()),
+                .with_context(|| format!("{}: [{table}.{key:?}]", file.display())),
+            None => Ok(T::default()),
         }
     };
     let default = layer(crate::safety::DEFAULT_TABLE)?;
     let own = layer(&canonical_project_dir.to_string_lossy())?;
+    Ok((default, own))
+}
+
+/// The tracker of the project at `canonical_project_dir`, resolved as the
+/// safety tables are: its own `[tracker."<path>"]`, then `[tracker.default]`.
+/// No `list`, or an empty one, means TASKS.md.
+pub fn load_tracker(
+    config_dir: &Path,
+    canonical_project_dir: &Path,
+) -> Result<Option<crate::tracker::Config>> {
+    let (default, own): (TrackerLayer, TrackerLayer) =
+        config_layers(config_dir, "tracker", canonical_project_dir)?;
     let list = own.list.or(default.list).unwrap_or_default();
     if list.is_empty() {
         return Ok(None);
@@ -713,7 +732,7 @@ pub fn load_tracker(
     if timeout == 0 {
         bail!(
             "{}: tracker timeout must be at least 1 second",
-            file.display()
+            config_dir.join("config.toml").display()
         );
     }
     Ok(Some(crate::tracker::Config {
@@ -722,6 +741,31 @@ pub fn load_tracker(
         cache_secs: own.cache_secs.or(default.cache_secs).unwrap_or(60),
         timeout_secs: timeout,
     }))
+}
+
+/// One `[usage.*]` table as written; absent keys fall through to
+/// `[usage.default]`. Unknown keys are ignored, so a later binary may add some.
+#[derive(Deserialize, Default)]
+struct UsageLayer {
+    context_warn: Option<u64>,
+    compaction_warn: Option<u64>,
+    tokens_warn: Option<u64>,
+}
+
+/// The token caps of the project at `canonical_project_dir`, resolved as the
+/// safety tables are: its own `[usage."<path>"]`, then `[usage.default]`; 0
+/// or no value is no cap.
+pub fn load_usage_caps(
+    config_dir: &Path,
+    canonical_project_dir: &Path,
+) -> Result<crate::usage::Caps> {
+    let (default, own): (UsageLayer, UsageLayer) =
+        config_layers(config_dir, "usage", canonical_project_dir)?;
+    Ok(crate::usage::Caps {
+        context_warn: own.context_warn.or(default.context_warn).unwrap_or(0),
+        compaction_warn: own.compaction_warn.or(default.compaction_warn).unwrap_or(0),
+        tokens_warn: own.tokens_warn.or(default.tokens_warn).unwrap_or(0),
+    })
 }
 
 /// The `*.md` files directly in `dir` that are regular files, not links, in

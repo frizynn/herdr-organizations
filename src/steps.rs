@@ -2818,6 +2818,7 @@ mod tests {
                     &rows[0],
                     state,
                     &crate::merge_gate::Rule::default(),
+                    &crate::usage::Store::default(),
                 )
                 .actions
             };

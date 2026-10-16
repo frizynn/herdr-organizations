@@ -544,22 +544,38 @@ fn verdict_style(verdict: Verdict) -> Style {
     }
 }
 
-/// A tree row's text column: its report's verdict first, when it has one.
+/// A tree row's text column: its report's verdict first, when it has one,
+/// then `over cap` when it reached a token cap.
 fn text_column(line: Line, node: &Node) -> Line {
     const AT: isize = 41;
     const WIDTH: usize = 40;
-    let Some(verdict) = node.verdict else {
+    let mut marks: Vec<(&str, Style)> = node
+        .verdict
+        .map(|v| (v.words(), verdict_style(v)))
+        .into_iter()
+        .collect();
+    if !node.over_cap.is_empty() {
+        marks.push(("over cap", YELLOW));
+    }
+    if marks.is_empty() {
         return line.at(AT, term::fit(&node.text, WIDTH), Style::PLAIN);
-    };
-    let words = verdict.words();
-    let line = line.at(AT, words, verdict_style(verdict));
+    }
+    let (mut line, mut x) = (line, AT);
+    for (i, (words, style)) in marks.into_iter().enumerate() {
+        if i > 0 {
+            line = line.at(x + 1, "·", DIM);
+            x += 3;
+        }
+        line = line.at(x, words, style);
+        x += words.len() as isize;
+    }
     if node.text.is_empty() {
         return line;
     }
-    let x = AT + words.len() as isize;
+    let used = (x - AT) as usize;
     line.at(x + 1, "·", DIM).at(
         x + 3,
-        term::fit(&node.text, WIDTH.saturating_sub(words.len() + 3)),
+        term::fit(&node.text, WIDTH.saturating_sub(used + 3)),
         Style::PLAIN,
     )
 }
@@ -1156,13 +1172,12 @@ impl<'a> App<'a> {
         let mut lines = Vec::new();
         let root = &project.coordinators[0];
         let (glyph, style) = dot(root.status);
+        let line = Line::new()
+            .at(3, glyph, style)
+            .at(5, "Coordinator", BOLD)
+            .at(30, root.status.word(), style);
         lines.push(
-            Line::new()
-                .at(3, glyph, style)
-                .at(5, "Coordinator", BOLD)
-                .at(30, root.status.word(), style)
-                .at(41, term::fit(&root.text, 40), Style::PLAIN)
-                .target(Target::Node(project.slug.clone(), ROOT_ID.into())),
+            text_column(line, root).target(Target::Node(project.slug.clone(), ROOT_ID.into())),
         );
         let open = open_tree(project);
         if open.is_empty() {
@@ -4804,6 +4819,31 @@ mod tests {
             !row.contains("· billing ui text"),
             "no verdict, no prefix: {row}"
         );
+    }
+
+    /// A node at or above a token cap is marked on its tree row.
+    #[test]
+    fn a_node_over_a_token_cap_is_marked_on_its_tree_row() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        app.snap.projects[0].threads[0].over_cap = vec!["context_warn".into()];
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_tree("acme", None);
+        let text = app.render(100, 20).text();
+        let row = text.lines().find(|l| l.contains("billing ui")).unwrap();
+        assert!(row.contains("over cap · billing ui text"), "{row}");
+        let row = text.lines().find(|l| l.contains("landing")).unwrap();
+        assert!(!row.contains("over cap"), "{row}");
+
+        app.snap.projects[0].coordinators[0].over_cap = vec!["compaction_warn".into()];
+        let text = app.render(100, 20).text();
+        let row = text
+            .lines()
+            .find(|l| l.contains("Coordinator text"))
+            .unwrap();
+        assert!(row.contains("over cap · Coordinator text"), "{row}");
     }
 
     /// A thread's details show what its report proposes to remember, and

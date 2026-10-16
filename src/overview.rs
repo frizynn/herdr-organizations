@@ -183,6 +183,8 @@ pub struct ProjectJson {
     pub counts: std::collections::BTreeMap<&'static str, usize>,
     pub icon: String,
     pub tone: String,
+    /// The root coordinator's token use as last read, `null` before that.
+    pub usage: Option<crate::usage::Usage>,
     /// The root coordinator's STATUS.md, `null` while it does not exist.
     pub status_file: Option<crate::status_file::StatusJson>,
 }
@@ -204,6 +206,7 @@ pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
             .collect(),
         icon: settings.icon,
         tone: settings.tone,
+        usage: crate::usage::load(project).usage(crate::organizations::ROOT_ID),
         status_file: crate::status_file::read(&crate::status_file::root(project)),
     }
 }

@@ -110,6 +110,7 @@ pub fn found(
         model: String::new(),
         reasoning_effort: String::new(),
         agent_session: agent.session_id().to_string(),
+        sessions: Vec::new(),
         updated: String::new(),
     })
 }
@@ -514,6 +515,8 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
                     .map(|r| r.agent_session.clone())
                     .unwrap_or_default()
             },
+            // The same root node: its earlier sessions' tokens stay its own.
+            sessions: std::mem::take(&mut c.sessions),
             updated: String::new(),
         }
     })?;

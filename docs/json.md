@@ -24,6 +24,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `thread list <slug> --json` | `{schema_version, project, threads: [Thread]}` |
 | `thread show <slug> <id> --json`, `node show <slug> <id> --json` | `{schema_version, project, thread: Thread}` |
 | `node list <slug> --json` | `{schema_version, project, nodes: [Thread + depth, tree_order]}` |
+| `node usage <slug> --json` | `{schema_version, project, nodes: [{id, title, usage}]}`, see [Usage](#usage) |
 | `inbox list <slug> --json` | `{schema_version, project, items: [Item]}` |
 | `thread set <slug> <id> [--auto-fix-ci on/off] [--auto-merge on/off] --json` | `{schema_version, id, auto_fix_ci, auto_merge}` |
 | `thread merge <slug> <id> [--method squash/merge/rebase] --json` | `{schema_version, id, pr, merged: true}` |
@@ -57,6 +58,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `icon` | string | The glyph name the user picked, empty when none was picked. |
 | `tone` | string | The colour name the user picked, empty when none was picked. |
 | `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, in the project's records folder. `null` when it does not exist. |
+| `usage` | [Usage](#usage) or `null` | The root coordinator's token use as last read. |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -125,6 +127,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 | `task_id` | string | The [tracker's](operations.md#tasks-from-a-tracker) id of that task. Present only for a thread started from a tracker's task. |
 | `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md` in the project's records folder. `null` for every other node and while the file is missing. |
+| `usage` | [Usage](#usage) or `null` | Its token use as last read. |
 
 ## Status file
 
@@ -137,6 +140,21 @@ The plain Markdown file a coordinator writes about its own work, for a person or
 | `updated` | string | RFC 3339 modification time. |
 
 A symbolic link or anything else that is not a regular file is `null`, like a missing file.
+
+## Usage
+
+A node's token use, read from its agent's own transcripts (Claude Code and Codex, see [Token use](operations.md#token-use)). The ticker reads them at most every five minutes and when a node stops working, so the numbers in `overview`, `list` and `thread`/`node` documents can be that old; `node usage` reads them on the call. `null` means nothing was read yet: no session recorded, no transcript found, a harness this binary cannot read, or a node on another machine. A resolved node keeps its last numbers.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `input`, `output`, `cache_read`, `cache_write` | number | Tokens summed over every request of its sessions and their subagents: uncached input, output, cache reads and cache writes. |
+| `context` | number | The last request's prompt (input, cache read and cache write) in its latest session: how full its context is now. |
+| `peak_context` | number | The largest `context` any request of its sessions had. |
+| `compactions` | number | How many times its context was compacted. |
+| `updated` | string | RFC 3339 time of the last request counted, as the transcript records it. |
+| `over_cap` | [string] | The caps in `config.toml` it was at or above at that read: `context_warn`, `compaction_warn`, `tokens_warn`. Empty without a cap or below them. |
+
+`node usage` lists the root first (`id` `root`, `title` `Coordinator`), then every node in tree order, resolved ones included.
 
 ## Pull request
 

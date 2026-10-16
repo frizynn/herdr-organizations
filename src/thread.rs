@@ -182,6 +182,10 @@ pub struct Thread {
     pub task_origin: String,
     /// The tracker's id of that task; empty for a TASKS.md task.
     pub task_id: String,
+    /// Every native session id Herdr reported for its pane, oldest first and
+    /// each once: the transcripts its token use is read from (`usage.rs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
     /// What its agent was last asked about its pull request, per request
     /// (`fix-ci`, `address-comments`, `resolve-conflicts`), so `thread
     /// pr-action`, auto-fix and `pr` routines do not repeat one another.
