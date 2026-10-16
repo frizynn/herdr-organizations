@@ -281,6 +281,13 @@ fn report(
     // silently, and `--fix` rewrites them.
     let prefix = crate::coordinator::current_prefix(root).unwrap_or_default();
     let slugs = project::list_slugs(root);
+    let ctx = Ctx {
+        env,
+        root: root.to_path_buf(),
+        config_dir: config_dir.to_path_buf(),
+        runner,
+        detached_ticker: false,
+    };
     for slug in &slugs {
         let Ok(project) = project::Project::load(root, slug) else {
             continue;
@@ -329,13 +336,21 @@ fn report(
                 ),
             );
         }
-        let tasks = crate::drift::task_lint(&project).len();
-        if tasks > 0 {
+        let problems = crate::drift::task_lint(&ctx, &project);
+        if !problems.is_empty() {
+            let place = if problems.iter().any(|p| !p.id.is_empty()) {
+                "the tracker's tasks"
+            } else {
+                "TASKS.md"
+            };
             check(
                 &mut out,
                 None,
                 &format!("tasks {slug}"),
-                format!("{tasks} problem(s) in TASKS.md; `task lint {slug}` lists them"),
+                format!(
+                    "{} problem(s) in {place}; `task lint {slug}` lists them",
+                    problems.len()
+                ),
             );
         }
         for other in &slugs {

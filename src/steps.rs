@@ -1564,7 +1564,7 @@ fn resolve_after_copy(
             "",
         )?;
     }
-    threads::note_open_task(project, &resolved)?;
+    threads::note_open_task(ctx, project, &resolved)?;
     Ok(true)
 }
 

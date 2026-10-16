@@ -87,6 +87,9 @@ pub struct TaskRow {
     pub owner: String,
     pub thread: Option<String>,
     pub description: String,
+    /// The tracker's id, empty for a TASKS.md task.
+    pub id: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +142,11 @@ pub enum RowKind {
 
 /// Parses TASKS.md (see `tasks::parse`) into popup rows.
 pub fn parse_tasks(slug: &str, text: &str) -> Vec<TaskRow> {
-    crate::tasks::parse(text)
+    task_rows(slug, crate::tasks::parse(text))
+}
+
+fn task_rows(slug: &str, tasks: Vec<crate::tasks::Task>) -> Vec<TaskRow> {
+    tasks
         .into_iter()
         .map(|t| TaskRow {
             slug: slug.to_string(),
@@ -148,8 +155,27 @@ pub fn parse_tasks(slug: &str, text: &str) -> Vec<TaskRow> {
             owner: t.owner.to_string(),
             thread: t.thread,
             description: t.description,
+            id: t.id,
+            url: t.url,
         })
         .collect()
+}
+
+/// A project's task rows: TASKS.md's, or the tracker's last list from its
+/// cache (the popup has no timer, so it never runs `list`). `Err` is the one
+/// line shown in their place.
+fn project_tasks(ctx: &Ctx, project: &Project) -> Result<Vec<TaskRow>, String> {
+    match project.tracker(&ctx.config_dir) {
+        Ok(None) => Ok(parse_tasks(
+            &project.slug,
+            &std::fs::read_to_string(project.dir().join("TASKS.md")).unwrap_or_default(),
+        )),
+        Ok(Some(config)) => match crate::tracker::cached(project, &config) {
+            Some(answer) => answer.map(|tasks| task_rows(&project.slug, tasks)),
+            None => Err("tracker tasks not loaded yet; `context` or `task list` loads them".into()),
+        },
+        Err(error) => Err(format!("tracker unavailable: {error:#}")),
+    }
 }
 
 /// `PR #4 · approved · checks ✓ · 2 comments`, from the ticker's last poll.
@@ -386,6 +412,9 @@ fn task_detail(task: &TaskRow) -> Mode {
     } else {
         lines.extend(task.description.lines().map(|l| format!("  {l}")));
     }
+    if !task.url.is_empty() {
+        lines.extend([String::new(), task.url.clone()]);
+    }
     Mode::Detail {
         title: task.title.clone(),
         lines,
@@ -494,9 +523,17 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
         }
         Section::Tasks => {
             for project in projects_in_scope(root, scope, false) {
-                let text =
-                    std::fs::read_to_string(project.dir().join("TASKS.md")).unwrap_or_default();
-                let tasks = parse_tasks(&project.slug, &text);
+                let tasks = match project_tasks(ctx, &project) {
+                    Ok(tasks) => tasks,
+                    Err(line) => {
+                        rows.push(header(if scope.is_none() {
+                            format!("{} · {line}", project.slug)
+                        } else {
+                            line
+                        }));
+                        continue;
+                    }
+                };
                 let mut list = None;
                 for task in tasks {
                     if list.as_ref() != Some(&task.list) {
@@ -520,9 +557,14 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                     } else {
                         "  ≡"
                     };
+                    let id = if task.id.is_empty() {
+                        String::new()
+                    } else {
+                        format!("[{}] ", task.id)
+                    };
                     rows.push(Row {
                         header: false,
-                        text: format!("  {}{owner}{notes}", task.title),
+                        text: format!("  {id}{}{owner}{notes}", task.title),
                         color: None,
                         kind: RowKind::Task(task),
                     });
@@ -1842,11 +1884,20 @@ impl<'a> Popup<'a> {
         let Some(RowKind::Task(task)) = self.current().map(|r| r.kind.clone()) else {
             return;
         };
-        let sentence = |verb: &str| {
-            format!(
-                "(from the projects popup) {verb} the task \"{}\" in TASKS.md.",
-                task.title
-            )
+        // A tracker's task is changed with the tracker's own tool.
+        const IN_TRACKER: &str = "in the tracker, with the tracker's own tool";
+        let sentence = |verb: &str, in_tracker: &str| {
+            if task.id.is_empty() {
+                format!(
+                    "(from the projects popup) {verb} the task \"{}\" in TASKS.md.",
+                    task.title
+                )
+            } else {
+                format!(
+                    "(from the projects popup) {verb} the task {} \"{}\" {in_tracker}.",
+                    task.id, task.title
+                )
+            }
         };
         match key.code {
             KeyCode::Enter => match &task.thread {
@@ -1873,11 +1924,15 @@ impl<'a> Popup<'a> {
                 None => self.message = "this task has no thread yet; d delegates it".into(),
             },
             KeyCode::Char('i') => self.mode = task_detail(&task),
-            KeyCode::Char('d') => self.coordinator_says(&task.slug, sentence("Please delegate")),
-            KeyCode::Char('m') => {
-                self.coordinator_says(&task.slug, sentence("Please mark as done"))
+            KeyCode::Char('d') => {
+                self.coordinator_says(&task.slug, sentence("Please delegate", "from the tracker"))
             }
-            KeyCode::Char('D') => self.coordinator_says(&task.slug, sentence("Please drop")),
+            KeyCode::Char('m') => {
+                self.coordinator_says(&task.slug, sentence("Please mark as done", IN_TRACKER))
+            }
+            KeyCode::Char('D') => {
+                self.coordinator_says(&task.slug, sentence("Please drop", IN_TRACKER))
+            }
             _ => {}
         }
     }
@@ -3148,7 +3203,9 @@ mod tests {
                 r#"{"schema_version":1,"tasks":[{"id":"AWA-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0003","description":"Safari drops the cookie.","url":"https://tracker.example/AWA-1"}]}"#,
             ),
         );
-        world.runner.on("coordinator", crate::runner::fake::ok("sent"));
+        world
+            .runner
+            .on("coordinator", crate::runner::fake::ok("sent"));
         let texts = |rows: &[Row]| -> Vec<(String, bool)> {
             rows.iter().map(|r| (r.text.clone(), r.header)).collect()
         };
@@ -3169,7 +3226,10 @@ mod tests {
             texts(&rows),
             [
                 ("Backlog".to_string(), true),
-                ("  [AWA-1] Fix login  (claude) · t-0003  ≡".to_string(), false)
+                (
+                    "  [AWA-1] Fix login  (claude) · t-0003  ≡".to_string(),
+                    false
+                )
             ]
         );
         assert_eq!(world.runner.count("tracker-list"), 1);

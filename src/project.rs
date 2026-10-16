@@ -450,6 +450,11 @@ impl Project {
     pub fn safety(&self, config_dir: &Path) -> Result<Safety> {
         load_safety(config_dir, &self.canonical_dir())
     }
+
+    /// The tracker its tasks come from, `None` for TASKS.md.
+    pub fn tracker(&self, config_dir: &Path) -> Result<Option<crate::tracker::Config>> {
+        load_tracker(config_dir, &self.canonical_dir())
+    }
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -557,6 +562,67 @@ pub fn load_safety_layers_from(
         }
     }
     Ok((default, own))
+}
+
+/// One `[tracker.*]` table as written; absent keys fall through to
+/// `[tracker.default]`, then to the built-in defaults. Unknown keys are
+/// ignored, so a later binary may add some.
+#[derive(Deserialize, Default)]
+struct TrackerLayer {
+    list: Option<Vec<String>>,
+    link: Option<Vec<String>>,
+    cache_secs: Option<u64>,
+    timeout: Option<u64>,
+}
+
+/// The tracker of the project at `canonical_project_dir`, resolved as the
+/// safety tables are: its own `[tracker."<path>"]`, then `[tracker.default]`.
+/// No `list`, or an empty one, means TASKS.md. A config.toml that does not
+/// parse has no tracker here: the safety settings already report it, and a
+/// project that never named a tracker keeps reading TASKS.md.
+pub fn load_tracker(
+    config_dir: &Path,
+    canonical_project_dir: &Path,
+) -> Result<Option<crate::tracker::Config>> {
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        tracker: std::collections::BTreeMap<String, toml::Value>,
+    }
+    let file = config_dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Ok(None);
+    };
+    let Ok(mut config) = toml::from_str::<Config>(&text) else {
+        return Ok(None);
+    };
+    let mut layer = |key: &str| -> Result<TrackerLayer> {
+        match config.tracker.remove(key) {
+            Some(value) => value
+                .try_into()
+                .with_context(|| format!("{}: [tracker.{key:?}]", file.display())),
+            None => Ok(TrackerLayer::default()),
+        }
+    };
+    let default = layer(crate::safety::DEFAULT_TABLE)?;
+    let own = layer(&canonical_project_dir.to_string_lossy())?;
+    let list = own.list.or(default.list).unwrap_or_default();
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let timeout = own.timeout.or(default.timeout).unwrap_or(30);
+    if timeout == 0 {
+        bail!(
+            "{}: tracker timeout must be at least 1 second",
+            file.display()
+        );
+    }
+    Ok(Some(crate::tracker::Config {
+        list,
+        link: own.link.or(default.link).unwrap_or_default(),
+        cache_secs: own.cache_secs.or(default.cache_secs).unwrap_or(60),
+        timeout_secs: timeout,
+    }))
 }
 
 /// The `*.md` files directly in `dir` that are regular files, not links, in
@@ -770,9 +836,37 @@ pub fn priming_problems(project: &Project, prefix: &str) -> Vec<String> {
     problems
 }
 
-/// Creates the folder and skeleton files. The only code path that creates a
-/// project's directories. Fails if the slug exists.
+/// [`create`] for `new` and the popup's New form: a project that takes its
+/// tasks from a tracker gets no TASKS.md.
+pub fn create_for(
+    config_dir: &Path,
+    root: &Path,
+    name: &str,
+    goal: &str,
+    repos: Vec<Repo>,
+) -> Result<Project> {
+    let slug = slug_from_name(name)?;
+    let folder = std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .join(&slug);
+    let tracked = load_tracker(config_dir, &folder)?.is_some();
+    create_skeleton(root, name, goal, repos, !tracked)
+}
+
+/// Creates the folder and skeleton files, TASKS.md included.
 pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<Project> {
+    create_skeleton(root, name, goal, repos, true)
+}
+
+/// The only code path that creates a project's directories. Fails if the slug
+/// exists.
+fn create_skeleton(
+    root: &Path,
+    name: &str,
+    goal: &str,
+    repos: Vec<Repo>,
+    tasks_file: bool,
+) -> Result<Project> {
     let slug = slug_from_name(name)?;
     let project = Project {
         root: root.to_path_buf(),
@@ -817,7 +911,9 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
         &dir.join(crate::status_file::NAME),
         crate::status_file::TEMPLATE.as_bytes(),
     )?;
-    write_atomic(&dir.join("TASKS.md"), TASKS_TEMPLATE.as_bytes())?;
+    if tasks_file {
+        write_atomic(&dir.join("TASKS.md"), TASKS_TEMPLATE.as_bytes())?;
+    }
     write_atomic(&dir.join(PR_FOLLOWUP), PR_FOLLOWUP_TEMPLATE.as_bytes())?;
     write_json(
         &project.state_dir().join("project.json"),

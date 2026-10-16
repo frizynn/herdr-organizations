@@ -1,7 +1,9 @@
 //! TASKS.md: `## List` headings, one `- [ ] title (owner) · t-0007` line per
 //! task, and an optional description indented under its task line. The
 //! coordinator writes it; the binary only appends ` · <id>` to a task line
-//! when a thread is delegated from it (`link`).
+//! when a thread is delegated from it (`link`). A project whose config.toml
+//! names a tracker takes the same tasks from it instead (`tracker`), and
+//! TASKS.md is ignored there.
 
 use anyhow::{Result, bail};
 use std::fmt;
@@ -111,6 +113,62 @@ pub struct Task {
     pub thread: Option<String>,
     /// The indented lines under the task line, with the indent removed.
     pub description: String,
+    /// The tracker's id; empty for a TASKS.md task, which `line` names.
+    pub id: String,
+    /// The task's page in the tracker, empty when none.
+    pub url: String,
+}
+
+impl Task {
+    /// Where the task is kept, for messages: TASKS.md or the tracker.
+    pub fn kept_in(&self) -> &'static str {
+        if self.id.is_empty() {
+            "TASKS.md"
+        } else {
+            "the tracker"
+        }
+    }
+}
+
+/// A project's tasks, and where they came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tasks {
+    File(Vec<Task>),
+    Tracker(Vec<Task>),
+    /// A tracker is set but gave no list: why, in this binary's words.
+    Unavailable(String),
+}
+
+impl Tasks {
+    /// The tasks known now; none while the tracker is unavailable.
+    pub fn list(&self) -> &[Task] {
+        match self {
+            Tasks::File(list) | Tasks::Tracker(list) => list,
+            Tasks::Unavailable(_) => &[],
+        }
+    }
+
+    /// `file`, `tracker` or `unavailable`, as `project status --json` names it.
+    pub fn source(&self) -> &'static str {
+        match self {
+            Tasks::File(_) => "file",
+            Tasks::Tracker(_) => "tracker",
+            Tasks::Unavailable(_) => "unavailable",
+        }
+    }
+}
+
+/// The project's tasks: its tracker's when config.toml names one (cached for
+/// `cache_secs` unless `fresh`), else TASKS.md's.
+pub fn load(ctx: &crate::paths::Ctx, project: &crate::project::Project, fresh: bool) -> Tasks {
+    match project.tracker(&ctx.config_dir) {
+        Ok(None) => Tasks::File(parse(&read(&project.dir()))),
+        Ok(Some(config)) => match crate::tracker::tasks(ctx, project, &config, fresh) {
+            Ok(list) => Tasks::Tracker(list),
+            Err(reason) => Tasks::Unavailable(reason),
+        },
+        Err(error) => Tasks::Unavailable(format!("tracker unavailable: {error:#}")),
+    }
 }
 
 fn is_task_line(line: &str) -> bool {
@@ -189,6 +247,7 @@ pub fn parse(text: &str) -> Vec<Task> {
             owner,
             thread,
             description: description.join("\n"),
+            ..Task::default()
         });
         i = next;
     }
@@ -235,10 +294,14 @@ pub fn read(project_dir: &Path) -> String {
 }
 
 /// `task list [--json]`: the JSON document, or one
-/// `list<TAB>title<TAB>owner<TAB>thread` line per task.
+/// `list<TAB>title<TAB>owner<TAB>thread` line per task, a tracker's with
+/// `<TAB>id` after them.
 pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()> {
     let project = crate::project::Project::load(&ctx.root, slug)?;
-    let tasks = parse(&read(&project.dir()));
+    let tasks = match load(ctx, &project, false) {
+        Tasks::Unavailable(reason) => bail!("{reason}"),
+        tasks => tasks.list().to_vec(),
+    };
     if json {
         let config = crate::profiles::load(&ctx.config_dir)?;
         let is_profile = |p: &str| config.get(p).is_some();
@@ -249,8 +312,13 @@ pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()>
         }));
     }
     for t in &tasks {
+        let id = if t.id.is_empty() {
+            String::new()
+        } else {
+            format!("\t{}", t.id)
+        };
         println!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}{id}",
             t.list,
             t.title,
             t.owner,
@@ -261,7 +329,8 @@ pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()>
 }
 
 /// A task in the `task list --json` contract (docs/json.md). `is_profile`
-/// tells a bare name that is a profile from a person's.
+/// tells a bare name that is a profile from a person's. `id` and `url` are
+/// only a tracker task's, so TASKS.md's document is what it was before.
 pub fn to_json(task: &Task, is_profile: impl Fn(&str) -> bool) -> serde_json::Value {
     let person = task.owner.is_person(is_profile);
     let (kind, profile, machine) = match &task.owner {
@@ -272,7 +341,7 @@ pub fn to_json(task: &Task, is_profile: impl Fn(&str) -> bool) -> serde_json::Va
         }
         Owner::Agent { .. } | Owner::Person(_) => ("person", None, None),
     };
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "list": task.list,
         "title": task.title,
         "owner": {
@@ -283,7 +352,12 @@ pub fn to_json(task: &Task, is_profile: impl Fn(&str) -> bool) -> serde_json::Va
         },
         "thread": task.thread.as_deref().unwrap_or_default(),
         "description": task.description,
-    })
+    });
+    if !task.id.is_empty() {
+        json["id"] = task.id.clone().into();
+        json["url"] = task.url.clone().into();
+    }
+    json
 }
 
 /// TASKS.md for `hp context`: every description folded into one line, so a
@@ -299,26 +373,60 @@ pub fn compact(text: &str) -> String {
             continue;
         }
         let (description, next) = body(&lines, i);
-        let filled: Vec<&String> = description
-            .iter()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        if let Some(first) = filled.first() {
-            let mut preview: String = first.trim().chars().take(60).collect();
-            if first.trim().chars().count() > 60 {
-                preview.push('…');
-            }
-            let more = if filled.len() > 1 {
-                format!(" (+{} more lines in TASKS.md)", filled.len() - 1)
-            } else {
-                String::new()
-            };
-            out.push(format!(
-                "{}  notes: {preview}{more}",
-                " ".repeat(indent(lines[i]))
-            ));
+        if let Some(notes) = notes_line(description.iter().map(String::as_str), "TASKS.md") {
+            out.push(format!("{}  {notes}", " ".repeat(indent(lines[i]))));
         }
         i = next;
+    }
+    out.join("\n")
+}
+
+/// `notes: <first line> (+N more lines in <kept_in>)`, `None` without notes.
+fn notes_line<'a>(description: impl Iterator<Item = &'a str>, kept_in: &str) -> Option<String> {
+    let filled: Vec<&str> = description.filter(|l| !l.trim().is_empty()).collect();
+    let first = filled.first()?.trim();
+    let mut preview: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        preview.push('…');
+    }
+    let more = if filled.len() > 1 {
+        format!(" (+{} more lines in {kept_in})", filled.len() - 1)
+    } else {
+        String::new()
+    };
+    Some(format!("notes: {preview}{more}"))
+}
+
+/// A tracker's tasks for `hp context`, shaped like TASKS.md: each list under
+/// a `###` heading (below the digest's own `##` sections), each task on one
+/// line with its id, each description folded into one `notes:` line.
+pub fn compact_tracked(tasks: &[Task]) -> String {
+    let mut out = Vec::new();
+    let mut list = None;
+    for task in tasks {
+        if list != Some(&task.list) {
+            list = Some(&task.list);
+            if !task.list.is_empty() {
+                out.push(format!("### {}", task.list));
+            }
+        }
+        let owner = match task.owner.to_string() {
+            owner if owner.is_empty() => owner,
+            owner => format!(" ({owner})"),
+        };
+        let thread = task
+            .thread
+            .as_deref()
+            .map_or(String::new(), |id| format!(" · {id}"));
+        out.push(format!(
+            "- [{}] [{}] {}{owner}{thread}",
+            if task.done { "x" } else { " " },
+            task.id,
+            task.title
+        ));
+        if let Some(notes) = notes_line(task.description.lines(), "the tracker") {
+            out.push(format!("  {notes}"));
+        }
     }
     out.join("\n")
 }
@@ -333,15 +441,23 @@ pub struct Delegation {
     pub text: String,
 }
 
+/// `key` is a TASKS.md title, or a tracker task's id or title; a tracker is
+/// asked again rather than trusting its cache, which may predate the task.
 pub fn delegation(
     ctx: &crate::paths::Ctx,
     project: &crate::project::Project,
-    title: &str,
+    key: &str,
     profile: Option<String>,
     machine: Option<String>,
     text: &str,
 ) -> Result<Delegation> {
-    let task = find(&read(&project.dir()), title)?;
+    let task = match load(ctx, project, true) {
+        Tasks::File(list) => find_titled(list, key)?,
+        Tasks::Tracker(list) => find_tracked(list, key, &project.slug)?,
+        Tasks::Unavailable(reason) => {
+            bail!("{reason}; --from-task needs it to find the task, so nothing was started")
+        }
+    };
     let config = crate::profiles::load(&ctx.config_dir)?;
     let (profile, machine) = launch_for(&task, |p| config.get(p).is_some(), profile, machine)?;
     let text = with_notes(&task, text);
@@ -368,8 +484,12 @@ fn with_notes(task: &Task, text: &str) -> String {
 /// The one TASKS.md task titled `title`, ignoring case. Two tasks of that
 /// title are refused: a link to the first could be the wrong one.
 pub fn find(tasks_md: &str, title: &str) -> Result<Task> {
+    find_titled(parse(tasks_md), title)
+}
+
+fn find_titled(tasks: Vec<Task>, title: &str) -> Result<Task> {
     let wanted = title.trim().to_lowercase();
-    let mut found: Vec<Task> = parse(tasks_md)
+    let mut found: Vec<Task> = tasks
         .into_iter()
         .filter(|t| t.title.to_lowercase() == wanted)
         .collect();
@@ -383,6 +503,37 @@ pub fn find(tasks_md: &str, title: &str) -> Result<Task> {
             found
                 .iter()
                 .map(|t| t.line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The one tracker task whose id is `key`, else whose title is, ignoring
+/// case; a title two tasks share is refused, as in TASKS.md.
+fn find_tracked(tasks: Vec<Task>, key: &str, slug: &str) -> Result<Task> {
+    let wanted = key.trim().to_lowercase();
+    let matching = |field: fn(&Task) -> &str| -> Vec<Task> {
+        tasks
+            .iter()
+            .filter(|t| field(t).to_lowercase() == wanted)
+            .cloned()
+            .collect()
+    };
+    let mut found = matching(|t| &t.id);
+    if found.is_empty() {
+        found = matching(|t| &t.title);
+    }
+    match found.len() {
+        0 => bail!(
+            "the tracker lists no task with the id or title \"{key}\"; `task list {slug}` shows them"
+        ),
+        1 => Ok(found.remove(0)),
+        n => bail!(
+            "the tracker lists {n} tasks for \"{key}\" ({}); --from-task takes one of these ids",
+            found
+                .iter()
+                .map(|t| t.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -410,11 +561,21 @@ pub fn link(tasks_md: &str, title: &str, id: &str) -> Result<String> {
     Ok(out)
 }
 
-/// The open tasks that name thread `id` as the one running them.
+/// The open TASKS.md tasks that name thread `id` as the one running them.
+#[cfg(test)]
 pub fn open_on(tasks_md: &str, id: &str) -> Vec<Task> {
-    parse(tasks_md)
-        .into_iter()
-        .filter(|t| !t.done && t.thread.as_deref() == Some(id))
+    open_in(&parse(tasks_md), id, "")
+}
+
+/// The open tasks of `tasks` that name thread `id`, or whose tracker id is
+/// `task_id`, the one the thread was started from.
+pub fn open_in(tasks: &[Task], id: &str, task_id: &str) -> Vec<Task> {
+    tasks
+        .iter()
+        .filter(|t| {
+            !t.done && (t.thread.as_deref() == Some(id) || !task_id.is_empty() && t.id == task_id)
+        })
+        .cloned()
         .collect()
 }
 
@@ -431,14 +592,16 @@ pub fn launch_for(
     let title = &task.title;
     let person = || {
         anyhow::anyhow!(
-            "\"{title}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in TASKS.md first if the user asks",
-            task.owner
+            "\"{title}\" belongs to {}, a person; people's tasks are never delegated. Change its owner in {} first if the user asks",
+            task.owner,
+            task.kept_in()
         )
     };
     match &task.owner {
         Owner::Unassigned => Ok((profile, machine)),
         Owner::Me => bail!(
-            "\"{title}\" is the user's own task (me); change its owner in TASKS.md before delegating it"
+            "\"{title}\" is the user's own task (me); change its owner in {} before delegating it",
+            task.kept_in()
         ),
         Owner::Person(_) => Err(person()),
         Owner::Agent { .. } if task.owner.is_person(is_profile) => Err(person()),
@@ -450,7 +613,8 @@ pub fn launch_for(
                 && flag != owned
             {
                 bail!(
-                    "\"{title}\" is assigned to profile `{owned}`, not `{flag}`; change its owner in TASKS.md first, or leave out --profile"
+                    "\"{title}\" is assigned to profile `{owned}`, not `{flag}`; change its owner in {} first, or leave out --profile",
+                    task.kept_in()
                 );
             }
             if machine != *owned_machine && machine.is_some() {
@@ -458,8 +622,9 @@ pub fn launch_for(
                     .as_deref()
                     .map_or("this machine".to_string(), |m| format!("machine `{m}`"));
                 bail!(
-                    "\"{title}\" is assigned to {owned}, not `{}`; change its owner in TASKS.md first, or leave out --machine",
-                    machine.unwrap_or_default()
+                    "\"{title}\" is assigned to {owned}, not `{}`; change its owner in {} first, or leave out --machine",
+                    machine.unwrap_or_default(),
+                    task.kept_in()
                 );
             }
             Ok((

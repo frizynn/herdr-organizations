@@ -6315,11 +6315,20 @@ fn a_tracker_task_is_delegated_by_id_and_link_hears_it_started() {
     assert_eq!(list.cwd.as_deref(), Some(project.dir().as_path()));
     assert_eq!(env_of(list, "HP_PROJECT"), "demo");
     assert_eq!(list.stdin, None);
-    let links: Vec<&Cmd> = calls.iter().filter(|c| c.program == "tracker-link").collect();
+    let links: Vec<&Cmd> = calls
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .collect();
     assert_eq!(links.len(), 1);
     assert_eq!(
-        ["HP_PROJECT", "HP_TASK_ID", "HP_THREAD_ID", "HP_EVENT", "HP_PR_URL"]
-            .map(|key| env_of(links[0], key)),
+        [
+            "HP_PROJECT",
+            "HP_TASK_ID",
+            "HP_THREAD_ID",
+            "HP_EVENT",
+            "HP_PR_URL"
+        ]
+        .map(|key| env_of(links[0], key)),
         ["demo", "AWA-1", "t-0001", "started", ""]
     );
     assert_eq!(links[0].stdin, None);

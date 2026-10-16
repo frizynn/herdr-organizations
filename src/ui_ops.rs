@@ -373,7 +373,7 @@ pub fn create_project(ctx: &Ctx, form: &NewProject) -> Result<String> {
         .filter(|r| !r.trim().is_empty())
         .map(|r| project::parse_repo_arg(r.trim()))
         .collect();
-    let project = project::create(&ctx.root, &form.name, &form.goal, repos)?;
+    let project = project::create_for(&ctx.config_dir, &ctx.root, &form.name, &form.goal, repos)?;
     // A Herdr kind is also the built-in profile of that name.
     crate::profiles::write_project_defaults(&project, &form.thread_agent, &form.coordinator_agent)?;
     Ok(project.slug)

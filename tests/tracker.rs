@@ -3,7 +3,7 @@
 //! scrubbed environment and a fake tracker: a shell script that prints a task
 //! list and records every call it gets.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-organizations");
@@ -213,13 +213,15 @@ fn task_list_context_and_project_status_show_the_tracker_tasks_with_ids() {
         ),
         "{context}"
     );
-    assert!(tasks.contains("- [ ] [AWA-2] Write the docs (me)\n"), "{context}");
+    assert!(
+        tasks.contains("- [ ] [AWA-2] Write the docs (me)\n"),
+        "{context}"
+    );
     assert!(!context.contains("## Tasks (TASKS.md)"), "{context}");
     // Drift works from the tracker's own `thread` field.
     assert!(
-        section(&context, "## Drift").contains(
-            "- [thread-missing] tracker AWA-1 \"Fix login\" · t-0009: no such thread"
-        ),
+        section(&context, "## Drift")
+            .contains("- [thread-missing] tracker AWA-1 \"Fix login\" · t-0009: no such thread"),
         "{context}"
     );
 
@@ -416,13 +418,18 @@ fn a_failing_link_leaves_an_inbox_item() {
 }
 
 #[test]
-fn an_old_record_and_config_without_the_new_keys_still_load() {
-    // A record with `task_id` reads in a binary that does not know it, and a
-    // record without it reads here: both are plain serde defaults.
+fn a_record_keeps_its_task_id_and_one_without_it_prints_as_before() {
     let fixture = Fixture::new();
     assert!(fixture.run(&["new", "acme"], "").status.success());
     fixture.thread("t-0001", "open", "task = \"Old\"\ntask_origin = \"task\"\n");
-    let show = fixture.json(&["thread", "show", "acme", "t-0001", "--json"]);
-    assert_eq!(show["thread"]["task_id"], "");
-    assert_eq!(show["thread"]["task"], "Old");
+    fixture.thread(
+        "t-0002",
+        "open",
+        "task = \"Fix login\"\ntask_id = \"AWA-1\"\ntask_origin = \"task\"\n",
+    );
+    let old = fixture.json(&["thread", "show", "acme", "t-0001", "--json"]);
+    assert_eq!(old["thread"]["task"], "Old");
+    assert!(old["thread"].get("task_id").is_none(), "{old}");
+    let new = fixture.json(&["thread", "show", "acme", "t-0002", "--json"]);
+    assert_eq!(new["thread"]["task_id"], "AWA-1");
 }
