@@ -715,8 +715,20 @@ pub fn write_priming(project: &Project, prefix: &str) -> Result<()> {
     if !dir.join("uploads").is_dir() {
         std::fs::create_dir(dir.join("uploads"))?;
     }
+    if let Some(handoff) = handoff_to_rename(&dir) {
+        std::fs::rename(handoff, dir.join(crate::status_file::NAME))?;
+    }
     write_default_routine(project)?;
     Ok(())
+}
+
+/// A project from before STATUS.md kept the coordinator's state in
+/// HANDOFF.md: priming renames it while nothing is at STATUS.md, so the
+/// coordinator keeps what it wrote.
+fn handoff_to_rename(dir: &Path) -> Option<PathBuf> {
+    let handoff = dir.join("HANDOFF.md");
+    let free = std::fs::symlink_metadata(dir.join(crate::status_file::NAME)).is_err();
+    (free && std::fs::symlink_metadata(&handoff).is_ok_and(|m| m.is_file())).then_some(handoff)
 }
 
 /// What `doctor` finds wrong with a project's priming files, as short notes.
@@ -751,6 +763,9 @@ pub fn priming_problems(project: &Project, prefix: &str) -> Vec<String> {
     }
     if !dir.join(PR_FOLLOWUP).exists() {
         problems.push("routines/pr-followup.md is missing".into());
+    }
+    if handoff_to_rename(&dir).is_some() {
+        problems.push("HANDOFF.md is not renamed to STATUS.md yet".into());
     }
     problems
 }
@@ -1008,6 +1023,45 @@ mod tests {
             std::fs::read_to_string(project.dir().join("CLAUDE.md.before-herdr-projects")).unwrap(),
             "mine"
         );
+        assert!(priming_problems(&project, &prefix).is_empty());
+    }
+
+    /// A project from before STATUS.md kept the coordinator's state in
+    /// HANDOFF.md: priming (`open`, `doctor --fix`) renames it once, and never
+    /// over a STATUS.md that is already there.
+    #[test]
+    fn priming_renames_a_handoff_from_before_the_status_file() {
+        let root = tempfile::tempdir().unwrap();
+        let project = create(root.path(), "Demo", "", vec![]).unwrap();
+        let prefix = format!(
+            "{} --root {}",
+            std::env::current_exe().unwrap().display(),
+            root.path().display()
+        );
+        write_priming(&project, &prefix).unwrap();
+        let status = project.dir().join("STATUS.md");
+        let handoff = project.dir().join("HANDOFF.md");
+        std::fs::remove_file(&status).unwrap();
+        std::fs::write(&handoff, "# Handoff\nOLD-STATE\n").unwrap();
+        assert_eq!(
+            priming_problems(&project, &prefix),
+            ["HANDOFF.md is not renamed to STATUS.md yet"]
+        );
+        write_priming(&project, &prefix).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&status).unwrap(),
+            "# Handoff\nOLD-STATE\n"
+        );
+        assert!(!handoff.exists());
+        assert!(priming_problems(&project, &prefix).is_empty());
+
+        std::fs::write(&handoff, "# Handoff\nOLDER\n").unwrap();
+        write_priming(&project, &prefix).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&status).unwrap(),
+            "# Handoff\nOLD-STATE\n"
+        );
+        assert!(handoff.exists());
         assert!(priming_problems(&project, &prefix).is_empty());
     }
 

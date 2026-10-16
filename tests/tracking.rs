@@ -154,7 +154,7 @@ fn a_new_project_keeps_its_status_in_status_md() {
 }
 
 /// STATUS.md is the only name: a HANDOFF.md from before the rename is not
-/// read, and nothing renames it.
+/// read, and `context` does not rename it (`open` and `doctor --fix` do).
 #[test]
 fn context_never_reads_handoff_md() {
     let fixture = Fixture::new();
