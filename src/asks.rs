@@ -181,7 +181,9 @@ pub fn read(text: &str, records: &Records) -> Contents {
         if contents.objective.is_empty()
             && let Some(objective) = line.strip_prefix("Objective:")
         {
-            contents.objective = clean(objective);
+            if !is_placeholder(objective) {
+                contents.objective = clean(objective);
+            }
             continue;
         }
         if line.starts_with('#') {
@@ -231,7 +233,7 @@ fn bullet(line: &str) -> Option<&str> {
 
 /// `- (none)` and the like, which coordinators write under an empty heading.
 fn is_placeholder(line: &str) -> bool {
-    let text = bullet(line).unwrap_or(line);
+    let text = bullet(line).unwrap_or(line).trim();
     let text = text.strip_prefix('(').unwrap_or(text);
     let text = text.trim_end_matches('.');
     let text = text.strip_suffix(')').unwrap_or(text);
@@ -355,6 +357,8 @@ fn link(token: &str, records: &Records) -> Link {
     let of_thread = |link: &mut Link, t: &Thread| {
         link.thread = t.id.clone();
         link.title = clean(&t.title);
+        link.pr = t.pr.clone();
+        link.pr_state = pr_state(t);
     };
     match kind {
         LinkKind::Thread => match records.thread(token) {
@@ -381,11 +385,7 @@ fn link(token: &str, records: &Records) -> Link {
             match found {
                 Some(t) => {
                     link.target = t.pr.clone();
-                    link.state = if t.pr_merged() {
-                        "merged".into()
-                    } else {
-                        t.pr_state.to_ascii_lowercase()
-                    };
+                    link.state = pr_state(t);
                     of_thread(&mut link, t);
                 }
                 None => link.target = url.unwrap_or_default(),
@@ -407,6 +407,18 @@ fn link(token: &str, records: &Records) -> Link {
     link
 }
 
+/// A thread's pull request state as the ticker last cached it on the
+/// record: `open`, `merged`, `closed`, or empty.
+fn pr_state(t: &Thread) -> String {
+    if t.pr.is_empty() {
+        String::new()
+    } else if t.pr_merged() {
+        "merged".into()
+    } else {
+        t.pr_state.to_ascii_lowercase()
+    }
+}
+
 /// A thread's group as the ticker last recorded it, or `failed`.
 fn thread_state(t: &Thread) -> &'static str {
     match t.status {
@@ -416,7 +428,17 @@ fn thread_state(t: &Thread) -> &'static str {
     }
 }
 
+/// How far a link got; a thread's own pull request counts with it.
 fn progress(link: &Link) -> Confirmed {
+    let own = own_progress(link);
+    match (link.kind, link.pr_state.as_str()) {
+        (LinkKind::Thread, "open") => Confirmed::InProgress,
+        (LinkKind::Thread, "closed") => own.max(Confirmed::Failed),
+        _ => own,
+    }
+}
+
+fn own_progress(link: &Link) -> Confirmed {
     match (link.kind, link.state.as_str()) {
         (LinkKind::Thread, "working" | "waiting-on-you")
         | (LinkKind::Pr, "open")
@@ -446,7 +468,7 @@ fn mismatch(state: State, links: &[Link]) -> Option<&'static str> {
     };
     let finished = matches!(confirmed(links), Confirmed::Done | Confirmed::Failed);
     match state {
-        State::Done | State::Answered if any(LinkKind::Pr, &["open"]) => {
+        State::Done | State::Answered if links.iter().any(|l| l.pr_state == "open") => {
             Some("a linked PR is still open")
         }
         State::Done | State::Answered if any(LinkKind::Thread, &["working", "waiting-on-you"]) => {
@@ -527,7 +549,7 @@ mod tests {
     #[test]
     fn the_empty_template_a_file_without_asked_and_odd_lines_read_without_error() {
         let template = read(crate::status_file::TEMPLATE, &records());
-        assert_eq!(template.objective, "(none)");
+        assert_eq!(template.objective, "", "the template's (none) is unset");
         assert!(template.asks.is_empty() && template.needs_decision.is_empty());
 
         let plain = read("Just notes, no sections.\n", &records());
