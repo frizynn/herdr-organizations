@@ -214,7 +214,7 @@ pub struct Card<'a> {
     /// The coordinator is resolved: `asks::listed` decides what it shows.
     pub resolved: bool,
     pub status: Option<&'a StatusCard>,
-    /// Most pressing first (`asks::Ask::rank`).
+    /// Most pressing first (`asks::Ask::rank`), as `asks::listed` shows them.
     pub asks: Vec<&'a asks::Ask>,
     /// In tree order.
     pub children: Vec<&'a Node>,
@@ -232,8 +232,12 @@ impl Card<'_> {
     }
 
     /// What the coordinator waits on the user for: its decision lines, then
-    /// its asks marked `needs-decision`.
+    /// its asks marked `needs-decision`. Nothing once it is resolved: it
+    /// takes no answer.
     pub fn waiting(&self) -> Vec<String> {
+        if self.resolved {
+            return Vec::new();
+        }
         self.decision_lines()
             .iter()
             .cloned()
@@ -315,6 +319,13 @@ impl ProjectView {
             .find(|n| n.id == id)
     }
 
+    /// Where a list puts one of its asks (`asks::Ask::rank`), as its
+    /// coordinator stands.
+    pub fn ask_rank(&self, ask: &AskView) -> u8 {
+        ask.ask
+            .rank(self.node(&ask.coordinator).is_some_and(|n| n.resolved))
+    }
+
     /// The card of coordinator `id`; `None` for a thread or an unknown id.
     pub fn card(&self, id: &str) -> Option<Card<'_>> {
         let node = self.coordinators.iter().find(|c| c.id == id)?;
@@ -324,7 +335,7 @@ impl ProjectView {
             .filter(|a| a.coordinator == id && asks::listed(&a.ask, node.resolved))
             .map(|a| &a.ask)
             .collect();
-        asks.sort_by_key(|a| a.rank());
+        asks.sort_by_key(|a| a.rank(node.resolved));
         let mut children: Vec<&Node> = self
             .coordinators
             .iter()
@@ -408,7 +419,7 @@ impl Snapshot {
                 asks::listed(&a.ask, resolved)
             })
             .collect();
-        all.sort_by_key(|(_, a)| a.ask.rank());
+        all.sort_by_key(|(p, a)| p.ask_rank(a));
         all
     }
 }

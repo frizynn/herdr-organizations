@@ -1937,7 +1937,7 @@ impl<'a> App<'a> {
         for (rank, (head, glyph, style)) in ASK_GROUPS.into_iter().enumerate() {
             let group: Vec<_> = asks
                 .iter()
-                .filter(|(_, a)| usize::from(a.ask.rank()) == rank)
+                .filter(|(p, a)| usize::from(p.ask_rank(a)) == rank)
                 .collect();
             let extra: &[_] = if rank == 0 { &decisions } else { &[] };
             if group.is_empty() && extra.is_empty() {
@@ -1981,7 +1981,7 @@ impl<'a> App<'a> {
             self.rows.clear();
         } else {
             let asks = self.snap.asks();
-            let count = |rank: u8| asks.iter().filter(|(_, a)| a.ask.rank() == rank).count();
+            let count = |rank: u8| asks.iter().filter(|(p, a)| p.ask_rank(a) == rank).count();
             let waiting = count(0) + open_decisions(&self.snap).len();
             let summary = [
                 "all coordinators".to_string(),
@@ -2058,7 +2058,7 @@ impl<'a> App<'a> {
                     .at(6, asks.len().to_string(), DIM),
             );
             for ask in asks.iter().take(MOST) {
-                let (_, glyph, style) = ASK_GROUPS[usize::from(ask.rank())];
+                let (_, glyph, style) = ASK_GROUPS[usize::from(ask.rank(card.resolved))];
                 lines.push(
                     Line::new()
                         .at(3, glyph, style)

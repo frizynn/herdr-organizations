@@ -155,12 +155,13 @@ impl Ask {
 
     /// The order a list of asks is read in: what waits on the user, what
     /// does not close, what is in progress, what is done, then lines that
-    /// do not follow the format.
-    pub fn rank(&self) -> u8 {
+    /// do not follow the format. A resolved coordinator takes no answer, so
+    /// its `needs-decision` asks wait on no one and go with the open ones.
+    pub fn rank(&self, coordinator_resolved: bool) -> u8 {
         match self.state {
-            State::NeedsDecision => 0,
+            State::NeedsDecision if !coordinator_resolved => 0,
             _ if !self.mismatch.is_empty() => 1,
-            State::Open | State::Working => 2,
+            State::Open | State::Working | State::NeedsDecision => 2,
             State::Answered | State::Done => 3,
             State::Unknown => 4,
         }
@@ -168,17 +169,14 @@ impl Ask {
 }
 
 /// What a resolved coordinator's file still shows, in the list and on its
-/// card. It can no longer update the file or take an answer, so nothing in
-/// it waits on the user (its decisions and `needs-decision` asks), and what
-/// it marked answered or done and that closes is history. What it left open
-/// and what does not close still show.
+/// card. It can no longer update the file, so what it marked answered or
+/// done and that closes is history; every other ask still shows, since the
+/// user asked it and it did not finish. Nothing in the file waits on the
+/// user any more (`Ask::rank`, `state::Card::waiting`).
 pub fn listed(ask: &Ask, coordinator_resolved: bool) -> bool {
-    let history = match ask.state {
-        State::NeedsDecision => true,
-        State::Answered | State::Done => ask.mismatch.is_empty(),
-        _ => false,
-    };
-    !(coordinator_resolved && history)
+    !(coordinator_resolved
+        && matches!(ask.state, State::Answered | State::Done)
+        && ask.mismatch.is_empty())
 }
 
 /// What a status file says, each ask confirmed against the records.
@@ -303,19 +301,23 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
         for sheet in sheets(&project, &records) {
             for ask in sheet.status.asks {
                 if listed(&ask, sheet.resolved) {
-                    rows.push(Row {
-                        project: project.slug.clone(),
-                        coordinator: CoordinatorRef {
-                            id: sheet.coordinator.clone(),
-                            title: sheet.title.clone(),
+                    rows.push((
+                        ask.rank(sheet.resolved),
+                        Row {
+                            project: project.slug.clone(),
+                            coordinator: CoordinatorRef {
+                                id: sheet.coordinator.clone(),
+                                title: sheet.title.clone(),
+                            },
+                            ask,
                         },
-                        ask,
-                    });
+                    ));
                 }
             }
         }
     }
-    rows.sort_by_key(|row| row.ask.rank());
+    rows.sort_by_key(|(rank, _)| *rank);
+    let rows: Vec<Row> = rows.into_iter().map(|(_, row)| row).collect();
     if json {
         return threads::print_json(&serde_json::json!({
             "schema_version": threads::JSON_SCHEMA_VERSION,
@@ -959,8 +961,10 @@ mod tests {
     fn asks_rank_decisions_then_mismatches_then_work_then_done() {
         let file = "## Asked\n- [done] a : b\n- [working] c : d\n- [open] e : f (t-0003)\n- [needs-decision] g : h\n- odd\n- [answered] i : j\n";
         let mut asks = read(file, &records()).asks;
-        asks.sort_by_key(Ask::rank);
+        asks.sort_by_key(|a| a.rank(false));
         let texts: Vec<&str> = asks.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(texts, ["g", "c", "e", "a", "i", "odd"]);
+        // A resolved coordinator takes no answer: its decision goes with the open ones.
+        assert_eq!((asks[0].rank(false), asks[0].rank(true)), (0, 2));
     }
 }
