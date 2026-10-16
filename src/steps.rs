@@ -257,6 +257,8 @@ pub fn write_machine_outage(
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
     pub id: String,
+    /// The group it left, as its record had it.
+    pub from: Option<Group>,
     pub to: Group,
     pub note: String,
 }
@@ -556,30 +558,46 @@ pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
     owning_coordinator(&thread::list(project), t).is_some()
 }
 
-const NEW_REPORT: &str = "new report";
 const WAITING_ON_YOU: &str = "waiting on you";
+const STOPPED: &str = "stopped without a new report";
+const READY_FOR_REVIEW: &str = "ready for review";
+const NEW_REPORT: &str = "new report";
+const LANDING: &str = "landing";
+/// The phrases about a report: a nudge names its verdict instead, when it
+/// has one.
+const REPORT_PHRASES: [&str; 3] = [READY_FOR_REVIEW, NEW_REPORT, LANDING];
 /// The phrases a pending parent update may hold.
-const PARENT_PHRASES: [&str; 4] = [WAITING_ON_YOU, "ready for review", NEW_REPORT, "landing"];
+const PARENT_PHRASES: [&str; 5] = [
+    WAITING_ON_YOU,
+    STOPPED,
+    READY_FOR_REVIEW,
+    NEW_REPORT,
+    LANDING,
+];
 /// Every phrase a parent nudge says, in the order it names them: what may
 /// need the user first.
-const PARENT_LINE_ORDER: [&str; 8] = [
+const PARENT_LINE_ORDER: [&str; 9] = [
     WAITING_ON_YOU,
     Verdict::Failed.words(),
     Verdict::Blocked.words(),
     Verdict::NeedsDecision.words(),
-    "ready for review",
+    STOPPED,
+    READY_FOR_REVIEW,
     NEW_REPORT,
-    "landing",
+    LANDING,
     Verdict::Done.words(),
 ];
 
-/// What a parent nudge says about a direct child that moved to `group`, or
-/// `None` when the parent has nothing to act on (Working, Idle).
-fn parent_phrase(group: Group) -> Option<&'static str> {
-    match group {
+/// What a parent nudge says about a direct child's group change, or `None`
+/// when the parent has nothing to act on: Working, and Idle after its report
+/// was acknowledged. A child that stops working without a new report is
+/// named, since nothing else would tell the parent.
+fn parent_phrase(change: &Transition) -> Option<&'static str> {
+    match change.to {
         Group::WaitingOnYou => Some(WAITING_ON_YOU),
-        Group::ReadyForReview => Some("ready for review"),
-        Group::Landing => Some("landing"),
+        Group::ReadyForReview => Some(READY_FOR_REVIEW),
+        Group::Landing => Some(LANDING),
+        Group::Idle if change.from == Some(Group::Working) => Some(STOPPED),
         Group::Working | Group::Idle | Group::Resolved => None,
     }
 }
@@ -592,9 +610,9 @@ fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phras
         .insert(child_id.to_string(), phrase.to_string());
 }
 
-/// Retains only the latest meaningful state for each direct child. Working
-/// or Idle clears an older pending one, so a busy parent never receives
-/// stale information after the child resumed or was acknowledged.
+/// Retains only the latest meaningful state for each direct child. A change
+/// with nothing to act on clears an older pending one, so a busy parent never
+/// receives stale information after the child resumed or was acknowledged.
 pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &[Transition]) {
     let records = thread::list(project);
     for change in transitions {
@@ -604,7 +622,7 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         let Some(parent) = owning_coordinator(&records, child) else {
             continue;
         };
-        match parent_phrase(change.to) {
+        match parent_phrase(change) {
             Some(phrase) => queue_parent_update(state, &parent.id, &child.id, phrase),
             None => {
                 if let Some(pending) = state.parent_updates.get_mut(&parent.id) {
@@ -619,10 +637,10 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
 }
 
 /// One line per parent, built from child ids and fixed phrases only, e.g.
-/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done`. A child
-/// whose report has a verdict is named by it, so the parent need not open
-/// the report; waiting on you is live and wins over an older report. A
-/// pending value with no phrase (an Idle queued by an older version) is
+/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done`. A phrase
+/// about a report gives way to the report's verdict, so the parent need not
+/// open it; waiting on you and stopped are live and win over an older report.
+/// A pending value with no phrase (an Idle queued by an older version) is
 /// dropped; the comparison ignores case so a pending label from an older
 /// version still counts.
 fn parent_update_line(
@@ -635,10 +653,11 @@ fn parent_update_line(
             let phrase = *PARENT_PHRASES
                 .iter()
                 .find(|phrase| pending.eq_ignore_ascii_case(phrase))?;
-            let phrase = match verdict(id) {
-                Some(verdict) if phrase != WAITING_ON_YOU => verdict.words(),
-                _ => phrase,
-            };
+            let phrase = REPORT_PHRASES
+                .contains(&phrase)
+                .then(|| verdict(id))
+                .flatten()
+                .map_or(phrase, Verdict::words);
             Some((inbox::safe_subject(id), phrase))
         })
         .collect();
@@ -1772,6 +1791,7 @@ mod tests {
         .unwrap();
         let ready = Transition {
             id: child.id.clone(),
+            from: Some(Group::Working),
             to: Group::ReadyForReview,
             note: "done".into(),
         };
@@ -1863,6 +1883,7 @@ mod tests {
         let (a, b, c) = (child("A"), child("B"), child("C"));
         let to = |id: &str, group: Group| Transition {
             id: id.into(),
+            from: None,
             to: group,
             note: String::new(),
         };
@@ -1947,6 +1968,7 @@ mod tests {
         let waiting = child("Status: done");
         let to = |id: &str, group: Group| Transition {
             id: id.into(),
+            from: None,
             to: group,
             note: String::new(),
         };
@@ -2013,6 +2035,7 @@ mod tests {
             &mut state,
             &[Transition {
                 id: child.id.clone(),
+                from: Some(Group::Working),
                 to: Group::ReadyForReview,
                 note: "done".into(),
             }],
@@ -2022,6 +2045,7 @@ mod tests {
             &mut state,
             &[Transition {
                 id: child.id,
+                from: Some(Group::ReadyForReview),
                 to: Group::Working,
                 note: "working".into(),
             }],
