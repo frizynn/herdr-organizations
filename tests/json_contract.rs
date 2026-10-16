@@ -369,7 +369,10 @@ fn node_show_names_a_coordinator_nodes_handoff() {
     );
     write(&fixture, "nodes/t-0001/HANDOFF.md", "# Handoff\n");
     let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
-    assert!(shown.contains(&format!("# handoff: {handoff}\n")), "{shown}");
+    assert!(
+        shown.contains(&format!("# handoff: {handoff}\n")),
+        "{shown}"
+    );
     let worker = fixture.text(&["node", "show", "demo", "t-0002"]);
     assert!(!worker.contains("handoff"), "{worker}");
 }
