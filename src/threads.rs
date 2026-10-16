@@ -1915,8 +1915,8 @@ pub fn merge_blocker(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> O
     pr::merge_blocker(summary, policy).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
 }
 
-/// What `--json`, the popup and the client actions show: `merge_blocker`,
-/// then the gate's refusal when it last ran on this head commit.
+/// What `--json` and the popup show: `merge_blocker`, then the gate's
+/// refusal when it last ran on this head commit.
 pub fn shown_merge_blocker(
     t: &Thread,
     summary: &pr::Summary,
@@ -1964,7 +1964,7 @@ pub fn thread_json(
             },
             actions: match summary {
                 _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => Vec::new(),
-                Some(s) => crate::pr_actions::pr_actions(t, s, rule),
+                Some(s) => crate::pr_actions::pr_actions(t, s, rule.policy),
                 None => Vec::new(),
             },
         }

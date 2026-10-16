@@ -2608,7 +2608,11 @@ impl<'a> App<'a> {
         }
         cx = frame.put(cx, y + 3, &format!("+{}", pr.additions), GREEN) + 1;
         frame.put(cx, y + 3, &format!("−{}", pr.deletions), RED);
-        match &pr.blocker {
+        if let Some(blocker) = pr.blocker.as_ref().filter(|_| pr.gate_refused) {
+            let refused = format!("Gate refused this commit: {blocker}");
+            frame.put(x + 1, y + 4, &term::fit(&refused, w - 4), YELLOW);
+        }
+        match pr.blocker.as_ref().filter(|_| !pr.gate_refused) {
             Some(blocker) => {
                 frame.put(x + 1, y + 5, "Not mergeable now:", RED);
                 frame.put(x + 1, y + 6, &term::fit(blocker, w - 4), Style::PLAIN);
@@ -2660,7 +2664,7 @@ impl<'a> App<'a> {
             }
         }
         frame.fill(0, frame.height - 1, frame.width, None);
-        let pairs = if pr.blocker.is_some() {
+        let pairs = if pr.blocker.is_some() && !pr.gate_refused {
             self.hint(&[(Action::Back, "back")])
         } else {
             self.hint(&[
@@ -3526,7 +3530,7 @@ impl<'a> App<'a> {
                     .project(slug)
                     .and_then(|p| p.node(id))
                     .and_then(|n| n.pr.as_ref())
-                    .is_some_and(|p| p.blocker.is_some());
+                    .is_some_and(|p| p.blocker.is_some() && !p.gate_refused);
                 if blocked {
                     return;
                 }
@@ -4393,6 +4397,22 @@ mod tests {
                 text.contains("If the merge gate passes, rebase and merge, then"),
                 "{text}"
             );
+            press(app, crossterm::event::KeyCode::Esc);
+
+            // A refusal on this commit is shown, and a merge asks again.
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.blocker = Some("rev-u2 has not passed it".into());
+                    pr.gate_refused = true;
+                }
+            }
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(
+                text.contains("Gate refused this commit: rev-u2 has not passed it"),
+                "{text}"
+            );
+            assert!(text.contains("↵ merge"), "{text}");
         });
     }
 

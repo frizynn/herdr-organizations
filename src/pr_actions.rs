@@ -179,14 +179,10 @@ fn safe_ref(name: &str) -> Option<&str> {
 
 /// The actions a client offers for a thread's pull request as `summary`
 /// describes it, most pressing first: `merge` when `thread merge` would merge
-/// or run the project's gate (its checks pass, it has no conflict and its
-/// review or gate did not refuse it, so only comments can be left, often a
-/// bot's), then the requests it calls for.
-pub fn pr_actions(
-    t: &Thread,
-    summary: &pr::Summary,
-    rule: &crate::merge_gate::Rule,
-) -> Vec<&'static str> {
+/// or ask the project's gate, again after a refusal (its checks pass, it has
+/// no conflict and, without a gate, its review approved it, so only comments
+/// can be left, often a bot's), then the requests it calls for.
+pub fn pr_actions(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> Vec<&'static str> {
     if t.status != Status::Open {
         return Vec::new();
     }
@@ -195,7 +191,7 @@ pub fn pr_actions(
         .filter(|request| request.blocker(summary).is_none())
         .map(Request::token)
         .collect();
-    if threads::shown_merge_blocker(t, summary, rule).is_none() {
+    if threads::merge_blocker(t, summary, policy).is_none() {
         actions.insert(0, "merge");
     }
     actions
@@ -621,7 +617,7 @@ mod tests {
 
         // What a client offers, most pressing first; `merge` only when
         // `thread merge` would merge.
-        let pr_actions = |t: &Thread, s: &pr::Summary| pr_actions(t, s, &Default::default());
+        let pr_actions = |t: &Thread, s: &pr::Summary| pr_actions(t, s, pr::Policy::GitHub);
         let t = Thread {
             status: Status::Open,
             base: "main".into(),

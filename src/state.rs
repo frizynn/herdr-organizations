@@ -126,6 +126,9 @@ pub struct Pr {
     pub method: String,
     /// The project's merge gate decides instead of the approval.
     pub gated: bool,
+    /// `blocker` is only the gate's last refusal on this commit, which a
+    /// merge asks again.
+    pub gate_refused: bool,
 }
 
 impl Pr {
@@ -326,6 +329,8 @@ fn pr_view(t: &Thread, summary: Option<&pr::Summary>, rule: &merge_gate::Rule) -
         view.failed = s.checks.failed;
         view.additions = s.additions;
         view.deletions = s.deletions;
+        let before_gate = threads::merge_blocker(t, s, rule.policy);
+        view.gate_refused = before_gate.is_none() && rule.refusal(&t.id, &s.head_oid).is_some();
         view.blocker = threads::shown_merge_blocker(t, s, rule);
     } else {
         view.blocker = Some("the pull request has not been read yet".into());

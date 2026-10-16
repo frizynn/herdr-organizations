@@ -616,12 +616,9 @@ fn a_refusing_merge_gate_blocks_the_merge_and_its_reason_reaches_the_inbox_and_j
     assert!(!inbox.contains('\u{1b}'), "{inbox:?}");
     let after = fixture.thread_json();
     assert_eq!(after["pr"]["merge_blocker"], reason);
-    assert!(
-        !after["pr"]["actions"]
-            .as_array()
-            .unwrap()
-            .contains(&"merge".into()),
-        "{after}"
+    assert_eq!(
+        after["pr"]["actions"][0], "merge",
+        "a merge asks the gate again: its verdict can change on the same commit"
     );
 
     // A silent refusal is named by its exit code, and a new reason is news.
