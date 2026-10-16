@@ -278,6 +278,10 @@ pub struct Coordinator {
     pub reasoning_effort: String,
     /// The last native session id Herdr reported for that kind, for resume.
     pub agent_session: String,
+    /// Every session id Herdr reported for its pane, oldest first and each
+    /// once: the transcripts its token use is read from (`usage.rs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
     pub updated: String,
 }
 

@@ -4798,6 +4798,23 @@ mod tests {
         );
     }
 
+    /// A node at or above a token cap is marked on its tree row.
+    #[test]
+    fn a_node_over_a_token_cap_is_marked_on_its_tree_row() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        app.snap.projects[0].threads[0].over_cap = vec!["context_warn".into()];
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_tree("acme", None);
+        let text = app.render(100, 20).text();
+        let row = text.lines().find(|l| l.contains("billing ui")).unwrap();
+        assert!(row.contains("over cap · billing ui text"), "{row}");
+        let row = text.lines().find(|l| l.contains("landing")).unwrap();
+        assert!(!row.contains("over cap"), "{row}");
+    }
+
     #[test]
     fn go_to_agent_closes_the_popup_before_any_herdr_call() {
         let jump = ui_ops::Jump::Node {

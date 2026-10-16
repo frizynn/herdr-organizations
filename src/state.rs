@@ -181,6 +181,9 @@ pub struct Node {
     pub verdict: Option<report::Verdict>,
     /// Subtree counts; only filled for coordinators.
     pub counts: Counts,
+    /// The token caps it reached at its last read (`usage.rs`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub over_cap: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

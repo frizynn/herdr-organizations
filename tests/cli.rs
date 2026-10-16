@@ -1055,3 +1055,48 @@ mod progress_hooks {
         assert!(!kept.contains("NODE-QUESTION"), "{kept}");
     }
 }
+
+/// `node usage` prints one line per node, the root first, from its
+/// transcripts; a node with none says so.
+#[test]
+fn node_usage_prints_one_line_per_node() {
+    let home = tempfile::tempdir().unwrap();
+    let root = node_fixture(home.path());
+    let dir = std::fs::canonicalize(root.join("demo")).unwrap();
+    std::fs::write(
+        dir.join(".state/coordinator.json"),
+        serde_json::json!({"agent": "claude", "cwd": dir, "sessions": ["root-1"]}).to_string(),
+    )
+    .unwrap();
+    let folder: String = dir
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcripts = home.path().join(".claude/projects").join(folder);
+    std::fs::create_dir_all(&transcripts).unwrap();
+    std::fs::write(
+        transcripts.join("root-1.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "timestamp": "2026-10-16T10:00:00Z",
+                "requestId": "r1", "message": {"id": "m1", "usage": {"input_tokens": 200,
+                "output_tokens": 1000, "cache_read_input_tokens": 1_000_000,
+                "cache_creation_input_tokens": 100}}})
+        ),
+    )
+    .unwrap();
+    let out = hp(
+        home.path(),
+        &["--root", root.to_str().unwrap(), "node", "usage", "demo"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "root\tCoordinator\tcontext 1M · peak 1M · 0 compactions · 1.3k tokens · 1M cache read\nt-0001\tReview\tno data\n"
+    );
+}
