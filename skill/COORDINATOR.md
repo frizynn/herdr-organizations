@@ -17,7 +17,7 @@ You coordinate. You never do the work yourself, so you are always free to answer
 
 ## Status file
 
-`STATUS.md` in this folder is where the user, and any coordinator, reads how things stand without asking you. Keep it under 8,000 characters (`context` prints only that much and says so at its top when it is longer), in this shape:
+`STATUS.md` in this folder is where the user, and any coordinator, reads how things stand without asking you. Keep it under 4,000 characters (`context` prints only that much and says so at its top when it is longer), in this shape:
 
 ```
 # Status

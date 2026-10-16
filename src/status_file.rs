@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::project::Project;
 
 pub const NAME: &str = "STATUS.md";
-/// What `context` prints of the root's file and what `--json` carries.
-pub const MAX_CHARS: usize = 8_000;
+/// The size limit of every status file, the root's and a node's: what the
+/// skills ask for, what `context` prints, what `--json` carries and the most
+/// a node's brief inlines.
+pub const MAX_CHARS: usize = 4_000;
 /// What `new` writes: the skill's template with nothing filled in.
 pub const TEMPLATE: &str =
     "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## Decisions\n";
@@ -146,9 +148,14 @@ mod tests {
         assert_eq!(previous_ask(&project, "t-0001"), None);
     }
 
-    /// Both coordinator skills show the shape `new` writes.
+    /// Both coordinator skills show the shape `new` writes and its limit.
     #[test]
-    fn the_skills_show_the_template() {
+    fn the_skills_show_the_template_and_the_limit() {
+        let limit = format!(
+            "under {},{:03} characters",
+            MAX_CHARS / 1000,
+            MAX_CHARS % 1000
+        );
         let headings = |text: &str| -> Vec<String> {
             text.lines()
                 .filter(|line| line.starts_with('#') || line.starts_with("Objective:"))
@@ -162,6 +169,7 @@ mod tests {
             let block = skill.split_once("```\n# Status\n").unwrap().1;
             let block = format!("# Status\n{}", block.split_once("```").unwrap().0);
             assert_eq!(headings(&block), headings(TEMPLATE));
+            assert!(skill.contains(&limit), "{limit}");
         }
     }
 

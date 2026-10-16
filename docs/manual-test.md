@@ -83,7 +83,7 @@ In a disposable root, with a project whose `TASKS.md` has a task:
 1. `thread start demo --title T --task-file - --from-task "<title>"`: the task's line ends with ` · t-000N` and no other byte of `TASKS.md` changed; `thread show demo t-000N --json` has `"task": "<title>"` and `"task_origin": "task"`. Repeat with `node start demo --parent root ... --from-task`.
 2. Give a second task the same title: `--from-task` is refused and no thread record is created.
 3. `thread resolve` the thread while its task is open: `inbox list demo --json` has one `task` item for it.
-4. Write a `STATUS.md` over 8,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `status-over-limit`, and `doctor` warns.
+4. Write a `STATUS.md` over 4,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `status-over-limit`, and `doctor` warns.
 5. Type two messages to the root coordinator without it touching `STATUS.md`, then run `context demo --peek`: `## Drift` lists `status-stale`, and `.state/asked.json` holds two times and no text.
 6. `task lint demo` lists what `## Drift` lists, without its cap, and `doctor` warns `tasks demo`. `project status demo --json` has one item per task and per open thread no task names, and its `drift` counts match `task lint`.
 7. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: within an hour of the ticker running (at once on a ticker's first pass), `thread show --json` reports `MERGED`.

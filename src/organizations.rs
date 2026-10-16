@@ -838,24 +838,25 @@ pub fn status_path(project: &Project, id: &str) -> PathBuf {
 }
 
 /// The status file of a spawning coordinator node, read like a scoped memory
-/// file (a regular file, never through a symbolic link, at most 8 KiB). Only
-/// the node's own brief reads it: unlike its memory, descendants never
-/// inherit it.
+/// file (a regular file, never through a symbolic link, at most 8 KiB) and
+/// left out over `status_file::MAX_CHARS`. Only the node's own brief reads
+/// it: unlike its memory, descendants never inherit it.
 pub fn node_status(project: &Project, record: &Thread) -> Result<Option<NodeStatus>> {
+    use crate::status_file::{MAX_CHARS, NAME};
     if !record.is_spawning_coordinator() {
         return Ok(None);
     }
     let path = status_path(project, &record.id);
+    let label = format!("nodes/{}/{NAME}", record.id);
     let mut budget = ScopedMemoryBudget::new();
-    let text = match existing_node_scope(project, &record.id)? {
-        Some(_) => read_scoped_memory_file(
-            &path,
-            &format!("nodes/{}/{}", record.id, crate::status_file::NAME),
-            &mut budget,
-        )?
-        .unwrap_or_default(),
+    let mut text = match existing_node_scope(project, &record.id)? {
+        Some(_) => read_scoped_memory_file(&path, &label, &mut budget)?.unwrap_or_default(),
         None => String::new(),
     };
+    if text.chars().count() > MAX_CHARS {
+        text.clear();
+        budget.omit(format!("{label}: exceeds the {MAX_CHARS}-character limit"));
+    }
     Ok(Some(NodeStatus {
         path,
         text,
@@ -2206,10 +2207,16 @@ mod tests {
             "{label}: exceeds the {MAX_SCOPED_MEMORY_FILE_BYTES}-byte per-file limit"
         )));
 
-        let at_limit = format!(
-            "AT-LIMIT{}",
-            "x".repeat(MAX_SCOPED_MEMORY_FILE_BYTES - "AT-LIMIT".len())
-        );
+        // The status file's own limit is in characters, the same as the root's.
+        let limit = crate::status_file::MAX_CHARS;
+        std::fs::write(&status, format!("OVER-SENTINEL{}", "é".repeat(limit))).unwrap();
+        let over = brief(&project, &coordinator);
+        assert!(!over.contains("OVER-SENTINEL"), "{over}");
+        assert!(over.contains(&format!(
+            "Left out ({label}: exceeds the {limit}-character limit). Rewrite it as a regular file under {limit} characters."
+        )));
+
+        let at_limit = format!("AT-LIMIT{}", "é".repeat(limit - "AT-LIMIT".len()));
         std::fs::write(&status, &at_limit).unwrap();
         assert!(brief(&project, &coordinator).contains(&at_limit));
     }

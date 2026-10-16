@@ -516,13 +516,13 @@ fn the_root_status_file_is_null_without_status_md() {
     let listed = fixture.json(&["list", "--json"]);
     assert_eq!(listed["projects"][0]["status_file"], Value::Null);
 
-    // A status file is shown up to 8,000 characters, never through a link.
-    std::fs::write(dir.join("STATUS.md"), "x".repeat(9_000)).unwrap();
+    // A status file is shown up to 4,000 characters, never through a link.
+    std::fs::write(dir.join("STATUS.md"), "x".repeat(5_000)).unwrap();
     let shown = fixture.json(&["list", "--json"]);
     let text = shown["projects"][0]["status_file"]["text"]
         .as_str()
         .unwrap();
-    assert_eq!(text.chars().count(), 8_000);
+    assert_eq!(text.chars().count(), 4_000);
     let node = dir.join("nodes/t-0001/STATUS.md");
     std::fs::remove_file(&node).unwrap();
     std::os::unix::fs::symlink(dir.join("STATUS.md"), &node).unwrap();
@@ -958,7 +958,7 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
                 "status_file": "STATUS.md",
                 "status_updated": "2026-10-03T09:00:00Z",
                 "status_chars": status_text.chars().count(),
-                "status_limit": 8000,
+                "status_limit": 4000,
                 "pr_checked": ""
             },
             "items": [

@@ -553,7 +553,8 @@ pub fn compose_brief(input: &BriefInput) -> String {
         );
         match (&status.omitted, status.text.trim()) {
             (Some(reason), _) => brief.push_str(&format!(
-                "Left out ({reason}). Rewrite it as a regular file under 4,000 characters.\n"
+                "Left out ({reason}). Rewrite it as a regular file under {} characters.\n",
+                crate::status_file::MAX_CHARS
             )),
             (None, "") => brief.push_str("Nothing yet.\n"),
             (None, text) => brief.push_str(&format!("{text}\n")),

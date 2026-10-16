@@ -96,9 +96,9 @@ fn status(chars: usize) -> String {
 #[test]
 fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     let fixture = Fixture::new();
-    fixture.write("STATUS.md", &status(9_000));
+    fixture.write("STATUS.md", &status(5_000));
     let context = fixture.text(&["context", "acme", "--peek"]);
-    let warning = "STATUS.md has 9000 characters and this digest shows only the first 8000; compact it before anything else.";
+    let warning = "STATUS.md has 5000 characters and this digest shows only the first 4000; compact it before anything else.";
     let at = context.find(warning).expect(&context);
     assert!(
         at < context.find("## Project instructions").unwrap(),
@@ -108,13 +108,13 @@ fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
     assert!(
         doctor.contains(
-            "[warn] status acme: STATUS.md has 9000 characters; `context` shows the first 8000, so ask the coordinator to compact it"
+            "[warn] status acme: STATUS.md has 5000 characters; `context` shows the first 4000, so ask the coordinator to compact it"
         ),
         "{doctor}"
     );
 
     // Within the limit, neither says anything.
-    fixture.write("STATUS.md", &status(7_000));
+    fixture.write("STATUS.md", &status(3_000));
     assert!(
         !fixture
             .text(&["context", "acme", "--peek"])
@@ -185,7 +185,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
         "resolved_reason = \"manual\"\n",
     );
     fixture.thread("t-0003", "Running fine", "open", "");
-    fixture.write("STATUS.md", &status(9_000));
+    fixture.write("STATUS.md", &status(5_000));
 
     let context = fixture.text(&["context", "acme", "--peek"]);
     let drift = context
@@ -196,7 +196,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
     assert_eq!(
         drift,
         [
-            "- [status-over-limit] STATUS.md has 9000 characters, this digest shows the first 8000",
+            "- [status-over-limit] STATUS.md has 5000 characters, this digest shows the first 4000",
             "- [thread-resolved] TASKS.md:4 \"Fix login\" · t-0001: the thread is resolved and its PR merged",
             "- [thread-resolved] TASKS.md:5 \"Ship checkout\" · t-0002: the thread is resolved",
             "- [thread-missing] TASKS.md:9 \"Rename the settings keys\" · t-0099: no such thread",
