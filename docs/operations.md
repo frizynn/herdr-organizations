@@ -157,7 +157,7 @@ trust_screens = "user"             # or "coordinator": who answers trust screens
 coordinator_agent_args = []        # extra arguments for every coordinator's agent CLI
 thread_agent_args = []             # extra arguments for every thread's agent CLI
 routine_commands = false           # true lets approved routines run shell commands
-merge_gate = ["./approve.sh"]      # your command decides merges instead of GitHub's approval (by hand only)
+merge_gate = ["/Users/you/bin/approve.sh"]  # your command decides merges instead of GitHub's approval (by hand only)
 merge_gate_timeout = 120           # seconds (1 to 3600) before the gate counts as a refusal
 merge_method = "squash"            # or "merge" or "rebase": the popup, auto-merge and thread merge without --method
 auto_merge = false                 # true: the ticker auto-merges every thread of the project
@@ -173,7 +173,9 @@ A change reaches agents launched after it. Running agents keep the flags they st
 
 ### Merge gate
 
-`merge_gate`, `merge_gate_timeout`, `merge_method` and `auto_merge` are edited by hand in `config.toml`, in the project's table or in `[safety.default]`. `safety set` refuses them, and nothing in the popup changes them, so an agent cannot turn merging on through the CLI. `context` and `project show --json` name the gate's program (not its arguments), the method and `auto_merge`.
+`merge_gate`, `merge_gate_timeout`, `merge_method` and `auto_merge` are edited by hand in `config.toml`, in the project's table or in `[safety.default]`. `safety set` refuses them, `default` included, and nothing in the popup changes them, so an agent cannot turn merging on through the CLI. The gate's program is an absolute path or a bare name looked up on `PATH`; a relative path is a config error, because it would resolve in the thread's repository or the project folder, which agents write. A `config.toml` that exists but cannot be read is an error too, not an empty file, so a merge fails instead of skipping the gate.
+
+A binary from before these keys ignores them: its `thread merge`, popup and ticker merge under GitHub's rules and never run the gate. Update every installed binary before a project relies on the gate. `context` and `project show --json` name the gate's program (not its arguments), the method and `auto_merge`.
 
 Without `merge_gate`, `thread merge` needs an approving review and at least one reported check, as before. With it, the command decides those two instead. What GitHub reports still blocks in every case: a closed pull request, a draft, a merge conflict, a check that failed or has not finished, a head branch, repository or base that is not the thread's, an unknown head commit. The gate never runs on such a pull request.
 
