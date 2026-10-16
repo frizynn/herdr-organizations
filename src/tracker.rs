@@ -121,14 +121,12 @@ pub fn tasks(
     config: &Config,
     fresh: bool,
 ) -> Result<Vec<Task>, String> {
-    // To the second, as every other time in this binary's files.
-    let now = jiff::Timestamp::from_second(jiff::Timestamp::now().as_second())
-        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let now = jiff::Timestamp::now().as_second();
     let cached = read_cache(project, config).filter(|c| {
         !fresh
-            && c.fetched_at.parse::<jiff::Timestamp>().is_ok_and(|at| {
-                (0..config.cache_secs as i64).contains(&(now.as_second() - at.as_second()))
-            })
+            && c.fetched_at
+                .parse::<jiff::Timestamp>()
+                .is_ok_and(|at| (0..config.cache_secs as i64).contains(&(now - at.as_second())))
     });
     let answer = match cached {
         Some(cache) => cache.answer,
@@ -139,7 +137,10 @@ pub fn tasks(
                 &cache_path(project),
                 &Cache {
                     list: config.list.clone(),
-                    fetched_at: now.to_string(),
+                    // To the second, as every time in the project's files.
+                    fetched_at: jiff::Timestamp::from_second(now)
+                        .map(|t| t.to_string())
+                        .unwrap_or_default(),
                     answer: answer.clone(),
                 },
             );
