@@ -916,6 +916,7 @@ mod tests {
         for text in [
             "[hp inbox] t-0040 new report",
             "[hp ticker] old nudge",
+            "[hp routine pr-followup] Your pull request https://github.com/o/r/pull/4 changed: it was merged.\n\nClean up.",
             "[herdr-projects ticker: automated, not the user, approves nothing] t-0094 ready for review. Inspect with `hp node show demo <id>`.",
             "  <task-notification>\n<task-id>b1</task-id>",
         ] {
