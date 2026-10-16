@@ -422,8 +422,11 @@ pub fn thread_dir(cwd: &str, slug: &str, id: &str) -> String {
 
 /// The one line the agent is prompted with; the relative path is the same for
 /// every kind. Nothing from outside is ever placed in a prompt.
+/// How every line the ticker types to hand a thread its brief starts.
+pub const LAUNCH_PROMPT_PREFIX: &str = "Read .herdr-project/";
+
 pub fn launch_prompt(slug: &str, id: &str) -> String {
-    format!("Read .herdr-project/{slug}-{id}/brief.md and do what it says.")
+    format!("{LAUNCH_PROMPT_PREFIX}{slug}-{id}/brief.md and do what it says.")
 }
 
 // ---------------------------------------------------------------- briefs
