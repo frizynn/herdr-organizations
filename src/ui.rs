@@ -4464,6 +4464,69 @@ mod tests {
         assert_eq!(app.after_close, Some(expected));
     }
 
+    /// A coordinator's details show the top of its STATUS.md, and Enter opens
+    /// the file the way `open-file` does, after the popup has closed.
+    #[test]
+    fn a_coordinators_detail_shows_its_status_file_and_enter_opens_it() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("nodes/t-0001")).unwrap();
+        let node_status = dir.join("nodes/t-0001/STATUS.md");
+        std::fs::write(
+            &node_status,
+            "# Status\nObjective: NODE-OBJECTIVE\n## Asked\n- [open] is it in the skill? : checking\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("STATUS.md"),
+            "# Status\nObjective: ROOT-OBJECTIVE\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].coordinators[1].workspace_id = "w2".into();
+        app.stack = vec![View::Launcher { sel: 0 }];
+
+        app.open_detail("acme", "t-0001");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("STATUS"), "{text}");
+        assert!(text.contains("Objective: NODE-OBJECTIVE"), "{text}");
+        assert!(
+            text.contains("- [open] is it in the skill? : checking"),
+            "{text}"
+        );
+        assert!(text.contains("↵ open status"), "{text}");
+        world.runner.calls.borrow_mut().clear();
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(app.close, "{}", app.message);
+        assert!(world.runner.calls.borrow().is_empty());
+        let args = app.after_close.as_ref().map(|j| j.args().join(" "));
+        assert_eq!(
+            args,
+            Some(format!(
+                "jump file {} --workspace w2",
+                node_status.display()
+            ))
+        );
+
+        app.close = false;
+        app.after_close = None;
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "root");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: ROOT-OBJECTIVE"), "{text}");
+
+        // A worker keeps no status file, and Enter still does nothing there.
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0003");
+        let text = app.render(84, 30).text();
+        assert!(!text.contains("STATUS"), "{text}");
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(!app.close);
+    }
+
     #[test]
     fn go_to_agent_closes_the_popup_before_any_herdr_call() {
         let jump = ui_ops::Jump::Node {

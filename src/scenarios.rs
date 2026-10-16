@@ -5844,7 +5844,7 @@ fn a_pending_rename_closes_a_busy_agent_after_the_wait_and_reports_a_failure() {
 }
 
 #[test]
-fn the_digest_orders_project_handoff_and_recursive_organization() {
+fn the_digest_orders_project_status_and_recursive_organization() {
     let world = World::new();
     let project = world.project("demo", "a.sock");
     let project_md = std::fs::read_to_string(project.project_md()).unwrap();
@@ -5854,8 +5854,8 @@ fn the_digest_orders_project_handoff_and_recursive_organization() {
     )
     .unwrap();
     std::fs::write(
-        project.dir().join("HANDOFF.md"),
-        "# Handoff\n\n## Current objective\n\nHandoff sentinel.\n",
+        project.dir().join("STATUS.md"),
+        "# Status\nObjective: Status sentinel.\n",
     )
     .unwrap();
     let parent = world.thread(&project, world.home.path(), |thread| {
@@ -5873,12 +5873,12 @@ fn the_digest_orders_project_handoff_and_recursive_organization() {
 
     let digest = coordinator::digest(&world.ctx(), &project, "hp").unwrap().0;
     let instructions = digest.find("## Project instructions").unwrap();
-    let handoff = digest.find("## Current handoff").unwrap();
+    let status = digest.find("## Status (STATUS.md)").unwrap();
     let memory = digest.find("## Memory index").unwrap();
     let organization = digest.find("## Open threads").unwrap();
-    assert!(instructions < handoff && handoff < memory && memory < organization);
+    assert!(instructions < status && status < memory && memory < organization);
     assert!(digest.contains("Project rule sentinel."));
-    assert!(digest.contains("Handoff sentinel."));
+    assert!(digest.contains("Status sentinel."));
     let parent_pos = digest.find(&format!("- {} [", parent.id)).unwrap();
     let child_pos = digest.find(&format!("- {} [", child.id)).unwrap();
     assert!(parent_pos < child_pos);
