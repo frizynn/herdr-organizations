@@ -6175,3 +6175,55 @@ fn a_worker_resolved_by_its_coordinator_node_leaves_no_root_item() {
         .collect();
     assert_eq!(events, ["resolved"]);
 }
+
+/// A worker that stops without writing a new report (a usage limit, a crash,
+/// a forgotten report) would leave its coordinator node waiting forever: the
+/// node is woken, and nothing reaches the root.
+#[test]
+fn a_worker_that_stops_without_a_new_report_wakes_only_its_coordinator_node() {
+    let (world, project, worker) = nested_world("idle");
+    // An older run's report, already acknowledged: not the news.
+    write_report(&worker, "Status: done\n## Summary\nOld run.\n");
+    thread::update(&project, &worker.id, |t| {
+        t.report_hash = thread::local_report_hash(t).unwrap();
+        t.acked_report_hash = t.report_hash.clone();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(
+        woken[0].contains("t-0002 stopped without a new report."),
+        "{}",
+        woken[0]
+    );
+    assert!(items_about(&project, "t-0002").is_empty());
+}
+
+/// Idle right after its coordinator node acknowledged the report is not news.
+#[test]
+fn a_worker_idle_after_its_report_was_acknowledged_wakes_nobody() {
+    let (world, project, worker) = nested_world("idle");
+    write_report(&worker, "Status: done\n## Summary\nShipped.\n");
+    thread::update(&project, &worker.id, |t| {
+        t.report_hash = thread::local_report_hash(t).unwrap();
+        t.acked_report_hash = t.report_hash.clone();
+        t.last_group = thread::Group::ReadyForReview.token().into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    assert_eq!(
+        thread::load(&project, &worker.id).unwrap().last_group,
+        thread::Group::Idle.token()
+    );
+    assert!(prompts_to(&world, "w2:p1").is_empty());
+    assert!(items_about(&project, "t-0002").is_empty());
+}

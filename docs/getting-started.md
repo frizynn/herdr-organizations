@@ -259,7 +259,7 @@ herdr-projects doctor --fix
 herdr-projects ticker start
 ```
 
-The plugin keeps your `~/.local/bin` links pointing at it. `doctor --fix` also links the `autoproject` skill for each harness you configured.
+The plugin keeps your `~/.local/bin` links pointing at it. `doctor --fix` also links the `autoproject` skill for each harness you configured, and renames a project's `HANDOFF.md` to `STATUS.md`, the coordinator's status file, when the project has no `STATUS.md` yet (`open` does the same).
 
 ## Remove
 

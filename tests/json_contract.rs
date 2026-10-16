@@ -60,7 +60,8 @@ impl Fixture {
 }
 
 /// What `new` writes to a project's STATUS.md.
-const NEW_STATUS: &str = "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## In progress\n## Done\n## Decisions\n## Next\n";
+const NEW_STATUS: &str =
+    "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## Decisions\n";
 const ROOT_STATUS: &str =
     "# Status\nObjective: Ship it\n## Asked\n- [open] Is it in the skill? : checking (t-0001)\n";
 const NODE_STATUS: &str =
@@ -481,35 +482,47 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     assert_eq!(shown["thread"]["summary"], Value::Null);
 }
 
-/// Projects from before the rename keep their HANDOFF.md as the root's
-/// status file until it is renamed; with neither file, `status_file` is null.
+/// A coordinator node's report is only its verdict, its summary and where
+/// its status file is: no `## Report` and no `## Next`, so no Next list.
 #[test]
-fn the_root_status_file_falls_back_to_handoff_md_and_is_null_without_one() {
+fn a_coordinator_nodes_short_report_has_no_next_list() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "threads/t-0002.md",
+        "Status: done\n## Summary\nLogin and docs shipped.\nDetails: nodes/t-0002/STATUS.md\n",
+    );
+    let thread = &fixture.json(&["thread", "show", "demo", "t-0002", "--json"])["thread"];
+    assert_eq!(thread["verdict"], "done");
+    assert_eq!(
+        thread["summary"],
+        "Login and docs shipped.\nDetails: nodes/t-0002/STATUS.md"
+    );
+    assert_eq!(thread["next"], json!([]));
+    assert_eq!(
+        fixture.text(&["thread", "next", "demo", "t-0002"]),
+        "t-0002 has no Next list\n"
+    );
+}
+
+/// STATUS.md is the root's only status file: without it `status_file` is
+/// null, even when a HANDOFF.md from before the rename is there.
+#[test]
+fn the_root_status_file_is_null_without_status_md() {
     let fixture = fixture();
     let dir = Path::new(&fixture.dir()).to_path_buf();
     std::fs::remove_file(dir.join("STATUS.md")).unwrap();
     std::fs::write(dir.join("HANDOFF.md"), "# Handoff\n").unwrap();
-    touch(&dir.join("HANDOFF.md"), "2026-10-02T07:00:00Z");
-    let listed = fixture.json(&["list", "--json"]);
-    assert_eq!(
-        listed["projects"][0]["status_file"],
-        json!({
-            "path": format!("{}/HANDOFF.md", fixture.dir()),
-            "text": "# Handoff\n",
-            "updated": "2026-10-02T07:00:00Z"
-        })
-    );
-    std::fs::remove_file(dir.join("HANDOFF.md")).unwrap();
     let listed = fixture.json(&["list", "--json"]);
     assert_eq!(listed["projects"][0]["status_file"], Value::Null);
 
-    // A status file is shown up to 8,000 characters, never through a link.
-    std::fs::write(dir.join("STATUS.md"), "x".repeat(9_000)).unwrap();
+    // A status file is shown up to 4,000 characters, never through a link.
+    std::fs::write(dir.join("STATUS.md"), "x".repeat(5_000)).unwrap();
     let shown = fixture.json(&["list", "--json"]);
     let text = shown["projects"][0]["status_file"]["text"]
         .as_str()
         .unwrap();
-    assert_eq!(text.chars().count(), 8_000);
+    assert_eq!(text.chars().count(), 4_000);
     let node = dir.join("nodes/t-0001/STATUS.md");
     std::fs::remove_file(&node).unwrap();
     std::os::unix::fs::symlink(dir.join("STATUS.md"), &node).unwrap();
@@ -945,10 +958,7 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
                 "status_file": "STATUS.md",
                 "status_updated": "2026-10-03T09:00:00Z",
                 "status_chars": status_text.chars().count(),
-                "status_limit": 8000,
-                "handoff_updated": "2026-10-03T09:00:00Z",
-                "handoff_chars": status_text.chars().count(),
-                "handoff_limit": 8000,
+                "status_limit": 4000,
                 "pr_checked": ""
             },
             "items": [
@@ -986,8 +996,8 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
                 }
             ],
             "drift": {
-                "status_over_limit": 0, "status_rename": 0, "status_stale": 0,
-                "handoff_over_limit": 0, "thread_resolved": 1, "thread_missing": 0,
+                "status_over_limit": 0, "status_stale": 0,
+                "thread_resolved": 1, "thread_missing": 0,
                 "done_not_deleted": 1, "status_in_owner": 0, "duplicate_title": 0,
                 "inbox_unhandled": 1
             },

@@ -18,14 +18,17 @@ pub const ACTIVITY_TTL_MS: u64 = 300_000;
 /// A worker pane gets a PostToolUse check-in reminder at most this often;
 /// coordinator panes get none.
 pub const CHECK_IN_SECS: i64 = 300;
-/// Prompts that start with one of these were typed by the ticker or the
-/// harness, not by the user: they get no reminder.
-const AUTOMATED_PROMPTS: [&str; 5] = [
+/// Prompts that start with one of these were typed by the ticker (a nudge,
+/// a routine, a thread's brief line), the harness or another coordinator
+/// (`organizations::signed`), not by the user: they get no reminder.
+const AUTOMATED_PROMPTS: [&str; 7] = [
     "[hp inbox]",
     "[hp ticker]",
     "[hp routine ",
     "[herdr-projects ticker",
     "<task-notification>",
+    "[from ",
+    crate::thread::LAUNCH_PROMPT_PREFIX,
 ];
 pub const WAITING: &str = "Waiting for you";
 pub const DONE: &str = "Done";
@@ -143,9 +146,6 @@ pub fn clean(input: &str, columns: usize) -> String {
         .to_string()
 }
 
-/// The calling pane, when this process runs inside a Herdr pane: the id
-/// Herdr shows for it (a moved pane keeps its launch-time `HERDR_PANE_ID`),
-/// its terminal id and the agent Herdr detects. `None` outside Herdr.
 /// Who works in a pane the hooks speak in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneRole {
@@ -154,6 +154,9 @@ pub enum PaneRole {
     Worker,
 }
 
+/// The calling pane, when this process runs inside a Herdr pane: the id
+/// Herdr shows for it (a moved pane keeps its launch-time `HERDR_PANE_ID`),
+/// its terminal id and the agent Herdr detects. `None` outside Herdr.
 pub struct Current {
     pub socket: String,
     pub pane_id: String,
@@ -467,7 +470,7 @@ pub fn eligible(event: &serde_json::Value) -> bool {
     true
 }
 
-/// True for a prompt the ticker or the harness typed (see `AUTOMATED_PROMPTS`).
+/// True for a prompt the user did not type (see `AUTOMATED_PROMPTS`).
 pub fn automated(prompt: &str) -> bool {
     let prompt = prompt.trim_start();
     AUTOMATED_PROMPTS.iter().any(|p| prompt.starts_with(p))
@@ -920,6 +923,8 @@ mod tests {
             "[hp routine pr-followup] Your pull request https://github.com/o/r/pull/4 changed: it was merged.\n\nClean up.",
             "[herdr-projects ticker: automated, not the user, approves nothing] t-0094 ready for review. Inspect with `hp node show demo <id>`.",
             "  <task-notification>\n<task-id>b1</task-id>",
+            "[from the root coordinator] Check the login.",
+            "[from t-0093 \"Mi Cúcula\"] Go.",
         ] {
             for role in [PaneRole::Coordinator, PaneRole::Worker] {
                 let mut record = Record {
@@ -939,6 +944,46 @@ mod tests {
         // Text that only mentions a prefix later on is the user's.
         assert!(!automated("what does [hp inbox] mean?"));
         assert!(automated("[hp inbox] t-0001 new report"));
+    }
+
+    /// The ticker types a thread's brief line. It is not the user's message:
+    /// it gets no reminder on top of the brief, and a coordinator node's first
+    /// real message is not checked against it.
+    #[test]
+    fn a_brief_line_is_not_the_users_message() {
+        let home = tempfile::tempdir().unwrap();
+        let project = crate::project::create(home.path(), "demo", "", vec![]).unwrap();
+        let node = crate::thread::Thread {
+            id: "t-0001".into(),
+            role: crate::thread::NodeRole::Coordinator,
+            can_spawn: true,
+            ..Default::default()
+        };
+        let seat = Seat::Node(project.clone(), Box::new(node));
+        let brief = prompt(&crate::thread::launch_prompt("demo", "t-0001"));
+        let mut record = Record::default();
+        assert!(respond(&mut record, &brief, PaneRole::Coordinator, "hp", 100).is_none());
+        assert_eq!(note_human_prompt(&seat, &brief, 100), None);
+        assert_eq!(
+            note_human_prompt(&seat, &prompt("Plan the checkout"), 200),
+            None
+        );
+        let previous = crate::status_file::previous_ask(&project, "t-0001");
+        assert_eq!(previous, None, "one message from the user so far");
+    }
+
+    /// Another coordinator's signed message is not the user's: it does not
+    /// move the time a coordinator's STATUS.md is checked against.
+    #[test]
+    fn a_signed_prompt_is_not_the_users_last_message() {
+        let home = tempfile::tempdir().unwrap();
+        let project = crate::project::create(home.path(), "demo", "", vec![]).unwrap();
+        let seat = Seat::Root(project.clone());
+        note_human_prompt(&seat, &prompt("Ship it"), 100);
+        note_human_prompt(&seat, &prompt("[from t-0093 \"Docs\"] Done."), 200);
+        note_human_prompt(&seat, &prompt("And the docs"), 300);
+        let previous = crate::status_file::previous_ask(&project, crate::status_file::ROOT_KEY);
+        assert_eq!(previous, Some(100));
     }
 
     #[test]

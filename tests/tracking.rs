@@ -96,9 +96,9 @@ fn status(chars: usize) -> String {
 #[test]
 fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     let fixture = Fixture::new();
-    fixture.write("STATUS.md", &status(9_000));
+    fixture.write("STATUS.md", &status(5_000));
     let context = fixture.text(&["context", "acme", "--peek"]);
-    let warning = "STATUS.md has 9000 characters and this digest shows only the first 8000; compact it before anything else.";
+    let warning = "STATUS.md has 5000 characters and this digest shows only the first 4000; compact it before anything else.";
     let at = context.find(warning).expect(&context);
     assert!(
         at < context.find("## Project instructions").unwrap(),
@@ -108,13 +108,13 @@ fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
     assert!(
         doctor.contains(
-            "[warn] status acme: STATUS.md has 9000 characters; `context` shows the first 8000, so ask the coordinator to compact it"
+            "[warn] status acme: STATUS.md has 5000 characters; `context` shows the first 4000, so ask the coordinator to compact it"
         ),
         "{doctor}"
     );
 
     // Within the limit, neither says anything.
-    fixture.write("STATUS.md", &status(7_000));
+    fixture.write("STATUS.md", &status(3_000));
     assert!(
         !fixture
             .text(&["context", "acme", "--peek"])
@@ -122,16 +122,6 @@ fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     );
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
     assert!(!doctor.contains("status acme"), "{doctor}");
-
-    // A project from before the rename: its HANDOFF.md is measured instead.
-    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
-    fixture.write("HANDOFF.md", &status(9_000));
-    let context = fixture.text(&["context", "acme", "--peek"]);
-    assert!(
-        context
-            .contains("HANDOFF.md has 9000 characters and this digest shows only the first 8000"),
-        "{context}"
-    );
 }
 
 /// The lines of the digest's drift section.
@@ -163,43 +153,21 @@ fn a_new_project_keeps_its_status_in_status_md() {
     assert_eq!(drift(&context), ["(none)"]);
 }
 
+/// STATUS.md is the only name: a HANDOFF.md from before the rename is not
+/// read, and `context` does not rename it (`open` and `doctor --fix` do).
 #[test]
-fn context_prefers_status_md_and_falls_back_to_handoff_md_with_a_rename_line() {
+fn context_never_reads_handoff_md() {
     let fixture = Fixture::new();
+    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
     fixture.write("HANDOFF.md", "# Handoff\n\nOLD-SENTINEL\n");
-    fixture.write("STATUS.md", "# Status\nObjective: NEW-SENTINEL\n");
     let context = fixture.text(&["context", "acme", "--peek"]);
     assert!(
-        context.contains("## Status (STATUS.md)\n# Status\nObjective: NEW-SENTINEL"),
+        context.contains("## Status (STATUS.md)\n(none; coordinator must maintain STATUS.md)"),
         "{context}"
     );
     assert!(!context.contains("OLD-SENTINEL"), "{context}");
     assert_eq!(drift(&context), ["(none)"]);
-
-    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
-    let context = fixture.text(&["context", "acme", "--peek"]);
-    assert!(
-        context.contains("## Status (HANDOFF.md)\n# Handoff\n\nOLD-SENTINEL"),
-        "{context}"
-    );
-    assert_eq!(
-        drift(&context),
-        ["- [status-rename] rename HANDOFF.md to STATUS.md"]
-    );
-    // Reading never renames or rewrites the user's file.
     assert!(!fixture.dir().join("STATUS.md").exists());
-    assert_eq!(
-        std::fs::read_to_string(fixture.dir().join("HANDOFF.md")).unwrap(),
-        "# Handoff\n\nOLD-SENTINEL\n"
-    );
-    let status: serde_json::Value =
-        serde_json::from_str(&fixture.text(&["project", "status", "acme", "--json"])).unwrap();
-    assert_eq!(status["sources"]["status_file"], "HANDOFF.md");
-    assert_eq!(status["drift"]["status_rename"], 1);
-    assert_eq!(
-        status["problems"][0],
-        serde_json::json!({"rule": "status-rename", "line": 0, "task": "", "thread": "", "detail": "rename HANDOFF.md to STATUS.md"})
-    );
 }
 
 #[test]
@@ -217,7 +185,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
         "resolved_reason = \"manual\"\n",
     );
     fixture.thread("t-0003", "Running fine", "open", "");
-    fixture.write("STATUS.md", &status(9_000));
+    fixture.write("STATUS.md", &status(5_000));
 
     let context = fixture.text(&["context", "acme", "--peek"]);
     let drift = context
@@ -228,7 +196,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
     assert_eq!(
         drift,
         [
-            "- [status-over-limit] STATUS.md has 9000 characters, this digest shows the first 8000",
+            "- [status-over-limit] STATUS.md has 5000 characters, this digest shows the first 4000",
             "- [thread-resolved] TASKS.md:4 \"Fix login\" · t-0001: the thread is resolved and its PR merged",
             "- [thread-resolved] TASKS.md:5 \"Ship checkout\" · t-0002: the thread is resolved",
             "- [thread-missing] TASKS.md:9 \"Rename the settings keys\" · t-0099: no such thread",

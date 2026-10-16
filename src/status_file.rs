@@ -1,8 +1,7 @@
 //! The status file: one plain Markdown file a coordinator writes for whoever
 //! wants to know how its work stands (the user, the root, a sibling), read
 //! when they want instead of being sent. The root keeps the project's
-//! `STATUS.md` (`HANDOFF.md` in a project from before the rename, until it is
-//! renamed); a spawning coordinator node keeps `nodes/<id>/STATUS.md`.
+//! `STATUS.md`; a spawning coordinator node keeps `nodes/<id>/STATUS.md`.
 //!
 //! It also keeps, per coordinator, the time of the user's last two prompts
 //! (`.state/asked.json`, never their text), so a file older than the previous
@@ -18,53 +17,27 @@ use serde::{Deserialize, Serialize};
 use crate::project::Project;
 
 pub const NAME: &str = "STATUS.md";
-/// The root's file before the rename, read while `STATUS.md` is missing.
-pub const OLD_NAME: &str = "HANDOFF.md";
-/// What `context` prints of the root's file and what `--json` carries.
-pub const MAX_CHARS: usize = 8_000;
+/// The size limit of every status file, the root's and a node's: what the
+/// skills ask for, what `context` prints, what `--json` carries and the most
+/// a node's brief inlines.
+pub const MAX_CHARS: usize = 4_000;
 /// What `new` writes: the skill's template with nothing filled in.
-pub const TEMPLATE: &str = "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## In progress\n## Done\n## Decisions\n## Next\n";
+pub const TEMPLATE: &str =
+    "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## Decisions\n";
 /// The root coordinator's key in `.state/asked.json`; nodes use their id.
 pub const ROOT_KEY: &str = "root";
 /// What a coordinator node's hook adds when its file is stale.
 pub const NODE_STALE: &str =
     "Your STATUS.md is older than the user's previous message. Update it before you answer.";
 
-/// The root's status file: `STATUS.md`, or `HANDOFF.md` while only that one
-/// exists. Nothing is renamed or rewritten.
-pub struct RootFile {
-    pub path: PathBuf,
-    pub name: &'static str,
+/// The root coordinator's status file.
+pub fn root(project: &Project) -> PathBuf {
+    project.dir().join(NAME)
 }
 
-impl RootFile {
-    /// Only the file from before the rename exists.
-    pub fn legacy(&self) -> bool {
-        self.name == OLD_NAME
-    }
-
-    /// The whole file, empty when it is missing.
-    pub fn text(&self) -> String {
-        std::fs::read_to_string(&self.path).unwrap_or_default()
-    }
-}
-
-pub fn root(project: &Project) -> RootFile {
-    root_in(&project.dir())
-}
-
-/// [`root`] for a project folder.
-pub fn root_in(dir: &Path) -> RootFile {
-    let present = |name: &str| std::fs::symlink_metadata(dir.join(name)).is_ok();
-    let name = if !present(NAME) && present(OLD_NAME) {
-        OLD_NAME
-    } else {
-        NAME
-    };
-    RootFile {
-        path: dir.join(name),
-        name,
-    }
+/// The root's status file, empty when it is missing.
+pub fn root_text(project: &Project) -> String {
+    std::fs::read_to_string(root(project)).unwrap_or_default()
 }
 
 /// A status file in the `--json` contract (docs/json.md).
@@ -173,6 +146,31 @@ mod tests {
         assert_eq!(record_ask(&project, ROOT_KEY, 300).unwrap(), Some(200));
         assert_eq!(previous_ask(&project, ROOT_KEY), Some(200));
         assert_eq!(previous_ask(&project, "t-0001"), None);
+    }
+
+    /// Both coordinator skills show the shape `new` writes and its limit.
+    #[test]
+    fn the_skills_show_the_template_and_the_limit() {
+        let limit = format!(
+            "under {},{:03} characters",
+            MAX_CHARS / 1000,
+            MAX_CHARS % 1000
+        );
+        let headings = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| line.starts_with('#') || line.starts_with("Objective:"))
+                .map(|line| line.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        for skill in [
+            include_str!("../skill/COORDINATOR.md"),
+            include_str!("../skill/COORDINATOR_NODE.md"),
+        ] {
+            let block = skill.split_once("```\n# Status\n").unwrap().1;
+            let block = format!("# Status\n{}", block.split_once("```").unwrap().0);
+            assert_eq!(headings(&block), headings(TEMPLATE));
+            assert!(skill.contains(&limit), "{limit}");
+        }
     }
 
     #[test]

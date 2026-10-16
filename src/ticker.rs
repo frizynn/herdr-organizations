@@ -1029,6 +1029,7 @@ fn thread_pass(
             };
             pass.transitions.push(Transition {
                 id: t.id.clone(),
+                from: thread::Group::from_token(&t.last_group),
                 to: group,
                 note,
             });

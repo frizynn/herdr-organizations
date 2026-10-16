@@ -317,13 +317,14 @@ fn report(
                 format!("{}; `doctor --fix` repairs this", problems.join("; ")),
             );
         }
-        if let Some((name, chars)) = crate::drift::status_over(&project) {
+        if let Some(chars) = crate::drift::status_over(&project) {
             check(
                 &mut out,
                 None,
                 &format!("status {slug}"),
                 format!(
-                    "{name} has {chars} characters; `context` shows the first {}, so ask the coordinator to compact it",
+                    "{} has {chars} characters; `context` shows the first {}, so ask the coordinator to compact it",
+                    crate::status_file::NAME,
                     crate::status_file::MAX_CHARS
                 ),
             );

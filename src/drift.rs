@@ -18,7 +18,6 @@ const MAX_LINES: usize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
     StatusOverLimit,
-    StatusRename,
     StatusStale,
     ThreadResolved,
     ThreadMissing,
@@ -28,9 +27,8 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Rule; 8] = [
+    pub const ALL: [Rule; 7] = [
         Rule::StatusOverLimit,
-        Rule::StatusRename,
         Rule::StatusStale,
         Rule::ThreadResolved,
         Rule::ThreadMissing,
@@ -42,7 +40,6 @@ impl Rule {
     pub fn name(self) -> &'static str {
         match self {
             Rule::StatusOverLimit => "status-over-limit",
-            Rule::StatusRename => "status-rename",
             Rule::StatusStale => "status-stale",
             Rule::ThreadResolved => "thread-resolved",
             Rule::ThreadMissing => "thread-missing",
@@ -54,10 +51,7 @@ impl Rule {
 
     /// About the root's status file rather than a TASKS.md line.
     pub fn about_status(self) -> bool {
-        matches!(
-            self,
-            Rule::StatusOverLimit | Rule::StatusRename | Rule::StatusStale
-        )
+        matches!(self, Rule::StatusOverLimit | Rule::StatusStale)
     }
 }
 
@@ -112,16 +106,15 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// The root's status file and its length in characters when it is over
-/// what `context` prints, `None` within it.
-pub fn status_over(project: &Project) -> Option<(&'static str, usize)> {
-    let file = status_file::root(project);
-    let chars = file.text().chars().count();
-    (chars > MAX_CHARS).then_some((file.name, chars))
+/// The length in characters of the root's status file when it is over what
+/// `context` prints, `None` within it.
+pub fn status_over(project: &Project) -> Option<usize> {
+    let chars = status_file::root_text(project).chars().count();
+    (chars > MAX_CHARS).then_some(chars)
 }
 
-/// The root's status file problems: too long, still under its old name, or
-/// older than the user's previous message.
+/// The root's status file problems: too long, or older than the user's
+/// previous message.
 fn status_problems(project: &Project) -> Vec<Problem> {
     let problem = |rule: Rule, detail: String| Problem {
         rule,
@@ -130,25 +123,19 @@ fn status_problems(project: &Project) -> Vec<Problem> {
         thread: String::new(),
         detail,
     };
-    let file = status_file::root(project);
+    let name = status_file::NAME;
     let mut found = Vec::new();
-    if let Some((name, chars)) = status_over(project) {
+    if let Some(chars) = status_over(project) {
         found.push(problem(
             Rule::StatusOverLimit,
             format!("{name} has {chars} characters, this digest shows the first {MAX_CHARS}"),
         ));
     }
-    if file.legacy() {
-        found.push(problem(
-            Rule::StatusRename,
-            format!("rename {} to {}", status_file::OLD_NAME, status_file::NAME),
-        ));
-    }
     let previous = status_file::previous_ask(project, status_file::ROOT_KEY);
-    if status_file::stale(&file.path, previous) {
+    if status_file::stale(&status_file::root(project), previous) {
         found.push(problem(
             Rule::StatusStale,
-            format!("{} is older than the user's last message", file.name),
+            format!("{name} is older than the user's last message"),
         ));
     }
     found

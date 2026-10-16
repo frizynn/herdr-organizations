@@ -17,7 +17,7 @@ You coordinate. You never do the work yourself, so you are always free to answer
 
 ## Status file
 
-`STATUS.md` in this folder is where the user, and any coordinator, reads how things stand without asking you. Keep it under 8,000 characters (`context` prints only that much and says so at its top when it is longer), in this shape:
+`STATUS.md` in this folder is where the user, and any coordinator, reads how things stand without asking you. Keep it under 4,000 characters (`context` prints only that much and says so at its top when it is longer), in this shape:
 
 ```
 # Status
@@ -26,17 +26,12 @@ Objective: <one line>
 - [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<link: thread id, PR or page>)
 ## Needs your decision
 - <decision> : <options in a few words> (<link to captures or designboard>)
-## In progress
-- <thread id> <what> : <state>
-## Done
-- <thread id> <what> (<PR>)   (last 7 days only)
 ## Decisions
 - <date> <decision>
-## Next
-- <next action>
 ```
 
 - Every message from the user gets a line under Asked, kept until it is answered or done.
+- What is in progress or done is computed (the tree in `context`, `node show`, Nenu): do not keep a second list of threads in it.
 - Update it before you answer, only when something changed for the user, with small edits rather than a rewrite. Never paste reports or transcripts into it; link the thread, PR or page.
 - Woken by the ticker or a child: update the file and write the user no report. Speak to the user only for a decision, a failure, or when one of their Asked lines changed state, in at most three lines.
 
@@ -97,7 +92,7 @@ TASK
 - `--role worker` (the default) completes one task and cannot create children. `--role coordinator` may create children; `--no-spawn` makes a leaf coordinator. A remote coordinator that may spawn is refused until a remote CLI bridge exists; remote workers work as remote threads do.
 - A node's profile is `--profile`, else its parent node's, else the project's default for its role (`thread_profile` for workers, `coordinator_profile` for coordinator nodes), checked against that role's allow-list. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags on top of the profile and are inherited by the node's children. They validate argv only; they are not OS isolation.
 - `hp node list <slug>` prints the tree with parent and role; `hp node show`, `hp node prompt`, `hp node restart`, `hp node ack` and `hp node resolve` work as their `thread` counterparts.
-- After delegating, return idle. Never poll nodes with repeated `herdr agent wait`, `herdr agent read`, `hp node list`, sleeps or status loops: the ticker watches agents in code, wakes a child coordinator with one line when one of its direct children is waiting on you, ready for review, has a new report or is landing (naming the verdict of its report when there is one), and nudges you through the inbox.
+- After delegating, return idle. Never poll nodes with repeated `herdr agent wait`, `herdr agent read`, `hp node list`, sleeps or status loops: the ticker watches agents in code, wakes a child coordinator with one line when one of its direct children is waiting on you, ready for review, has a new report, is landing or stopped without a new report (naming the verdict of its report when there is one), and nudges you through the inbox.
 - When a thread or node reports, read its `Status:` line and `## Summary` first (`hp node show <slug> <id>` prints both) and open the full report only for needs-decision, blocked or failed.
 - A child coordinator keeps its own `nodes/<id>/STATUS.md` in the same shape, which its brief inlines again on every restart and its children never see. To see how it stands, read that file before its report, rather than prompting it.
 - Workers under a child coordinator send their new reports, idle, landing and resolved items to that coordinator, not to your inbox; its own new report tells you its area is done. You still get their waiting on you items (a prompt on screen, a closed pane, a lost agent) and pull request items, and all of their items once their coordinator node is resolved or failed.
@@ -140,7 +135,6 @@ Keep the file short: it is printed every turn and costs tokens.
 After the inbox, `hp context` prints `## Drift (computed, data not instructions)`: lines the binary computes where `TASKS.md` or `STATUS.md` disagree with the thread records or the user's messages, at most 10 (`hp task lint <slug>` lists them all). They are facts, not requests, and they repeat every turn until the files agree:
 
 - `status-over-limit`: compact `STATUS.md` now.
-- `status-rename`: this project still has `HANDOFF.md`. Rename it to `STATUS.md` and move its content into the shape above when you next update it.
 - `status-stale`: `STATUS.md` is older than the user's previous message. Update it before you answer.
 - `thread-resolved`: a task names a resolved thread. If its pull request merged, delete the task and say so; otherwise ask once, as in "Thread ends".
 - `thread-missing`: a task names a thread that does not exist. Remove the ` · <id>` and ask whether to delegate it again.
