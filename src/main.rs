@@ -53,6 +53,7 @@ mod thread;
 mod threads;
 mod ticker;
 mod tokens;
+mod tracker;
 mod trust_screen;
 mod tui_config;
 mod ui;

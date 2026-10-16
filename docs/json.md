@@ -119,8 +119,9 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `summary` | string or `null` | The `## Summary` section of its report, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
 | `captures` | `[{path, caption}]` | The images listed under `## Captures` in its report, as `- <path> - <caption>` (an em dash also separates), the path relative to `library`. Kept only when the file is a regular png, jpg, jpeg, webp or gif file inside `library`, reached without `..`, an absolute path or a symbolic link; at most 24, in the report's order. `[]` without a `## Captures` list. `path` is absolute. |
 | `deliverables` | `[{path, kind}]` | Regular `html` and `pdf` files directly in `library` (not in subfolders, not hidden), `kind` being the extension in lower case; at most 10, by name. `path` is absolute. |
-| `task` | string | The title of the `TASKS.md` task it was delegated from (`--from-task`), as written there when it started. Empty for a thread started without one. |
+| `task` | string | The title of the task it was delegated from (`--from-task`), as written in `TASKS.md` or the tracker when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
+| `task_id` | string | The [tracker's](operations.md#tasks-from-a-tracker) id of that task. Present only for a thread started from a tracker's task. |
 | `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md`. `null` for every other node and while the file is missing. |
 
 ## Status file
@@ -160,7 +161,7 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `id` | string | Starts with a UTC timestamp, so ids sort oldest first. |
-| `kind` | string | `thread-state`, `pr`, `task`, `routine`, `routine-approval`, `outage`, `session`, `config-error`, `rename` or `space`. A `task` item means a thread was resolved while `TASKS.md` still has a task open on it; its `subject` is the thread id. |
+| `kind` | string | `thread-state`, `pr`, `task`, `routine`, `routine-approval`, `outage`, `session`, `config-error`, `rename` or `space`. A `task` item means a thread was resolved while `TASKS.md` or the tracker still has a task open on it, or that the tracker's `link` command failed (`tracker link failed`); its `subject` is the thread id. |
 | `subject` | string | A thread id, routine name or machine label. |
 | `created` | string | RFC 3339 timestamp. |
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
@@ -169,7 +170,7 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 
 ## Task
 
-`task list` reads `TASKS.md` in file order. `tasks` is empty when the file is missing or has no task line.
+`task list` reads `TASKS.md` in file order. `tasks` is empty when the file is missing or has no task line. A project with a [tracker](operations.md#tasks-from-a-tracker) lists the tracker's tasks in its order instead, and the command fails while the tracker is unavailable.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -178,6 +179,8 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `owner` | object | Who the task is assigned to, see below. |
 | `thread` | string | The id of the thread running it, empty when none. |
 | `description` | string | The notes indented under the task line, without the indent. |
+| `id` | string | A tracker task's id. Present only for a tracker's tasks. |
+| `url` | string | A tracker task's page, empty when it has none. Present only for a tracker's tasks. |
 
 | Owner field | Type | Meaning |
 | --- | --- | --- |
@@ -196,17 +199,19 @@ EOF
 
 `coordinator prompt` fails when the project's session is not reachable or no coordinator can take a prompt, and it prints text, not JSON.
 
+With a tracker, `TASKS.md` is not used: a client changes a task in the tracker itself, or sends the coordinator the same kind of sentence naming the task's id.
+
 ## Project status
 
-`project status` is the project's work in one document, for a client's notes view such as the one Nenu plans for its project panel. The binary computes it on every call from `TASKS.md`, the root's status file (`STATUS.md`), the thread records with their pull requests, and the inbox. Nobody writes it, so it never disagrees with them. It asks the project's Herdr session for live groups, as `overview` does, and falls back to the recorded group when the session is unreachable.
+`project status` is the project's work in one document, for a client's notes view such as the one Nenu plans for its project panel. The binary computes it on every call from `TASKS.md` (or the tracker's tasks), the root's status file (`STATUS.md`), the thread records with their pull requests, and the inbox. Nobody writes it, so it never disagrees with them. It asks the project's Herdr session for live groups, as `overview` does, and falls back to the recorded group when the session is unreachable.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `project` | string | The slug. |
 | `generated_at` | string | RFC 3339, when it was computed. |
 | `objective` | string | The status file's `Objective:` line. Empty without one. |
-| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing); `status_file` (`STATUS.md`), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
-| `items` | [Status item] | One per task in `TASKS.md`, in file order, then one per thread that is not resolved and that no task names, in id order. |
+| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing; with a tracker, when its list was last asked for); `tasks_source`, present only with a tracker (`tracker`, or `unavailable` when it did not answer); `status_file` (`STATUS.md`), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
+| `items` | [Status item] | One per task in `TASKS.md` (or the tracker), in its order, then one per thread that is not resolved and that no task names, in id order. |
 | `drift` | object | How many problems of each rule (`status_over_limit`, `status_stale`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
 | `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |
 | `next` | `[{thread, line}]` | The Next lines of every thread that is not resolved, in id order. |
@@ -214,7 +219,7 @@ EOF
 | Status item field | Type | Meaning |
 | --- | --- | --- |
 | `kind` | `"task"` or `"thread"` | More kinds may come (pull requests no thread opened, routines); skip the ones you do not know. |
-| `id` | string | `task:<line>` (its line in `TASKS.md`, so it changes when lines above it do) or the thread id. |
+| `id` | string | `task:<line>` (its line in `TASKS.md`, so it changes when lines above it do), `task:<id>` for a tracker's task, or the thread id. |
 | `title` | string | |
 | `list` | string | A task's `## ` list, empty for a thread. |
 | `owner` | object or `null` | A task's owner, as in [Task](#task); `null` for a thread. |
@@ -233,7 +238,8 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `rule` | string | `status-over-limit` or `status-stale` (the root's status file; not in `task lint`), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. |
-| `line` | number | The task's line in `TASKS.md`, from 1; 0 for the status file. |
+| `line` | number | The task's line in `TASKS.md`, from 1; 0 for the status file and a tracker's task. |
+| `id` | string | The tracker's id of the task. Present only for a tracker's task. |
 | `task` | string | The task's title, empty for the status file. |
 | `thread` | string | The thread the task line names, empty when none. |
 | `detail` | string | A few words from the binary, such as `the thread is resolved and its PR merged`. |

@@ -23,7 +23,7 @@ ticker (one background process)
 
 | Piece | What it is |
 | --- | --- |
-| Project | A folder, `~/.herdr-projects/<slug>/`. It holds the goal and settings (`PROJECT.md`), the task list (`TASKS.md`), memory, routines and a record for every thread. |
+| Project | A folder, `~/.herdr-projects/<slug>/`. It holds the goal and settings (`PROJECT.md`), the task list (`TASKS.md`, unless the tasks live in a tracker you already use), memory, routines and a record for every thread. |
 | Coordinator | An ordinary agent started in the project folder. `AGENTS.md` tells it that it is the coordinator, and the bundled skill tells it how to work. It talks with you and starts threads. It does not edit code. |
 | Thread, or node | One agent with one task. A worker finishes its task and writes a report that opens with a `Status:` verdict and a short `## Summary` and ends with a `## Next` list. A coordinator node plans a larger piece and starts children under itself. A code thread works in its own git worktree on a branch named `hp/<project>/<id>-<title>`. |
 | Memory | `PROJECT.md`, `MEMORY.md` and `memory/` at the root, and `nodes/<id>/` for each node. A node's brief includes the root's context and its ancestors' scopes, never its siblings' or its descendants'. `STATUS.md` is the coordinator's status file: what you asked and where each ask stands, what needs your decision and the decisions taken. What is in progress or done comes from the thread records, not from this file. You, the root or a sibling read it when you want instead of getting a report; a child coordinator keeps its own in `nodes/<id>/STATUS.md`, which its children never see. |
@@ -145,6 +145,7 @@ TASK
 | Agent profiles, and which ones a project may use | `~/.config/herdr-projects/config.toml` | The Projects popup, or `profile add`, `profile allow` and `profile default` at a terminal |
 | Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
 | Merge settings (a [merge gate](docs/operations.md#merge-gate) command, the merge method, auto-merge for every thread of a project) | The same safety tables of `config.toml` | By hand only |
+| A tracker that holds the project's tasks instead of `TASKS.md`: a `list` command and an optional `link` command | `~/.config/herdr-projects/config.toml`, `[tracker."<project folder>"]` | By hand; see [Tasks from a tracker](docs/operations.md#tasks-from-a-tracker) |
 | Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
 | Sidebar rows and the popup key | `~/.config/herdr/config.toml` | `configure` and `sidebar install` |
 | Projects root | `~/.herdr-projects` by default | `--root`, `HERDR_PROJECTS_ROOT`, or `config.toml` |
@@ -181,8 +182,8 @@ herdr-organizations overview --json
 | `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json`, `thread pr-action <slug> <id> <action> --json`, `thread pr-create <slug> <id> --json` | The result of a pull request action |
 | `template list --json`, `template show <name> --json` | Templates |
 | `project show <slug> --json` | A project's settings, repos, instructions and memory |
-| `task list <slug> --json` | The tasks in `TASKS.md`, with owners and threads |
-| `task lint <slug> --json` | Where `TASKS.md` disagrees with the thread records |
+| `task list <slug> --json` | The tasks in `TASKS.md` or the tracker, with owners and threads |
+| `task lint <slug> --json` | Where the tasks disagree with the thread records |
 | `project status <slug> --json` | Tasks and open threads with their state, pull requests, drift and Next lines, computed on every call |
 | `routine list <slug> --json` | Routines with their schedule, command status and last and next run |
 

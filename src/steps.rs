@@ -1001,6 +1001,14 @@ pub fn pull_requests(
                     )
                     .err(),
                 );
+                if events.contains(&"merged") {
+                    // `t` was read before this pass recorded the URL.
+                    let merged = Thread {
+                        pr: url.clone(),
+                        ..t.clone()
+                    };
+                    crate::tracker::link(ctx, project, &merged, crate::tracker::Event::Merged);
+                }
                 let number = url.rsplit('/').next().unwrap_or("");
                 if merged {
                     notifier.send(
@@ -1121,6 +1129,7 @@ fn resolved_pull_requests(
         state.resolved_pr_cursor = t.id.clone();
         match pr::view_state(ctx.runner, &t.pr, &t.origin) {
             Ok((pr_state, review)) if pr_state != t.pr_state || review != t.pr_review => {
+                let merged = pr_state.eq_ignore_ascii_case("merged");
                 errors.extend(
                     thread::update(project, &t.id, |t| {
                         t.pr_state = pr_state;
@@ -1128,6 +1137,9 @@ fn resolved_pull_requests(
                     })
                     .err(),
                 );
+                if merged {
+                    crate::tracker::link(ctx, project, &t, crate::tracker::Event::Merged);
+                }
             }
             Ok(_) => {}
             Err(error) => errors.push(error.context(format!("{}: resolved thread's PR", t.id))),
@@ -1625,7 +1637,7 @@ fn resolve_after_copy(
             "",
         )?;
     }
-    threads::note_open_task(project, &resolved)?;
+    threads::note_open_task(ctx, project, &resolved)?;
     Ok(true)
 }
 

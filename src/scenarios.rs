@@ -6227,3 +6227,216 @@ fn a_worker_idle_after_its_report_was_acknowledged_wakes_nobody() {
     assert!(prompts_to(&world, "w2:p1").is_empty());
     assert!(items_about(&project, "t-0002").is_empty());
 }
+
+/// A project whose tasks come from a tracker (`[tracker."<folder>"]` in
+/// config.toml): `tracker-list` answers with one task, `tracker-link` with
+/// `link`.
+fn tracked_world(link: Output) -> (World, Project) {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    track(&world, &project, link);
+    (world, project)
+}
+
+/// Names `tracker-list` and `tracker-link` as `project`'s tracker.
+fn track(world: &World, project: &Project, link: Output) {
+    let config = world.ctx().config_dir;
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "[tracker.\"{}\"]\nlist = [\"tracker-list\", \"--json\"]\nlink = [\"tracker-link\"]\n",
+            project.canonical_dir().display()
+        ),
+    )
+    .unwrap();
+    world.runner.on(
+        "tracker-list",
+        ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research","owner":"","description":"Start with the 2025 papers."}]}"#),
+    );
+    world.runner.on("tracker-link", link);
+}
+
+/// `(HP_EVENT, HP_PR_URL)` of every `link` call so far.
+fn link_events(world: &World) -> Vec<(String, String)> {
+    world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .map(|c| {
+            (
+                env_of(c, "HP_EVENT").to_string(),
+                env_of(c, "HP_PR_URL").to_string(),
+            )
+        })
+        .collect()
+}
+
+fn env_of<'a>(cmd: &'a Cmd, key: &str) -> &'a str {
+    cmd.env
+        .iter()
+        .find(|(k, _)| k == key)
+        .map_or("", |(_, v)| v.as_str())
+}
+
+/// `--from-task <id>` with a tracker: the task's description reaches the
+/// brief, the record keeps the id, and `link` hears `started`. TASKS.md is
+/// neither read nor written.
+#[test]
+fn a_tracker_task_is_delegated_by_id_and_link_hears_it_started() {
+    let (world, project) = tracked_world(ok(""));
+    *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+    let folder = project.dir().join("threads/t-0001");
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("tab create"),
+        move |_| Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","cwd":"{}"}}}}}}"#, folder.display()))),
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    std::fs::remove_file(project.dir().join("TASKS.md")).unwrap();
+    let ctx = world.ctx();
+    let t = threads::start(
+        &ctx,
+        "demo",
+        StartArgs {
+            title: "Research".into(),
+            repo: None,
+            machine: None,
+            profile: None,
+            kind: Some(Kind::Tab),
+            base: None,
+            task: "Look into it.".into(),
+            node: crate::organizations::NodeRequest {
+                from_task: Some("TRK-1".into()),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (t.task.as_str(), t.task_id.as_str(), t.task_origin.as_str()),
+        ("Research", "TRK-1", "task")
+    );
+    assert!(!project.dir().join("TASKS.md").exists());
+    let brief = std::fs::read_to_string(Path::new(&t.thread_dir).join("brief.md")).unwrap();
+    assert!(
+        brief.contains(
+            "Look into it.\n\n## Notes from the task list\n\nStart with the 2025 papers."
+        ),
+        "{brief}"
+    );
+    let calls = world.runner.calls.borrow();
+    let list = calls
+        .iter()
+        .find(|c| c.program == "tracker-list")
+        .expect("list ran");
+    assert_eq!(list.args, ["--json"]);
+    assert_eq!(list.cwd.as_deref(), Some(project.dir().as_path()));
+    assert_eq!(env_of(list, "HP_PROJECT"), "demo");
+    assert_eq!(list.stdin, None);
+    let links: Vec<&Cmd> = calls
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .collect();
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        [
+            "HP_PROJECT",
+            "HP_TASK_ID",
+            "HP_THREAD_ID",
+            "HP_EVENT",
+            "HP_PR_URL"
+        ]
+        .map(|key| env_of(links[0], key)),
+        ["demo", "TRK-1", "t-0001", "started", ""]
+    );
+    assert_eq!(links[0].stdin, None);
+}
+
+/// A `link` that fails leaves an inbox item; the thread starts anyway.
+#[test]
+fn a_failing_link_never_stops_a_delegated_thread() {
+    let (world, project) = tracked_world(crate::runner::fake::timeout());
+    *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+    let folder = project.dir().join("threads/t-0001");
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("tab create"),
+        move |_| Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","cwd":"{}"}}}}}}"#, folder.display()))),
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    let t = threads::start(
+        &world.ctx(),
+        "demo",
+        StartArgs {
+            title: "Research".into(),
+            repo: None,
+            machine: None,
+            profile: None,
+            kind: Some(Kind::Tab),
+            base: None,
+            task: "Look into it.".into(),
+            node: crate::organizations::NodeRequest {
+                from_task: Some("research".into()),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(t.task_id, "TRK-1");
+    assert_ne!(t.status, Status::Failed);
+    let items = items_of(&project, "task");
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].summary,
+        "the tracker's link command failed for task TRK-1 (started): it timed out after 30 s"
+    );
+}
+
+/// The tracker hears `merged` when the ticker sees the merge, while the
+/// thread's agent is still at work and long before it is resolved.
+#[test]
+fn a_merge_tells_link_before_its_thread_is_resolved() {
+    let (world, project) = merged_world("working");
+    track(&world, &project, ok(""));
+    thread::update(&project, "t-0001", |t| t.task_id = "TRK-1".into()).unwrap();
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Open
+    );
+    assert_eq!(
+        link_events(&world),
+        [("merged".to_string(), PR_URL.to_string())]
+    );
+    // Nothing new on the next pass: it is not told again.
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(link_events(&world).len(), 1);
+}
+
+/// A thread resolved before its pull request merged told the tracker
+/// `resolved`; the merge, seen later by the pass over resolved threads, is
+/// told too.
+#[test]
+fn a_merge_after_the_thread_was_resolved_still_tells_link() {
+    let (world, project) = pr_world(MERGED_JSON);
+    track(&world, &project, ok(""));
+    thread::update(&project, "t-0001", |t| {
+        t.status = Status::Resolved;
+        t.resolved_reason = "auto".into();
+        t.pr = PR_URL.into();
+        t.pr_state = "OPEN".into();
+        t.task_id = "TRK-1".into();
+    })
+    .unwrap();
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(thread::load(&project, "t-0001").unwrap().pr_state, "MERGED");
+    assert_eq!(
+        link_events(&world),
+        [("merged".to_string(), PR_URL.to_string())]
+    );
+}

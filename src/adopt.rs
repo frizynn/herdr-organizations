@@ -224,7 +224,7 @@ pub fn adopt_workspace(ctx: &Ctx, args: &AdoptWorkspace) -> Result<()> {
         })
         .unwrap_or_default();
 
-    let project = project::create(&ctx.root, &args.name, &args.goal, repos)?;
+    let project = project::create_for(&ctx.config_dir, &ctx.root, &args.name, &args.goal, repos)?;
     let config = crate::profiles::load(&ctx.config_dir)?;
     crate::profiles::write_project_defaults(
         &project,

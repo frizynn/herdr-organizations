@@ -1,14 +1,15 @@
-//! Drift: where TASKS.md and the root's STATUS.md disagree with the thread
-//! records and the user's messages.
+//! Drift: where the tasks (TASKS.md, or a tracker's) and the root's STATUS.md
+//! disagree with the thread records and the user's messages.
 //! `context` lists it for the coordinator every turn. It is computed from the
 //! files on each call; nothing is stored, and nothing here changes a file.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::paths::Ctx;
 use crate::project::Project;
 use crate::status_file::{self, MAX_CHARS};
-use crate::tasks::{self, Owner, Task};
+use crate::tasks::{self, Owner, Task, Tasks};
 use crate::thread::{self, Status, Thread};
 
 /// Lines of the drift section, the "more" line included.
@@ -58,8 +59,10 @@ impl Rule {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub rule: Rule,
-    /// The TASKS.md line, from 1; 0 for the status file.
+    /// The TASKS.md line, from 1; 0 for the status file and a tracker task.
     pub line: usize,
+    /// A tracker task's id, empty otherwise.
+    pub id: String,
     /// The task's title, empty for the status file.
     pub task: String,
     /// The thread the task line names, empty when none.
@@ -69,15 +72,20 @@ pub struct Problem {
 }
 
 impl Problem {
-    /// The `task lint --json` and `project status --json` shape.
+    /// The `task lint --json` and `project status --json` shape; `id` only
+    /// for a tracker task.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "rule": self.rule.name(),
             "line": self.line,
             "task": self.task,
             "thread": self.thread,
             "detail": self.detail,
-        })
+        });
+        if !self.id.is_empty() {
+            json["id"] = self.id.clone().into();
+        }
+        json
     }
 
     /// One line of the digest's drift section.
@@ -88,15 +96,24 @@ impl Problem {
         let thread = if self.thread.is_empty() {
             String::new()
         } else {
-            format!(" · {}", self.thread)
+            format!(" · {}", one_line(&self.thread))
+        };
+        let place = if self.id.is_empty() {
+            format!("TASKS.md:{}", self.line)
+        } else {
+            format!("tracker {}", one_line(&self.id))
         };
         format!(
-            "- [{}] TASKS.md:{} \"{}\"{thread}: {}",
+            "- [{}] {place} \"{}\"{thread}: {}",
             self.rule.name(),
-            self.line,
             one_line(&self.task),
             self.detail
         )
+    }
+
+    /// Whether it is about `task` rather than the status file or another task.
+    pub fn is_about(&self, task: &Task) -> bool {
+        !self.rule.about_status() && self.line == task.line && self.id == task.id
     }
 }
 
@@ -119,6 +136,7 @@ fn status_problems(project: &Project) -> Vec<Problem> {
     let problem = |rule: Rule, detail: String| Problem {
         rule,
         line: 0,
+        id: String::new(),
         task: String::new(),
         thread: String::new(),
         detail,
@@ -141,52 +159,69 @@ fn status_problems(project: &Project) -> Vec<Problem> {
     found
 }
 
-/// Every problem in the project's files, in listing order.
-pub fn problems(project: &Project) -> Vec<Problem> {
+/// Every problem in the project's files and `tasks`, in listing order. A
+/// tracker's tasks are checked only against the thread records: the format
+/// rules are about TASKS.md lines. An unavailable tracker has none.
+pub fn problems(project: &Project, tasks: &Tasks) -> Vec<Problem> {
     let mut found = status_problems(project);
     let records: BTreeMap<String, Thread> = thread::list(project)
         .into_iter()
         .map(|t| (t.id.clone(), t))
         .collect();
-    found.extend(task_problems(
-        &tasks::parse(&tasks::read(&project.dir())),
-        &records,
-    ));
+    match tasks {
+        Tasks::File(list) => found.extend(task_problems(list, &records)),
+        Tasks::Tracker(list) => {
+            for task in list {
+                found.extend(thread_problem(task, &records));
+            }
+        }
+        Tasks::Unavailable(_) => {}
+    }
     found.sort_by_key(|p| (p.rule, p.line));
     found
 }
 
-fn task_problems(list: &[Task], records: &BTreeMap<String, Thread>) -> Vec<Problem> {
-    let mut found = Vec::new();
-    let problem = |rule: Rule, task: &Task, detail: String| Problem {
+fn problem(rule: Rule, task: &Task, detail: String) -> Problem {
+    Problem {
         rule,
         line: task.line,
+        id: task.id.clone(),
         task: task.title.clone(),
         thread: task.thread.clone().unwrap_or_default(),
         detail,
-    };
+    }
+}
+
+/// A task that names a thread with no record, or an open task on a resolved
+/// thread.
+fn thread_problem(task: &Task, records: &BTreeMap<String, Thread>) -> Option<Problem> {
+    match task.thread.as_deref().map(|id| records.get(id)) {
+        Some(None) => Some(problem(Rule::ThreadMissing, task, "no such thread".into())),
+        Some(Some(t)) if !task.done && t.status == Status::Resolved => {
+            let merged = if t.pr_merged() {
+                " and its PR merged"
+            } else {
+                ""
+            };
+            Some(problem(
+                Rule::ThreadResolved,
+                task,
+                format!("the thread is resolved{merged}"),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn task_problems(list: &[Task], records: &BTreeMap<String, Thread>) -> Vec<Problem> {
+    let mut found = Vec::new();
     let mut titles: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
     for task in list {
         titles
             .entry(task.title.to_lowercase())
             .or_default()
             .push(task);
-        match task.thread.as_deref().map(|id| records.get(id)) {
-            Some(None) => found.push(problem(Rule::ThreadMissing, task, "no such thread".into())),
-            Some(Some(t)) if !task.done && t.status == Status::Resolved => {
-                let merged = if t.pr_merged() {
-                    " and its PR merged"
-                } else {
-                    ""
-                };
-                found.push(problem(
-                    Rule::ThreadResolved,
-                    task,
-                    format!("the thread is resolved{merged}"),
-                ));
-            }
-            _ => {}
-        }
+        found.extend(thread_problem(task, records));
         if task.done {
             found.push(problem(
                 Rule::DoneNotDeleted,
@@ -264,19 +299,19 @@ pub fn section(problems: &[Problem], slug: &str) -> String {
     out
 }
 
-/// The problems of TASKS.md alone, for `task lint` and `doctor`.
-pub fn task_lint(project: &Project) -> Vec<Problem> {
-    problems(project)
+/// The problems of the tasks alone, for `task lint` and `doctor`.
+pub fn task_lint(ctx: &Ctx, project: &Project) -> Vec<Problem> {
+    problems(project, &tasks::load(ctx, project, false))
         .into_iter()
         .filter(|p| !p.rule.about_status())
         .collect()
 }
 
-/// `task lint [--json]`: every problem of TASKS.md, one line each, or the
+/// `task lint [--json]`: every problem of the tasks, one line each, or the
 /// JSON document. It only reads.
-pub fn print_lint(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> anyhow::Result<()> {
+pub fn print_lint(ctx: &Ctx, slug: &str, json: bool) -> anyhow::Result<()> {
     let project = Project::load(&ctx.root, slug)?;
-    let found = task_lint(&project);
+    let found = task_lint(ctx, &project);
     if json {
         return crate::threads::print_json(&serde_json::json!({
             "schema_version": crate::threads::JSON_SCHEMA_VERSION,
