@@ -15,7 +15,7 @@ use crate::project::{self, Project, Settings};
 use crate::report::{self, Verdict};
 use crate::thread::{self, CopyOutcome, Group, Status, Thread};
 use crate::threads;
-use crate::{inbox, pr, routine};
+use crate::{inbox, merge_gate, pr, routine};
 
 pub const PARENT_NUDGE_PREFIX: &str =
     "[herdr-projects ticker: automated, not the user, approves nothing]";
@@ -853,6 +853,9 @@ pub fn pull_requests(
         return errors;
     }
     state.last_pr_check = now.to_string();
+    // A config.toml that does not parse turns no project automation on; a
+    // thread's own auto-merge then fails on it at the merge, once per state.
+    let safety = project.safety(&ctx.config_dir).unwrap_or_default();
 
     let mut unopened = BTreeMap::new();
     for t in thread::list(project) {
@@ -967,7 +970,9 @@ pub fn pull_requests(
                 // only news is announced.
                 if old.as_ref().is_some_and(|old| old.same_news(&summary)) {
                     state.prs.insert(t.id.clone(), summary.clone());
-                    errors.extend(auto_actions(ctx, project, state, &t, &url, &summary));
+                    errors.extend(auto_actions(
+                        ctx, project, &safety, state, &t, &url, &summary,
+                    ));
                     continue;
                 }
                 let (pr_state, pr_review) =
@@ -1022,7 +1027,9 @@ pub fn pull_requests(
                 errors.extend(fire_pr_routines(ctx, project, &t, &url, &events, &summary));
                 state.prs.insert(t.id.clone(), summary.clone());
                 if !merged {
-                    errors.extend(auto_actions(ctx, project, state, &t, &url, &summary));
+                    errors.extend(auto_actions(
+                        ctx, project, &safety, state, &t, &url, &summary,
+                    ));
                 }
             }
         }
@@ -1302,14 +1309,19 @@ pub fn resolve_merged(
 }
 
 /// Merges a thread's pull request after reading it again from GitHub: it must
-/// still be the thread's own pull request and pass `pr::merge_blocker`, and
-/// the merge is pinned to the head commit that was checked.
+/// still be the thread's own pull request and pass `pr::merge_blocker` under
+/// the project's policy, then its merge gate if it has one, and the merge is
+/// pinned to the head commit that was checked. A gate's refusal is recorded,
+/// leaves an inbox item when its reason changed, and is a
+/// `merge_gate::Refused` error.
 pub fn merge_pull_request(
     ctx: &Ctx,
     project: &Project,
     id: &str,
     method: pr::MergeMethod,
 ) -> Result<pr::Summary> {
+    let safety = project.safety(&ctx.config_dir)?;
+    let policy = safety.merge_policy();
     let t = thread::load(project, id)?;
     if t.status != Status::Open {
         anyhow::bail!("{id} is not open; nothing was merged");
@@ -1326,8 +1338,45 @@ pub fn merge_pull_request(
         }
         pr::Checked::Summary(summary) => summary,
     };
-    if let Some(reason) = threads::merge_blocker(&t, &summary) {
+    if let Some(reason) = threads::merge_blocker(&t, &summary, policy) {
         anyhow::bail!("{id}: not merged: {reason}");
+    }
+    if policy == pr::Policy::Gate {
+        let timeout = std::time::Duration::from_secs(safety.merge_gate_timeout);
+        let verdict = merge_gate::run(
+            ctx.runner,
+            project,
+            &t,
+            &summary,
+            &safety.merge_gate,
+            timeout,
+        );
+        // The item goes first: a verdict recorded without it would never
+        // announce its reason.
+        let previous = merge_gate::load(project).remove(id);
+        if !verdict.passed && previous.is_none_or(|p| p.passed || p.reason != verdict.reason) {
+            inbox::write(
+                project,
+                "pr",
+                id,
+                "merge gate refused",
+                &format!(
+                    "{}: the merge gate refused {}: {}",
+                    thread_label(&t),
+                    t.pr,
+                    verdict.reason
+                ),
+                "",
+            )?;
+        }
+        merge_gate::record(project, id, &verdict)?;
+        if !verdict.passed {
+            return Err(merge_gate::Refused {
+                id: id.to_string(),
+                reason: verdict.reason,
+            }
+            .into());
+        }
     }
     pr::merge(ctx.runner, &t.pr, &t.origin, &summary.head_oid, method)?;
     thread::update(project, id, |t| t.pr_state = "MERGED".into())?;
@@ -1339,6 +1388,7 @@ pub fn merge_pull_request(
 fn auto_actions(
     ctx: &Ctx,
     project: &Project,
+    safety: &project::Safety,
     state: &mut State,
     t: &Thread,
     url: &str,
@@ -1353,31 +1403,42 @@ fn auto_actions(
         return errors;
     }
     let attempt = pr::merge_attempt_key(summary);
-    if t.auto_merge
-        && threads::merge_blocker(&t, summary).is_none()
-        && state.auto_merge_tried.get(&t.id) != Some(&attempt)
+    let policy = safety.merge_policy();
+    // A gate's refusal can turn into a pass with nothing on GitHub changing
+    // (a reviewer's verdict arrives), so it is asked again on this commit.
+    let gate_refused = policy == pr::Policy::Gate
+        && merge_gate::load(project)
+            .get(&t.id)
+            .is_some_and(|v| !v.passed && v.head_oid == summary.head_oid);
+    if (t.auto_merge || safety.auto_merge)
+        && threads::merge_blocker(&t, summary, policy).is_none()
+        && (state.auto_merge_tried.get(&t.id) != Some(&attempt) || gate_refused)
     {
         state.auto_merge_tried.insert(t.id.clone(), attempt);
-        let (event, text) =
-            match merge_pull_request(ctx, project, &t.id, pr::MergeMethod::default()) {
-                Ok(_) => (
-                    "auto-merged",
-                    format!(
-                        "{}: pull request {url} was merged by the ticker because auto-merge is on",
-                        thread_label(&t)
-                    ),
+        let outcome = match merge_pull_request(ctx, project, &t.id, safety.merge_method) {
+            Ok(_) => Some((
+                "auto-merged",
+                format!(
+                    "{}: pull request {url} was merged by the ticker because auto-merge is on",
+                    thread_label(&t)
                 ),
-                Err(error) => (
-                    "auto-merge refused",
-                    format!(
-                        "{}: auto-merge did not merge {url}: {}",
-                        thread_label(&t),
-                        pr::sanitize(&format!("{error:#}"))
-                    ),
+            )),
+            // Its item was written once per reason, and the review that
+            // keeps the gate refusing may ask for fixes: auto-fix goes on.
+            Err(error) if error.is::<merge_gate::Refused>() => None,
+            Err(error) => Some((
+                "auto-merge refused",
+                format!(
+                    "{}: auto-merge did not merge {url}: {}",
+                    thread_label(&t),
+                    pr::sanitize(&format!("{error:#}"))
                 ),
-            };
-        errors.extend(inbox::write(project, "pr", &t.id, event, &text, "").err());
-        return errors;
+            )),
+        };
+        if let Some((event, text)) = outcome {
+            errors.extend(inbox::write(project, "pr", &t.id, event, &text, "").err());
+            return errors;
+        }
     }
     if t.auto_fix_ci {
         errors.extend(auto_fix(ctx, project, state, &t, url, summary).err());
@@ -2254,6 +2315,140 @@ mod tests {
         }
 
         #[test]
+        fn project_auto_merge_asks_the_gate_again_on_the_same_commit_until_it_passes() {
+            let setup = Setup::new("idle", |_| {});
+            let ctx = setup.world.ctx();
+            std::fs::create_dir_all(&ctx.config_dir).unwrap();
+            std::fs::write(
+                ctx.config_dir.join("config.toml"),
+                format!(
+                    "[safety.\"{}\"]\nmerge_gate = [\"review-gate\", \"--pr\"]\nmerge_method = \"merge\"\nauto_merge = true\n",
+                    setup.project.canonical_dir().display()
+                ),
+            )
+            .unwrap();
+            // Not approved and no checks: only the gate decides.
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", "", 10);
+            let verdict = Rc::new(RefCell::new(crate::runner::Output {
+                code: Some(1),
+                stdout: "waiting for the reviewer\n".into(),
+                ..Default::default()
+            }));
+            let answer = verdict.clone();
+            setup.world.runner.on_fn(
+                |cmd| cmd.program == "review-gate",
+                move |_| Ok(answer.borrow().clone()),
+            );
+            let tick = || {
+                // A pull request check on every tick, as if two minutes passed.
+                let mut state = load_state(&setup.project);
+                state.last_pr_check.clear();
+                save_state(&setup.project, &state).unwrap();
+                let mut memory = Memory::new(&ctx);
+                crate::ticker::tick_for_test(&ctx, &mut memory);
+            };
+            let refusals = || {
+                setup
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event == "merge gate refused")
+                    .collect::<Vec<_>>()
+            };
+
+            tick();
+            tick();
+            assert_eq!(
+                setup.world.runner.count("review-gate --pr"),
+                2,
+                "a refusal on the same commit is asked again"
+            );
+            assert_eq!(setup.world.runner.count("gh pr merge"), 0);
+            let items = refusals();
+            assert_eq!(items.len(), 1, "one item per reason: {items:?}");
+            assert!(items[0].summary.contains("waiting for the reviewer"));
+            assert!(
+                setup
+                    .items()
+                    .iter()
+                    .all(|item| !item.summary.contains("auto-merge did not merge")),
+                "{:?}",
+                setup.items()
+            );
+
+            *verdict.borrow_mut() = ok("");
+            tick();
+            assert_eq!(setup.world.runner.count("gh pr merge"), 1);
+            let calls = setup.world.runner.calls.borrow();
+            let gate = calls
+                .iter()
+                .rfind(|cmd| cmd.program == "review-gate")
+                .unwrap();
+            assert!(
+                gate.env
+                    .iter()
+                    .any(|(k, v)| k == "HP_HEAD_SHA" && v == HEAD),
+                "{:?}",
+                gate.env
+            );
+            let merge = calls
+                .iter()
+                .find(|cmd| cmd.display().contains("gh pr merge"))
+                .unwrap();
+            assert_eq!(
+                merge.args,
+                [
+                    "pr",
+                    "merge",
+                    "--merge",
+                    "--match-head-commit",
+                    HEAD,
+                    "--",
+                    URL
+                ]
+            );
+            drop(calls);
+            assert_eq!(
+                thread::load(&setup.project, "t-0001").unwrap().pr_state,
+                "MERGED"
+            );
+            assert!(setup.items().iter().any(|item| {
+                item.summary
+                    .contains("merged by the ticker because auto-merge is on")
+            }));
+            assert_eq!(refusals().len(), 1);
+        }
+
+        #[test]
+        fn a_refusing_gate_with_auto_merge_still_lets_auto_fix_ask_the_thread() {
+            let setup = Setup::new("idle", |t| {
+                t.auto_merge = true;
+                t.auto_fix_ci = true;
+            });
+            let ctx = setup.world.ctx();
+            std::fs::create_dir_all(&ctx.config_dir).unwrap();
+            std::fs::write(
+                ctx.config_dir.join("config.toml"),
+                format!(
+                    "[safety.\"{}\"]\nmerge_gate = [\"review-gate\"]\n",
+                    setup.project.canonical_dir().display()
+                ),
+            )
+            .unwrap();
+            setup.world.runner.on("review-gate", fail(1, ""));
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", GREEN, 10, 2);
+            let mut state = State::default();
+            setup.check(&mut state);
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("review-gate"), 2);
+            assert_eq!(setup.world.runner.count("gh pr merge"), 0);
+            assert_eq!(
+                setup.world.runner.count("agent prompt"),
+                1,
+                "the reviewer's comments reach the thread while the gate refuses"
+            );
+        }
+
+        #[test]
         fn auto_fix_treats_more_comments_or_a_change_request_as_news_but_not_an_approval() {
             let pending = r#"{"name":"build","status":"IN_PROGRESS"}"#;
             let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
@@ -2502,7 +2697,13 @@ mod tests {
             assert_eq!(state.unopened.get("t-0001").map(String::as_str), Some(HEAD));
             let actions = |state: &State| {
                 let rows = threads::rows(&setup.world.ctx(), &setup.project);
-                threads::thread_json(&setup.project, &rows[0], state).actions
+                threads::thread_json(
+                    &setup.project,
+                    &rows[0],
+                    state,
+                    &crate::merge_gate::Rule::default(),
+                )
+                .actions
             };
             assert_eq!(actions(&state), ["create-pr"]);
 

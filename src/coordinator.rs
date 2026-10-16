@@ -823,13 +823,16 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         Ok(safety) => {
             let _ = writeln!(
                 out,
-                "Safety: yolo={} start_threads={} trust_screens={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?}",
+                "Safety: yolo={} start_threads={} trust_screens={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?} merge_gate={} merge_method={} auto_merge={}",
                 if safety.yolo { "on" } else { "off" },
                 safety.start_threads,
                 safety.trust_screens,
                 safety.routine_commands,
                 safety.thread_agent_args,
-                safety.coordinator_agent_args
+                safety.coordinator_agent_args,
+                safety.merge_gate.first().map_or("none", String::as_str),
+                safety.merge_method.word(),
+                if safety.auto_merge { "on" } else { "off" },
             );
         }
         Err(error) => {

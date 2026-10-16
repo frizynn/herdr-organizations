@@ -224,6 +224,10 @@ struct ProjectShowJson {
     auto_resolve_days: u32,
     nudge: bool,
     mute: bool,
+    /// The program of the project's merge gate, empty without one.
+    merge_gate: String,
+    merge_method: &'static str,
+    auto_merge: bool,
 }
 
 #[derive(Serialize)]
@@ -242,6 +246,8 @@ struct RepoJson {
 fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
     let project = Project::load(&ctx.root, slug)?;
     let (settings, instructions) = project.read_project_md()?;
+    // The merge settings are display only here; a merge reads them again.
+    let safety = project.safety(&ctx.config_dir).unwrap_or_default();
     let memory_dir = project.dir().join("memory");
     let memory_files = project::md_files(&memory_dir)
         .into_iter()
@@ -269,6 +275,9 @@ fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
         auto_resolve_days: settings.auto_resolve_days,
         nudge: settings.nudge,
         mute: settings.mute,
+        merge_gate: safety.merge_gate.first().cloned().unwrap_or_default(),
+        merge_method: safety.merge_method.word(),
+        auto_merge: safety.auto_merge,
     })
 }
 
@@ -346,7 +355,7 @@ pub fn run_json(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
         let project = Project::load(&ctx.root, &slug)?;
         let rows = threads::rows(ctx, &project);
         let mut value = serde_json::to_value(project_json(&project, &rows))?;
-        value["threads"] = serde_json::to_value(threads::threads_json(&project, &rows))?;
+        value["threads"] = serde_json::to_value(threads::threads_json(ctx, &project, &rows))?;
         projects.push(value);
     }
     threads::print_json(&serde_json::json!({

@@ -91,7 +91,7 @@ herdr-organizations sidebar install       # optional, adds the organization coun
 
 3. Watch the work. Press `prefix+a` to open the Organizations popup. Threads that wait on you come first. A thread that finishes writes a report with a `## Next` list, and the coordinator summarizes it for you.
 
-4. Review and merge. When a thread's pull request is approved and every check passed, merge it from the popup (`m`), from your own terminal with `herdr-organizations thread merge billing t-0001`, or from Nenu. Once the pull request is merged and the thread's agent is done, the thread is resolved and its worktree and branch are removed. Its report stays in the project folder.
+4. Review and merge. When a thread's pull request is approved and every check passed, or your project's own merge gate passes it, merge it from the popup (`m`), from your own terminal with `herdr-organizations thread merge billing t-0001`, or from Nenu. Once the pull request is merged and the thread's agent is done, the thread is resolved and its worktree and branch are removed. Its report stays in the project folder.
 
 [Getting started](docs/getting-started.md) walks through the same steps with more detail, including trust dialogs and the sidebar.
 
@@ -117,7 +117,7 @@ Commands you are likely to use yourself:
 | `herdr-organizations node list <slug>` | The organization tree, with role, parent and live state. |
 | `herdr-organizations thread show <slug> <id>` | One thread's record, group, note and Next list. |
 | `herdr-organizations thread read <slug> <id>` | What a thread's pane shows now, such as a question or a permission prompt. |
-| `herdr-organizations thread merge <slug> <id>` | Merge the thread's pull request, only if it is open, approved, free of conflicts and every check passed. |
+| `herdr-organizations thread merge <slug> <id>` | Merge the thread's pull request, only if it is open, approved, free of conflicts and every check passed. A project can replace the approval and the need for checks with a [merge gate](docs/operations.md#merge-gate), a command of yours that decides. |
 | `herdr-organizations thread set <slug> <id> --auto-merge on` | Merge automatically once those same conditions hold. `--auto-fix-ci on` prompts the thread about failing checks and review comments. |
 | `herdr-organizations thread pr-action <slug> <id> fix-ci` | Ask the thread to fix its pull request (`fix-ci`, `address-comments` or `resolve-conflicts`) with a message the binary writes from a fresh read; refused when the pull request does not need it. |
 | `herdr-organizations thread pr-create <slug> <id>` | Open the pull request of a thread whose agent is idle and whose branch is pushed without one. |
@@ -144,6 +144,7 @@ TASK
 | Project settings (name, goal, icon, tone, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
 | Agent profiles, and which ones a project may use | `~/.config/herdr-projects/config.toml` | The Projects popup, or `profile add`, `profile allow` and `profile default` at a terminal |
 | Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
+| Merge settings (a [merge gate](docs/operations.md#merge-gate) command, the merge method, auto-merge for every thread of a project) | The same safety tables of `config.toml` | By hand only |
 | Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
 | Sidebar rows and the popup key | `~/.config/herdr/config.toml` | `configure` and `sidebar install` |
 | Projects root | `~/.herdr-projects` by default | `--root`, `HERDR_PROJECTS_ROOT`, or `config.toml` |

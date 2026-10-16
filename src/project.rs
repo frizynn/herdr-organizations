@@ -277,7 +277,19 @@ pub struct Safety {
     /// The profiles threads may use; `None`: every profile.
     pub thread_profiles: Option<Vec<String>>,
     pub coordinator_profiles: Option<Vec<String>>,
+    /// The argv of the project's own merge check, which replaces GitHub's
+    /// approval and "no checks" rule (`crate::merge_gate`). Empty: none.
+    pub merge_gate: Vec<String>,
+    pub merge_gate_timeout: u64,
+    /// How the popup, auto-merge and `thread merge` without `--method` merge.
+    pub merge_method: crate::pr::MergeMethod,
+    /// The ticker auto-merges every thread of the project, as if each had
+    /// `thread set --auto-merge on`.
+    pub auto_merge: bool,
 }
+
+/// Seconds a merge gate may run before it counts as a refusal.
+pub const MERGE_GATE_TIMEOUT_SECS: u64 = 120;
 
 impl Default for Safety {
     fn default() -> Self {
@@ -290,11 +302,24 @@ impl Default for Safety {
             trust_screens: crate::trust_screen::USER.into(),
             thread_profiles: None,
             coordinator_profiles: None,
+            merge_gate: Vec::new(),
+            merge_gate_timeout: MERGE_GATE_TIMEOUT_SECS,
+            merge_method: crate::pr::MergeMethod::Squash,
+            auto_merge: false,
         }
     }
 }
 
 impl Safety {
+    /// GitHub's approval and checks decide a merge, or the project's gate.
+    pub fn merge_policy(&self) -> crate::pr::Policy {
+        if self.merge_gate.is_empty() {
+            crate::pr::Policy::GitHub
+        } else {
+            crate::pr::Policy::Gate
+        }
+    }
+
     /// The launch arguments for an agent of `kind`: the user's own `args`,
     /// plus the kind's skip-permissions flag in yolo mode (once).
     pub fn launch_args(&self, kind: &str, args: &[String]) -> Vec<String> {
@@ -322,6 +347,10 @@ pub struct SafetyLayer {
     pub trust_screens: Option<String>,
     pub thread_profiles: Option<Vec<String>>,
     pub coordinator_profiles: Option<Vec<String>>,
+    pub merge_gate: Option<Vec<String>>,
+    pub merge_gate_timeout: Option<u64>,
+    pub merge_method: Option<crate::pr::MergeMethod>,
+    pub auto_merge: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +526,19 @@ pub fn load_safety(config_dir: &Path, canonical_project_dir: &Path) -> Result<Sa
         yolo,
         thread_profiles: own.thread_profiles.or(default.thread_profiles),
         coordinator_profiles: own.coordinator_profiles.or(default.coordinator_profiles),
+        merge_gate: own.merge_gate.or(default.merge_gate).unwrap_or_default(),
+        merge_gate_timeout: own
+            .merge_gate_timeout
+            .or(default.merge_gate_timeout)
+            .unwrap_or(base.merge_gate_timeout),
+        merge_method: own
+            .merge_method
+            .or(default.merge_method)
+            .unwrap_or(base.merge_method),
+        auto_merge: own
+            .auto_merge
+            .or(default.auto_merge)
+            .unwrap_or(base.auto_merge),
     })
 }
 
@@ -517,8 +559,15 @@ pub fn load_safety_layers(
     canonical_project_dir: &Path,
 ) -> Result<(SafetyLayer, SafetyLayer)> {
     let file = config_dir.join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return Ok(Default::default());
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Default::default());
+        }
+        // Read as no settings, a file the user cannot read would drop a gate.
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} could not be read", file.display()));
+        }
     };
     load_safety_layers_from(&text, &file.display().to_string(), canonical_project_dir)
 }
@@ -554,6 +603,25 @@ pub fn load_safety_layers_from(
             && !matches!(value.as_str(), "coordinator" | "user")
         {
             bail!("{file}: trust_screens must be \"coordinator\" or \"user\", not {value:?}");
+        }
+        if let Some(argv) = &layer.merge_gate {
+            let Some(program) = argv.first().filter(|p| !p.is_empty()) else {
+                bail!(
+                    "{file}: merge_gate must be a command and its arguments, such as [\"/usr/local/bin/approve-merge\"], not {argv:?}"
+                );
+            };
+            // A relative path would resolve in the thread's repository or
+            // the project folder, which agents write.
+            if program.contains('/') && !Path::new(program).is_absolute() {
+                bail!(
+                    "{file}: merge_gate's program must be an absolute path or a name looked up on PATH, not {program:?}"
+                );
+            }
+        }
+        if let Some(secs) = layer.merge_gate_timeout
+            && !(1..=3600).contains(&secs)
+        {
+            bail!("{file}: merge_gate_timeout must be from 1 to 3600 seconds, not {secs}");
         }
     }
     Ok((default, own))
@@ -1088,6 +1156,38 @@ mod tests {
         // An `@` inside a path is not a machine.
         assert_eq!(parse_repo_arg("/a@b/c").machine, None);
         assert_eq!(parse_repo_arg("/a@b/c").path, "/a@b/c");
+    }
+
+    #[test]
+    fn merge_settings_are_validated_and_unknown_keys_still_load() {
+        let here = Path::new("/projects/demo");
+        let load = |table: &str| {
+            load_safety_layers_from(
+                &format!("[safety.\"/projects/demo\"]\n{table}"),
+                "config.toml",
+                here,
+            )
+        };
+        for bad in [
+            "merge_gate = []\n",
+            "merge_gate = [\"\"]\n",
+            // A relative path resolves in the thread's repository or the
+            // project folder, which agents write.
+            "merge_gate = [\"./approve.sh\"]\n",
+            "merge_gate = [\"bin/approve.sh\"]\n",
+            "merge_gate = \"./approve.sh\"\n",
+            "merge_gate_timeout = 0\n",
+            "merge_gate_timeout = 86400\n",
+            "merge_method = \"fast-forward\"\n",
+            "auto_merge = \"yes\"\n",
+        ] {
+            assert!(load(bad).is_err(), "{bad}");
+        }
+        load("merge_gate = [\"/opt/gates/approve.sh\", \"--pr\"]\nmerge_gate_timeout = 30\nmerge_method = \"rebase\"\nauto_merge = true\n").unwrap();
+        load("merge_gate = [\"approve-merge\"]\n").unwrap();
+        // A key a later version adds is ignored, so this binary keeps reading
+        // a config.toml written for a newer one, as an older binary reads ours.
+        load("a_later_setting = [1, 2]\n").unwrap();
     }
 
     #[test]

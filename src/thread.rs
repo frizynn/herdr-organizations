@@ -707,6 +707,10 @@ pub struct Live {
     pub self_report: Option<crate::progress::Record>,
     /// Seconds since that report (0 without one).
     pub report_age_secs: i64,
+    /// With a project merge gate, whether it passed on the pull request's
+    /// last read head commit; `None` without one, where the approval decides
+    /// Landing (`crate::merge_gate::Rule::landing`).
+    pub merge_gate: Option<bool>,
 }
 
 impl Live {
@@ -767,7 +771,10 @@ pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
     // 5: pull request and report facts. The harness showing `working` still
     // wins over an unread report: a report written mid-run is not a result.
     let pr_open = thread.pr_state.eq_ignore_ascii_case("open");
-    if pr_open && thread.pr_review.eq_ignore_ascii_case("approved") {
+    let ready = live
+        .merge_gate
+        .unwrap_or_else(|| thread.pr_review.eq_ignore_ascii_case("approved"));
+    if pr_open && ready {
         return Group::Landing;
     }
     let new_report = has_report && thread.report_hash != thread.acked_report_hash;
@@ -841,6 +848,7 @@ pub fn live_state(thread: &Thread, agents: &[Agent], panes: &[Pane], now: jiff::
         state_secs,
         self_report: None,
         report_age_secs: 0,
+        merge_gate: None,
     }
 }
 
@@ -1346,6 +1354,29 @@ mod tests {
         };
         assert_eq!(
             group(&t, &live(Some("idle"), 0), now()),
+            Group::ReadyForReview
+        );
+    }
+
+    #[test]
+    fn row5_with_a_merge_gate_landing_needs_its_pass_not_an_approval() {
+        let gated = |passed: bool| Live {
+            merge_gate: Some(passed),
+            ..live(Some("idle"), 0)
+        };
+        let t = Thread {
+            report_hash: "h".into(),
+            pr_state: "OPEN".into(),
+            pr_review: "REVIEW_REQUIRED".into(),
+            ..open_thread()
+        };
+        assert_eq!(group(&t, &gated(true), now()), Group::Landing);
+        let approved = Thread {
+            pr_review: "APPROVED".into(),
+            ..t
+        };
+        assert_eq!(
+            group(&approved, &gated(false), now()),
             Group::ReadyForReview
         );
     }

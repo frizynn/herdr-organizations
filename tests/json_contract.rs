@@ -702,7 +702,10 @@ Ship small PRs.
         "max_parallel_threads": 4,
         "auto_resolve_days": 7,
         "nudge": true,
-        "mute": false
+        "mute": false,
+        "merge_gate": "",
+        "merge_method": "squash",
+        "auto_merge": false
     });
     for (key, value) in fields.as_object().unwrap() {
         expected[key] = value.clone();
