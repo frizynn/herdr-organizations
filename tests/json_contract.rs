@@ -782,6 +782,37 @@ fn asks_json_lists_every_coordinators_asks_in_order() {
     );
 }
 
+/// `context` names the root's asks that do not close by their line and a
+/// reason of the binary's, never by their text; `project status` and `task
+/// lint` keep to the files they check.
+#[test]
+fn context_lists_the_asks_that_do_not_close() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\nObjective: Ship it\n## Asked\n- [done] SECRET-TEXT : merged (t-0001)\n- [working] Docs : writing\n- [open] Fine : waiting (t-0001)\n",
+    );
+    let context = fixture.text(&["context", "demo", "--peek"]);
+    let drift = context.split_once("## Drift").unwrap().1;
+    assert!(
+        drift.contains("- [ask-mismatch] STATUS.md:4 is marked done, but a linked PR is still open\n"),
+        "{drift}"
+    );
+    assert!(
+        drift.contains(
+            "- [ask-mismatch] STATUS.md:5 is marked working, but no thread, PR or task is linked\n"
+        ),
+        "{drift}"
+    );
+    assert!(!drift.contains("SECRET-TEXT"), "{drift}");
+    assert!(!drift.contains("STATUS.md:6"), "{drift}");
+    let status = fixture.json(&["project", "status", "demo", "--json"]);
+    assert_eq!(status["problems"], json!([]));
+    assert_eq!(status["drift"].get("ask_mismatch"), None);
+    assert_eq!(fixture.text(&["task", "lint", "demo"]), "");
+}
+
 /// A project whose status file has no asks lists none, and its documents
 /// are what they were.
 #[test]
