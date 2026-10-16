@@ -148,6 +148,8 @@ pub struct MachineMemory {
     /// the other projects' ticks.
     pub skip_until_tick: u64,
     pub last_poll_tick: u64,
+    /// The projects polled in `last_poll_tick`.
+    pub polled: std::collections::BTreeSet<String>,
 }
 
 /// What the ticker process remembers between ticks (not persisted).
@@ -182,16 +184,21 @@ impl Memory {
     }
 
     /// Remote machines are polled every fourth tick (about a minute), and not
-    /// at all for eight ticks after a failure.
-    pub fn machine_is_due(&mut self, machine: &str) -> bool {
+    /// at all for eight ticks after a failure. Every project with threads on
+    /// the machine is due once in the tick it is polled: the first one asked
+    /// must not use up the machine's turn for the others, and the passes
+    /// events run inside that tick poll nothing more.
+    pub fn machine_is_due(&mut self, machine: &str, project: &str) -> bool {
         let tick = self.tick;
         let entry = self.machines.entry(machine.to_string()).or_default();
-        let due = tick >= entry.skip_until_tick
-            && (entry.last_poll_tick == 0 || tick >= entry.last_poll_tick + REMOTE_EVERY_TICKS);
-        if due {
-            entry.last_poll_tick = tick;
+        if tick < entry.skip_until_tick {
+            return false;
         }
-        due
+        if entry.last_poll_tick == 0 || tick >= entry.last_poll_tick + REMOTE_EVERY_TICKS {
+            entry.last_poll_tick = tick;
+            entry.polled.clear();
+        }
+        tick == entry.last_poll_tick && entry.polled.insert(project.to_string())
     }
 
     pub fn record_machine(
@@ -2270,6 +2277,49 @@ mod tests {
 
     fn at(text: &str) -> jiff::Timestamp {
         text.parse().unwrap()
+    }
+
+    fn memory() -> Memory {
+        Memory {
+            started: jiff::Timestamp::now(),
+            gh: Outage::default(),
+            gh_login: None,
+            outage_secs: DEFAULT_OUTAGE_SECS,
+            tick: 0,
+            machines: BTreeMap::new(),
+            grouping: Default::default(),
+        }
+    }
+
+    #[test]
+    fn every_project_is_due_in_the_tick_a_machine_is_polled() {
+        let mut memory = memory();
+        memory.tick = 1;
+        // Two projects with threads on the same machine, asked in turn in one tick.
+        assert!(memory.machine_is_due("mac", "alpha"));
+        assert!(
+            memory.machine_is_due("mac", "beta"),
+            "the second project is polled too"
+        );
+        // Events run more passes inside the same tick: they poll nothing more.
+        assert!(!memory.machine_is_due("mac", "alpha"));
+        assert!(!memory.machine_is_due("mac", "beta"));
+        for tick in 2..=4 {
+            memory.tick = tick;
+            assert!(
+                !memory.machine_is_due("mac", "alpha"),
+                "not again before the fourth tick after"
+            );
+        }
+        memory.tick = 5;
+        assert!(memory.machine_is_due("mac", "alpha") && memory.machine_is_due("mac", "beta"));
+        // A failure in one project spares the others of the same tick, and the ticks after.
+        memory.record_machine("mac", Some("unreachable"), jiff::Timestamp::now());
+        assert!(!memory.machine_is_due("mac", "gamma"));
+        memory.tick = 5 + SKIP_TICKS_AFTER_FAILURE;
+        assert!(!memory.machine_is_due("mac", "alpha"));
+        memory.tick = 5 + SKIP_TICKS_AFTER_FAILURE + 1;
+        assert!(memory.machine_is_due("mac", "alpha"));
     }
 
     #[test]
