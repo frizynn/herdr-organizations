@@ -22,7 +22,7 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   AGENTS.md, CLAUDE.md    who is the coordinator, by working directory; written by the binary
   HANDOFF.md              compact objective, decisions, active work and next action; the coordinator's
   MEMORY.md, memory/      project memory; the coordinator's
-  nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md
+  nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md; a coordinator node's own HANDOFF.md
   templates/<name>/       the project's node templates: TEMPLATE.toml, RULES.md, MEMORY.md, memory/
   TASKS.md                the task list, each task with optional indented notes; the coordinator's
   routines/<name>.md      routines, including pr-followup.md; the coordinator's
@@ -47,7 +47,7 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 
 `PROJECT.md` settings, all changeable from the Projects popup's settings section, from chat, or with `herdr-projects set <project> <key> <value>`: `name` (the workspace label), `goal`, `icon` and `tone` (the glyph and colour a client such as Nenu draws for the project; empty, the default, lets the client pick; the popup does not list them), `repos` (`repos.add PATH[@MACHINE]`, `repos.remove PATH`), `coordinator_profile` and `thread_profile` (the default [profiles](#agent-profiles); the old names `coordinator_agent` and `thread_agent` still read), `max_parallel_threads` (10), `auto_resolve_days` (7), `nudge` (`true`), `mute` (`false`).
 
-The virtual `root` is the project coordinator. A thread record is a node: a new worker has `parent_id = "root"`, role `worker` and cannot spawn. A local coordinator node can create worker or coordinator children at any depth when `can_spawn = true`. Records written before nodes load as workers under `root`; reading never rewrites them. A brief includes the project context, then each ancestor's node scope from root to parent, then the node's own; siblings and descendants are excluded. See [Architecture](architecture.md) for validation and storage details.
+The virtual `root` is the project coordinator. A thread record is a node: a new worker has `parent_id = "root"`, role `worker` and cannot spawn. A local coordinator node can create worker or coordinator children at any depth when `can_spawn = true`. Records written before nodes load as workers under `root`; reading never rewrites them. A brief includes the project context, then each ancestor's node scope from root to parent, then the node's own; siblings and descendants are excluded. A coordinator node that may spawn gets a coordinator brief instead of the thread brief, plus its own `nodes/<id>/HANDOFF.md` (at most 8 KiB), which no other brief includes; `node show` prints that path. See [Architecture](architecture.md) for validation and storage details.
 
 ## Commands
 
@@ -203,6 +203,20 @@ thread_profiles = ["luna"]         # this project's own list wins
 - **Allow-lists.** A project's own `thread_profiles` / `coordinator_profiles` wins, then `[safety.default]`'s, then every profile. A profile off the list is refused at `thread start`, `thread restart` and `open`, and the ticker checks again at every launch: a thread whose profile you removed or disallowed since fails with the reason and an inbox item. The project's defaults (`thread_profile`, `coordinator_profile` in PROJECT.md) must be allowed too; `doctor` says when one is not.
 - **Who changes what.** Profiles and lists live only in config.toml, which the coordinator never writes. `profile add/edit/remove/allow/default` refuse without a person at a terminal, as `routine approve` does; the Projects popup's settings section writes them directly (`n` new profile, `↵` edit, `d` delete, `↵` on a list toggles profiles with space). The default profiles in PROJECT.md are ordinary settings the coordinator may change when you ask, only to an allowed profile. This is a soft boundary: an agent that fakes a terminal or edits config.toml by hand is stopped only by its own permission prompts.
 - **Old threads and coordinators.** A thread started before profiles keeps its harness and its stored model flag. `open` resumes or reuses a coordinator only when it runs the same profile (and, when they were given, the same model and effort: see [node flags](#node-flags)); one started before profiles counts as the built-in of its kind.
+- **A lean coordinator, optional.** A coordinator node's brief already tells it to hand every hands-on task to a child. To also take Claude Code's edit tools away from it, give it a profile with raw arguments, allowed for coordinators only:
+
+  ```toml
+  [profiles.lean-coordinator]
+  agent = "claude"
+  args = ["--disallowedTools", "Edit,Write,NotebookEdit"]
+  description = "Coordinator node without edit tools"
+
+  [safety.default]
+  coordinator_profiles = ["claude", "lean-coordinator"]
+  thread_profiles = ["claude"]
+  ```
+
+  Start the node with `--profile lean-coordinator`. Its children get its profile unless they name one, so keep it off `thread_profiles`: a worker started without `--profile` is then refused instead of starting without edit tools. Use a profile rather than `--raw-agent-arg`, because a node's raw arguments pass to every child on the same harness and one child cannot drop them. This changes argv only and is not a security boundary: the agent keeps its shell and can still write files through it, which is also how it updates its own `HANDOFF.md`. `--disallowedTools` is Claude Code's flag (2.1.301); other harnesses need their own.
 - **Choices for a client.** `profile list --project P --json` prints, for the coordinator and for threads, the harnesses that role may run (installed, signed in and allowed), each with its effort levels and default model, every allowed profile with its model and effort, the project's default, and the coordinator's last choice ([docs/json.md](json.md#profile-choices)).
 
 ## Task owners
