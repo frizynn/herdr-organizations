@@ -632,6 +632,23 @@ const ASK_GROUPS: [(&str, &str, Style); 5] = [
     ("OTHER LINES", "·", DIM),
 ];
 
+/// The `## Needs your decision` lines of every coordinator still open.
+fn open_decisions(snap: &Snapshot) -> Vec<(&ProjectView, &Node, &String)> {
+    snap.projects
+        .iter()
+        .flat_map(|p| {
+            p.coordinators
+                .iter()
+                .filter(|c| !c.resolved)
+                .flat_map(move |c| {
+                    c.status_file
+                        .iter()
+                        .flat_map(move |s| s.needs_decision.iter().map(move |d| (p, c, d)))
+                })
+        })
+        .collect()
+}
+
 /// `<ask> : <answer>`, or the ask alone.
 fn said(ask: &crate::asks::Ask) -> String {
     if ask.answer.is_empty() {
@@ -1900,21 +1917,7 @@ impl<'a> App<'a> {
     /// its links confirm. Coordinators' decisions join what waits on you.
     fn asks_lines(&self, width: usize) -> Vec<Line> {
         let asks = self.snap.asks();
-        let decisions: Vec<(&ProjectView, &Node, &String)> = self
-            .snap
-            .projects
-            .iter()
-            .flat_map(|p| {
-                p.coordinators
-                    .iter()
-                    .filter(|c| !c.resolved)
-                    .flat_map(move |c| {
-                        c.status_file
-                            .iter()
-                            .flat_map(move |s| s.needs_decision.iter().map(move |d| (p, c, d)))
-                    })
-            })
-            .collect();
+        let decisions = open_decisions(&self.snap);
         let fit = |text: &str| term::fit(text, width.saturating_sub(7));
         let row = |p: &ProjectView,
                    coordinator: &str,
@@ -1983,16 +1986,7 @@ impl<'a> App<'a> {
         } else {
             let asks = self.snap.asks();
             let count = |rank: u8| asks.iter().filter(|(_, a)| a.ask.rank() == rank).count();
-            let waiting = count(0)
-                + self
-                    .snap
-                    .projects
-                    .iter()
-                    .flat_map(|p| &p.coordinators)
-                    .filter(|c| !c.resolved)
-                    .filter_map(|c| c.status_file.as_ref())
-                    .map(|s| s.needs_decision.len())
-                    .sum::<usize>();
+            let waiting = count(0) + open_decisions(&self.snap).len();
             let summary = [
                 "all coordinators".to_string(),
                 counted(waiting, "waits on you", "wait on you"),

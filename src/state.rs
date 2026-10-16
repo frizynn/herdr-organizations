@@ -1014,6 +1014,23 @@ mod tests {
         );
     }
 
+    /// A model a binary from before asks wrote reads, with no asks and no
+    /// status file on its coordinators, so the popup shows the file itself.
+    #[test]
+    fn a_model_written_before_asks_reads_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            path(dir.path()),
+            r#"{"schema_version":1,"generated":"2026-10-10T10:00:00Z","projects":[{"slug":"demo","coordinators":[{"id":"root","role":"coordinator"}]}]}"#,
+        )
+        .unwrap();
+        let snapshot = read(dir.path()).unwrap();
+        let view = snapshot.project("demo").unwrap();
+        assert!(view.asks.is_empty());
+        assert_eq!(view.coordinators[0].status_file, None);
+        assert!(view.card("root").unwrap().status.is_none());
+    }
+
     #[test]
     fn a_node_carries_the_verdict_of_its_report() {
         let world = World::new();

@@ -113,6 +113,20 @@ pub struct Link {
     pub pr_state: String,
 }
 
+impl Link {
+    /// `t-0007 working (PR open)`, `#12 merged`, `task:3 done`, a page's URL.
+    pub fn words(&self) -> String {
+        let mut words = self.text.clone();
+        if !self.state.is_empty() {
+            words = format!("{words} {}", self.state);
+        }
+        if self.kind == LinkKind::Thread && !self.pr_state.is_empty() {
+            words = format!("{words} (PR {})", self.pr_state);
+        }
+        words
+    }
+}
+
 /// One line under `## Asked`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -173,23 +187,7 @@ impl Records {
     pub fn new(threads: Vec<Thread>, tasks: Vec<Task>) -> Records {
         Records { threads, tasks }
     }
-}
 
-impl Link {
-    /// `t-0007 working (PR open)`, `#12 merged`, `task:3 done`, a page's URL.
-    pub fn words(&self) -> String {
-        let mut words = self.text.clone();
-        if !self.state.is_empty() {
-            words = format!("{words} {}", self.state);
-        }
-        if self.kind == LinkKind::Thread && !self.pr_state.is_empty() {
-            words = format!("{words} (PR {})", self.pr_state);
-        }
-        words
-    }
-}
-
-impl Records {
     pub fn load(ctx: &Ctx, project: &Project) -> Records {
         Records::new(thread::list(project), tasks::on_disk(ctx, project))
     }

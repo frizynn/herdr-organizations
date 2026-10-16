@@ -53,6 +53,7 @@ Open **Herdr Organizations: launcher** (or the bound key) in a disposable sessio
 7. Press `s`: change dock side and notification choice with Left/Right, rebind a command (Enter, then a key) and confirm `~/.config/herdr-projects/tui.toml` holds only the changed key. A conflicting key is refused with a message.
 8. Press Esc until the popup closes and confirm no `herdr-organizations pane ui` process remains.
 9. Click a row to select it and click it again to open it when the client forwards mouse events.
+10. Give the root's `STATUS.md` a `done` ask linked to a thread whose pull request is open, a `needs-decision` ask and a line under `## Needs your decision`. Confirm the root's row under NEEDS YOU says `2 decisions · 1 does not close`, `y` opens Your asks with the groups Wait on you, Does not close, In progress and Done, and Enter on an ask opens its coordinator's card: objective, what waits on you, its asks, its open children with their verdicts and their pull requests.
 
 ## Native sidebar tokens and headers
 
