@@ -5196,6 +5196,36 @@ mod tests {
         });
     }
 
+    /// A resolved coordinator takes no answer: its card shows nothing under
+    /// WAITS ON YOU, and its unanswered decision ask with the other asks.
+    #[test]
+    fn a_resolved_coordinators_card_lists_its_decision_ask_with_the_others() {
+        with_app(|app| {
+            with_asks(&mut app.snap);
+            let project = &mut app.snap.projects[0];
+            project.coordinators[1].resolved = true;
+            project.coordinators[1].status = Status::Done;
+            project.asks.push(state::AskView {
+                coordinator: "t-0001".into(),
+                ask: crate::asks::Ask {
+                    state: crate::asks::State::NeedsDecision,
+                    text: "Pick the card vendor".into(),
+                    answer: "A or B".into(),
+                    ..crate::asks::Ask::default()
+                },
+            });
+            app.open_detail("acme", "t-0001");
+            let text = app.render(84, 40).text();
+            assert!(!text.contains("WAITS ON YOU"), "{text}");
+            let row = text
+                .lines()
+                .find(|l| l.contains("Pick the card vendor"))
+                .unwrap_or_else(|| panic!("{text}"));
+            assert!(row.contains("●"), "{row}");
+            assert!(text.contains("Landing copy"), "{text}");
+        });
+    }
+
     /// A coordinator's details show the top of its STATUS.md, and Enter opens
     /// the file the way `open-file` does, after the popup has closed.
     #[test]
