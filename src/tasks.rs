@@ -405,10 +405,16 @@ pub fn compact_tracked(tasks: &[Task]) -> String {
     let mut list = None;
     for task in tasks {
         if list != Some(&task.list) {
-            list = Some(&task.list);
-            if !task.list.is_empty() {
-                out.push(format!("### {}", task.list));
+            // Tasks with no list need a heading too once another list came.
+            if !task.list.is_empty() || list.is_some() {
+                let name = if task.list.is_empty() {
+                    "(no list)"
+                } else {
+                    &task.list
+                };
+                out.push(format!("### {name}"));
             }
+            list = Some(&task.list);
         }
         let owner = match task.owner.to_string() {
             owner if owner.is_empty() => owner,
@@ -894,6 +900,20 @@ mod tests {
             "{error}"
         );
         assert!(link(text, "Clean up", "t-0001").is_err());
+    }
+
+    #[test]
+    fn tracker_tasks_compact_under_their_lists_with_ids() {
+        let task = |id: &str, list: &str| Task {
+            id: id.into(),
+            title: format!("Task {id}"),
+            list: list.into(),
+            ..Task::default()
+        };
+        assert_eq!(
+            compact_tracked(&[task("A-1", ""), task("A-2", "Now"), task("A-3", "")]),
+            "- [ ] [A-1] Task A-1\n### Now\n- [ ] [A-2] Task A-2\n### (no list)\n- [ ] [A-3] Task A-3"
+        );
     }
 
     #[test]
