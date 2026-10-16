@@ -1070,7 +1070,14 @@ pub fn brief(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
         "blocked" => bail!(
             "{id}'s pane shows a prompt: `thread read` shows it, `thread keys` answers it; then run `thread brief` again"
         ),
-        state if !crate::herdr::ready_state(state) && record.brief_attempts == 0 => {
+        state
+            if record.brief_attempts == 0
+                && !pane.agent.ready_for_brief(if pane.agent.agent.is_empty() {
+                    &record.agent
+                } else {
+                    &pane.agent.agent
+                }) =>
+        {
             bail!("{id}'s agent is {state}, not ready for its brief yet; try again shortly")
         }
         _ => {}
