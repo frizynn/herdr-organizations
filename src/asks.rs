@@ -8,8 +8,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::tasks::Task;
-use crate::thread::Thread;
+use crate::paths::Ctx;
+use crate::project::Project;
+use crate::tasks::{self, Task};
+use crate::thread::{self, Group, Thread};
+use crate::{pr, sidebar, threads};
 
 /// What the coordinator wrote in brackets; `unknown` for a line that does
 /// not follow the format.
@@ -49,25 +52,26 @@ pub enum LinkKind {
     Page,
 }
 
-/// How far the work an ask links to got, as its records say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// How far the work an ask links to got, as its records say. In the order
+/// a summary prefers: the least finished link wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Confirmed {
     /// No link has a state the records know.
     #[default]
     #[serde(rename = "")]
     Unconfirmed,
-    /// A linked thread works or waits on the user, a linked pull request is
-    /// open, or a linked task is still to do.
-    InProgress,
-    /// A linked thread stopped without being resolved (idle, ready for
-    /// review, landing), and nothing linked is in progress.
-    Stopped,
+    /// Every linked thread is resolved, pull request merged and task done.
+    Done,
     /// Nothing linked is in progress or stopped, and a linked thread failed
     /// or a linked pull request was closed without merging.
     Failed,
-    /// Every linked thread is resolved, pull request merged and task done.
-    Done,
+    /// A linked thread stopped without being resolved (idle, ready for
+    /// review, landing), and nothing linked is in progress.
+    Stopped,
+    /// A linked thread works or waits on the user, a linked pull request is
+    /// open, or a linked task is still to do.
+    InProgress,
 }
 
 /// One link of an ask, and what the records say about it.
@@ -78,7 +82,7 @@ pub struct Link {
     /// As written in the status file.
     pub text: String,
     /// The thread id, pull request URL, task id or page URL it names;
-    /// empty when the records do not know it.
+    /// empty for a thread id, `#N` or task the records do not know.
     pub target: String,
     /// The thread it names, or whose pull request it is; empty otherwise.
     pub thread: String,
@@ -145,10 +149,318 @@ impl Records {
     }
 }
 
+impl Records {
+    pub fn load(ctx: &Ctx, project: &Project) -> Records {
+        Records::new(thread::list(project), tasks::on_disk(ctx, project))
+    }
+
+    fn thread(&self, id: &str) -> Option<&Thread> {
+        self.threads.iter().find(|t| t.id == id)
+    }
+
+    /// The thread whose pull request this is; with several, the newest.
+    fn pr_thread(&self, is_it: impl Fn(&str) -> bool) -> Option<&Thread> {
+        self.threads
+            .iter()
+            .rev()
+            .find(|t| !t.pr.is_empty() && is_it(&t.pr))
+    }
+}
+
 /// Reads a status file's text. It never fails: a line under `## Asked` that
 /// does not follow the format is an ask in state `unknown` with its text.
-pub fn read(_text: &str, _records: &Records) -> Contents {
-    Contents::default()
+pub fn read(text: &str, records: &Records) -> Contents {
+    let mut contents = Contents::default();
+    let mut section = Section::Other;
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if contents.objective.is_empty()
+            && let Some(objective) = line.strip_prefix("Objective:")
+        {
+            contents.objective = clean(objective);
+            continue;
+        }
+        if line.starts_with('#') {
+            section = Section::of(line);
+            continue;
+        }
+        if line.is_empty() || is_placeholder(line) {
+            continue;
+        }
+        match section {
+            Section::Asked => contents.asks.push(ask(index + 1, line, records)),
+            Section::NeedsDecision => contents
+                .needs_decision
+                .push(clean(bullet(line).unwrap_or(line))),
+            Section::Other => {}
+        }
+    }
+    contents
+}
+
+#[derive(Clone, Copy)]
+enum Section {
+    Asked,
+    NeedsDecision,
+    Other,
+}
+
+impl Section {
+    fn of(heading: &str) -> Section {
+        let name = heading.strip_prefix("## ").unwrap_or("").trim();
+        if name.eq_ignore_ascii_case("asked") {
+            Section::Asked
+        } else if name.eq_ignore_ascii_case("needs your decision") {
+            Section::NeedsDecision
+        } else {
+            Section::Other
+        }
+    }
+}
+
+/// The text after a `- ` or `* ` bullet.
+fn bullet(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
+}
+
+/// `- (none)` and the like, which coordinators write under an empty heading.
+fn is_placeholder(line: &str) -> bool {
+    let text = bullet(line).unwrap_or(line);
+    let text = text.strip_prefix('(').unwrap_or(text);
+    let text = text.trim_end_matches('.');
+    let text = text.strip_suffix(')').unwrap_or(text);
+    text.trim().eq_ignore_ascii_case("none")
+}
+
+/// One line, without control characters: the text is shown in a terminal.
+fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `- [state] <ask> : <answer> (<links>)`; anything else is `unknown`.
+fn ask(line: usize, text: &str, records: &Records) -> Ask {
+    let unknown = |text: &str| Ask {
+        line,
+        text: clean(text),
+        ..Ask::default()
+    };
+    let Some(body) = bullet(text) else {
+        return unknown(text);
+    };
+    let Some((word, rest)) = body.strip_prefix('[').and_then(|b| b.split_once(']')) else {
+        return unknown(body);
+    };
+    let Some(state) = [
+        State::Open,
+        State::Working,
+        State::NeedsDecision,
+        State::Answered,
+        State::Done,
+    ]
+    .into_iter()
+    .find(|s| s.word().eq_ignore_ascii_case(word.trim())) else {
+        return unknown(body);
+    };
+    let (rest, tokens) = split_links(rest.trim());
+    let (said, answer) = rest.split_once(" : ").unwrap_or((rest, ""));
+    let links: Vec<Link> = tokens.iter().map(|t| link(t, records)).collect();
+    Ask {
+        line,
+        state,
+        text: clean(said),
+        answer: clean(answer),
+        confirmed: confirmed(&links),
+        mismatch: mismatch(state, &links).unwrap_or_default().to_string(),
+        links,
+    }
+}
+
+/// The text before a final parenthesis and the links in it, separated by
+/// commas or spaces. A parenthesis with no link in it is part of the text.
+fn split_links(text: &str) -> (&str, Vec<&str>) {
+    let Some(inner) = text.strip_suffix(')') else {
+        return (text, Vec::new());
+    };
+    let mut depth = 1;
+    let Some(open) = inner.char_indices().rev().find_map(|(i, c)| {
+        match c {
+            ')' => depth += 1,
+            '(' => depth -= 1,
+            _ => {}
+        }
+        (depth == 0).then_some(i)
+    }) else {
+        return (text, Vec::new());
+    };
+    let tokens: Vec<&str> = inner[open + 1..]
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|t| t.trim_end_matches(['.', ';', ':']))
+        .filter(|t| kind(t).is_some())
+        .collect();
+    if tokens.is_empty() {
+        return (text, Vec::new());
+    }
+    (text[..open].trim_end(), tokens)
+}
+
+/// What a token in the links parenthesis names, `None` for other words.
+fn kind(token: &str) -> Option<LinkKind> {
+    if token.strip_prefix("task:").is_some_and(|id| !id.is_empty()) {
+        Some(LinkKind::Task)
+    } else if thread::validate_id(token).is_ok() {
+        Some(LinkKind::Thread)
+    } else if pr_number(token).is_some() || pr_url(token).is_some() {
+        Some(LinkKind::Pr)
+    } else if token.starts_with("https://") || token.starts_with("http://") {
+        Some(LinkKind::Page)
+    } else {
+        None
+    }
+}
+
+/// `#12`: a pull request of one of the project's threads.
+fn pr_number(token: &str) -> Option<&str> {
+    token
+        .strip_prefix('#')
+        .filter(|n| (1..=9).contains(&n.len()) && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// A pull request URL, without what follows its number (`/files`).
+fn pr_url(token: &str) -> Option<String> {
+    let rest = token.strip_prefix("https://github.com/")?;
+    let url = format!(
+        "https://github.com/{}",
+        rest.split('/').take(4).collect::<Vec<_>>().join("/")
+    );
+    pr::valid_pr_url(&url).then_some(url)
+}
+
+fn link(token: &str, records: &Records) -> Link {
+    let kind = kind(token).unwrap_or_default();
+    let mut link = Link {
+        kind,
+        text: clean(token),
+        ..Link::default()
+    };
+    let of_thread = |link: &mut Link, t: &Thread| {
+        link.thread = t.id.clone();
+        link.title = clean(&t.title);
+    };
+    match kind {
+        LinkKind::Thread => match records.thread(token) {
+            Some(t) => {
+                link.target = t.id.clone();
+                link.state = thread_state(t).into();
+                of_thread(&mut link, t);
+            }
+            None => link.state = "missing".into(),
+        },
+        LinkKind::Pr => {
+            let url = pr_url(token);
+            let found = match (pr_number(token), &url) {
+                (Some(number), _) => records.pr_thread(|pr| sidebar::pr_number(pr) == Some(number)),
+                (None, Some(url)) => {
+                    let (repo, number) = pr::url_parts(url).unwrap_or_default();
+                    records.pr_thread(|pr| {
+                        pr::url_parts(pr)
+                            .is_some_and(|(r, n)| r.eq_ignore_ascii_case(&repo) && n == number)
+                    })
+                }
+                (None, None) => None,
+            };
+            match found {
+                Some(t) => {
+                    link.target = t.pr.clone();
+                    link.state = if t.pr_merged() {
+                        "merged".into()
+                    } else {
+                        t.pr_state.to_ascii_lowercase()
+                    };
+                    of_thread(&mut link, t);
+                }
+                None => link.target = url.unwrap_or_default(),
+            }
+        }
+        LinkKind::Task => {
+            let id = token.strip_prefix("task:").unwrap_or_default();
+            match tasks::linked(&records.tasks, id) {
+                Some(task) => {
+                    link.target = id.to_string();
+                    link.title = clean(&task.title);
+                    link.state = if task.done { "done" } else { "todo" }.into();
+                }
+                None => link.state = "missing".into(),
+            }
+        }
+        LinkKind::Page => link.target = token.to_string(),
+    }
+    link
+}
+
+/// A thread's group as the ticker last recorded it, or `failed`.
+fn thread_state(t: &Thread) -> &'static str {
+    match t.status {
+        thread::Status::Failed => "failed",
+        thread::Status::Starting => Group::Working.token(),
+        _ => threads::recorded_group(t).token(),
+    }
+}
+
+fn progress(link: &Link) -> Confirmed {
+    match (link.kind, link.state.as_str()) {
+        (LinkKind::Thread, "working" | "waiting-on-you")
+        | (LinkKind::Pr, "open")
+        | (LinkKind::Task, "todo") => Confirmed::InProgress,
+        (LinkKind::Thread, "ready-for-review" | "landing" | "idle") => Confirmed::Stopped,
+        (LinkKind::Thread, "failed") | (LinkKind::Pr, "closed") => Confirmed::Failed,
+        (LinkKind::Thread, "resolved") | (LinkKind::Pr, "merged") | (LinkKind::Task, "done") => {
+            Confirmed::Done
+        }
+        _ => Confirmed::Unconfirmed,
+    }
+}
+
+/// The least finished of the links.
+fn confirmed(links: &[Link]) -> Confirmed {
+    links.iter().map(progress).max().unwrap_or_default()
+}
+
+/// Why an ask in `state` does not close with its links, one row per case,
+/// the first that matches wins. `None` when it closes, and when nothing
+/// confirms it: an ask with no link is a mismatch only while it is working.
+fn mismatch(state: State, links: &[Link]) -> Option<&'static str> {
+    let any = |kind: LinkKind, states: &[&str]| {
+        links
+            .iter()
+            .any(|l| l.kind == kind && states.contains(&l.state.as_str()))
+    };
+    let finished = matches!(confirmed(links), Confirmed::Done | Confirmed::Failed);
+    match state {
+        State::Done | State::Answered if any(LinkKind::Pr, &["open"]) => {
+            Some("a linked PR is still open")
+        }
+        State::Done | State::Answered if any(LinkKind::Thread, &["working", "waiting-on-you"]) => {
+            Some("a linked thread is still working")
+        }
+        State::Working if links.is_empty() => Some("no thread, PR or task is linked"),
+        State::Open | State::Working if finished => {
+            links.iter().find_map(|l| match (l.kind, l.state.as_str()) {
+                (LinkKind::Thread, "resolved") => Some("a linked thread is resolved"),
+                (LinkKind::Thread, "failed") => Some("a linked thread failed"),
+                (LinkKind::Pr, "merged") => Some("a linked PR is merged"),
+                (LinkKind::Pr, "closed") => Some("a linked PR is closed"),
+                (LinkKind::Task, "done") => Some("a linked task is done"),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -174,10 +486,28 @@ mod tests {
             vec![
                 thread("t-0001", Status::Open, Group::Working, "", ""),
                 thread("t-0002", Status::Open, Group::Idle, "", ""),
-                thread("t-0003", Status::Resolved, Group::Resolved, &pr(12), "MERGED"),
-                thread("t-0004", Status::Open, Group::ReadyForReview, &pr(13), "OPEN"),
+                thread(
+                    "t-0003",
+                    Status::Resolved,
+                    Group::Resolved,
+                    &pr(12),
+                    "MERGED",
+                ),
+                thread(
+                    "t-0004",
+                    Status::Open,
+                    Group::ReadyForReview,
+                    &pr(13),
+                    "OPEN",
+                ),
                 thread("t-0005", Status::Failed, Group::Idle, "", ""),
-                thread("t-0006", Status::Resolved, Group::Resolved, &pr(14), "CLOSED"),
+                thread(
+                    "t-0006",
+                    Status::Resolved,
+                    Group::Resolved,
+                    &pr(14),
+                    "CLOSED",
+                ),
                 thread("t-0007", Status::Open, Group::WaitingOnYou, "", ""),
             ],
             crate::tasks::parse("## Now\n- [ ] Write the docs\n- [x] Ship it\n"),
@@ -234,7 +564,14 @@ mod tests {
         let links: Vec<(LinkKind, &str, &str, &str)> = ask
             .links
             .iter()
-            .map(|l| (l.kind, l.target.as_str(), l.thread.as_str(), l.state.as_str()))
+            .map(|l| {
+                (
+                    l.kind,
+                    l.target.as_str(),
+                    l.thread.as_str(),
+                    l.state.as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             links,
@@ -327,7 +664,10 @@ mod tests {
         assert_eq!(confirmed("t-0003 t-0002"), Confirmed::Stopped);
         assert_eq!(confirmed("t-0003 t-0005"), Confirmed::Failed);
         assert_eq!(confirmed("t-0003 #12 task:3"), Confirmed::Done);
-        assert_eq!(confirmed("https://example.com t-9999"), Confirmed::Unconfirmed);
+        assert_eq!(
+            confirmed("https://example.com t-9999"),
+            Confirmed::Unconfirmed
+        );
         assert_eq!(one("- [open] x : y").confirmed, Confirmed::Unconfirmed);
     }
 
