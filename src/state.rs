@@ -216,6 +216,8 @@ pub struct AskView {
 pub struct Card<'a> {
     /// The coordinator is resolved: `asks::listed` decides what it shows.
     pub resolved: bool,
+    /// The token caps the coordinator reached (`Node::over_cap`).
+    pub over_cap: &'a [String],
     pub status: Option<&'a StatusCard>,
     /// Most pressing first (`asks::Ask::rank`), as `asks::listed` shows them.
     pub asks: Vec<&'a asks::Ask>,
@@ -352,6 +354,7 @@ impl ProjectView {
             .collect();
         Some(Card {
             resolved: node.resolved,
+            over_cap: &node.over_cap,
             status: node.status_file.as_ref(),
             asks,
             children,

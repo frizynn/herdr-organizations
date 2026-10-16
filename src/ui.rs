@@ -2042,6 +2042,13 @@ impl<'a> App<'a> {
                     .at(-2, format!("status updated {age}"), DIM),
             );
         }
+        if !card.over_cap.is_empty() {
+            lines.push(Line::new().at(1, "TOKENS", HEAD).at(
+                12,
+                format!("over cap: {}", card.over_cap.join(", ")),
+                YELLOW,
+            ));
+        }
         let waiting = card.waiting();
         if !waiting.is_empty() {
             lines.push(Line::new());
@@ -2098,6 +2105,9 @@ impl<'a> App<'a> {
                     .at(35, child.status.word(), status_style(child.status));
                 if let Some(verdict) = child.verdict {
                     line = line.at(47, verdict.words(), verdict_style(verdict));
+                }
+                if !child.over_cap.is_empty() {
+                    line = line.at(63, "over cap", YELLOW);
                 }
                 lines.push(line);
             }
@@ -5172,6 +5182,15 @@ mod tests {
                 .find(|l| l.contains("billing api"))
                 .unwrap_or_else(|| panic!("{text}"));
             assert!(child.contains("done"), "the verdict: {child}");
+            assert!(!text.contains("over cap"), "{text}");
+
+            // A coordinator or a child at a token cap is marked on the card.
+            app.snap.projects[0].coordinators[1].over_cap = vec!["context_warn".into()];
+            app.snap.projects[0].threads[2].over_cap = vec!["compaction_warn".into()];
+            let text = app.render(84, 40).text();
+            assert!(text.contains("TOKENS     over cap: context_warn"), "{text}");
+            let child = text.lines().find(|l| l.contains("billing api")).unwrap();
+            assert!(child.contains("over cap"), "{child}");
             assert!(text.contains("PULL REQUESTS"), "{text}");
             assert!(text.contains("#1342"), "{text}");
         });
