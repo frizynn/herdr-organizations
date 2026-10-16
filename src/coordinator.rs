@@ -767,10 +767,11 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = writeln!(out, "Commands: {prefix}");
     let _ = writeln!(out, "Project: {slug} ({})", project.status());
     let _ = writeln!(out, "Folder: {}", project.dir().display());
-    if let Some((name, chars)) = crate::drift::status_over(project) {
+    if let Some(chars) = crate::drift::status_over(project) {
         let _ = writeln!(
             out,
-            "{name} has {chars} characters and this digest shows only the first {MAX_CHARS}; compact it before anything else."
+            "{} has {chars} characters and this digest shows only the first {MAX_CHARS}; compact it before anything else.",
+            status_file::NAME
         );
     }
 
@@ -859,9 +860,8 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         }
     );
 
-    let status = status_file::root(project);
-    let _ = writeln!(out, "\n## Status ({})", status.name);
-    let text = status.text();
+    let _ = writeln!(out, "\n## Status ({})", status_file::NAME);
+    let text = status_file::root_text(project);
     let chars = text.chars().count();
     let bounded: String = text.chars().take(MAX_CHARS).collect();
     let _ = writeln!(
@@ -873,7 +873,7 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
             format!(
                 "{}\n\n(truncated after {MAX_CHARS} characters; compact {})",
                 bounded.trim(),
-                status.name
+                status_file::NAME
             )
         } else {
             bounded.trim().to_string()

@@ -56,7 +56,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `counts` | object | Group token to number of threads. Groups with no threads are left out. |
 | `icon` | string | The glyph name the user picked, empty when none was picked. |
 | `tone` | string | The colour name the user picked, empty when none was picked. |
-| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, or `HANDOFF.md` in a project from before the rename while only that exists. `null` when neither exists. |
+| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`. `null` when it does not exist. |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -195,16 +195,16 @@ EOF
 
 ## Project status
 
-`project status` is the project's work in one document, for a client's notes view such as the one Nenu plans for its project panel. The binary computes it on every call from `TASKS.md`, the root's status file (`STATUS.md`, or `HANDOFF.md` before the rename), the thread records with their pull requests, and the inbox. Nobody writes it, so it never disagrees with them. It asks the project's Herdr session for live groups, as `overview` does, and falls back to the recorded group when the session is unreachable.
+`project status` is the project's work in one document, for a client's notes view such as the one Nenu plans for its project panel. The binary computes it on every call from `TASKS.md`, the root's status file (`STATUS.md`), the thread records with their pull requests, and the inbox. Nobody writes it, so it never disagrees with them. It asks the project's Herdr session for live groups, as `overview` does, and falls back to the recorded group when the session is unreachable.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `project` | string | The slug. |
 | `generated_at` | string | RFC 3339, when it was computed. |
-| `objective` | string | The status file's `Objective:` line; in a file from before the rename, the first paragraph under `## Current objective`, its lines joined by spaces. Empty without one. |
-| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing); `status_file` (`STATUS.md`, or `HANDOFF.md` while only that exists), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 8,000); `handoff_updated`, `handoff_chars` and `handoff_limit`, the same values under their names from before the rename; and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
+| `objective` | string | The status file's `Objective:` line. Empty without one. |
+| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing); `status_file` (`STATUS.md`), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 8,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
 | `items` | [Status item] | One per task in `TASKS.md`, in file order, then one per thread that is not resolved and that no task names, in id order. |
-| `drift` | object | How many problems of each rule (`status_over_limit`, `status_rename`, `status_stale`, `handoff_over_limit` (the same count as `status_over_limit`), `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
+| `drift` | object | How many problems of each rule (`status_over_limit`, `status_stale`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
 | `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |
 | `next` | `[{thread, line}]` | The Next lines of every thread that is not resolved, in id order. |
 
@@ -229,7 +229,7 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `rule` | string | `status-over-limit`, `status-rename` or `status-stale` (the root's status file; not in `task lint`; `status-over-limit` was `handoff-over-limit` before the rename), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. |
+| `rule` | string | `status-over-limit` or `status-stale` (the root's status file; not in `task lint`), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. |
 | `line` | number | The task's line in `TASKS.md`, from 1; 0 for the status file. |
 | `task` | string | The task's title, empty for the status file. |
 | `thread` | string | The thread the task line names, empty when none. |

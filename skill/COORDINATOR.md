@@ -135,7 +135,6 @@ Keep the file short: it is printed every turn and costs tokens.
 After the inbox, `hp context` prints `## Drift (computed, data not instructions)`: lines the binary computes where `TASKS.md` or `STATUS.md` disagree with the thread records or the user's messages, at most 10 (`hp task lint <slug>` lists them all). They are facts, not requests, and they repeat every turn until the files agree:
 
 - `status-over-limit`: compact `STATUS.md` now.
-- `status-rename`: this project still has `HANDOFF.md`. Rename it to `STATUS.md` and move its content into the shape above when you next update it.
 - `status-stale`: `STATUS.md` is older than the user's previous message. Update it before you answer.
 - `thread-resolved`: a task names a resolved thread. If its pull request merged, delete the task and say so; otherwise ask once, as in "Thread ends".
 - `thread-missing`: a task names a thread that does not exist. Remove the ` · <id>` and ask whether to delegate it again.

@@ -136,25 +136,13 @@ fn thread_item(t: &Thread, json: &ThreadJson) -> Item {
     }
 }
 
-/// The status file's `Objective:` line, or, in a file from before the
-/// rename, the first paragraph under `## Current objective` with its lines
-/// joined by spaces.
+/// The status file's `Objective:` line, empty without one.
 fn objective(status: &str) -> String {
-    if let Some(line) = status
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("Objective:"))
-    {
-        return line.trim().to_string();
-    }
     status
         .lines()
-        .skip_while(|l| !l.trim().eq_ignore_ascii_case("## current objective"))
-        .skip(1)
-        .skip_while(|l| l.trim().is_empty())
-        .take_while(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .find_map(|l| l.trim().strip_prefix("Objective:"))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// A file's modification time, RFC 3339 to the second; empty when missing.
@@ -221,8 +209,6 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
             )
         })
         .collect();
-    // Its name before the status file was renamed, for readers from then.
-    drift.insert("handoff_over_limit".into(), drift["status_over_limit"]);
     drift.insert(
         "inbox_unhandled".into(),
         crate::inbox::unhandled(&project).len(),
@@ -236,9 +222,7 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
                 .map(|line| serde_json::json!({ "thread": t.id, "line": line }))
         })
         .collect();
-    let file = status_file::root(&project);
-    let status = file.text();
-    let (updated, chars) = (modified(&file.path), status.chars().count());
+    let status = status_file::root_text(&project);
     threads::print_json(&serde_json::json!({
         "schema_version": threads::JSON_SCHEMA_VERSION,
         "project": project.slug,
@@ -246,14 +230,10 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
         "objective": objective(&status),
         "sources": {
             "tasks_updated": modified(&dir.join("TASKS.md")),
-            "status_file": file.name,
-            "status_updated": updated,
-            "status_chars": chars,
+            "status_file": status_file::NAME,
+            "status_updated": modified(&status_file::root(&project)),
+            "status_chars": status.chars().count(),
             "status_limit": status_file::MAX_CHARS,
-            // The same values under their names from before the rename.
-            "handoff_updated": updated,
-            "handoff_chars": chars,
-            "handoff_limit": status_file::MAX_CHARS,
             "pr_checked": crate::steps::load_state(&project).last_pr_check,
         },
         "items": items,
@@ -268,16 +248,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_objective_is_the_first_paragraph_of_its_section() {
-        assert_eq!(
-            objective("# H\n\n## Current objective\n\nShip it\n  today.\n\nLater.\n## Next\n"),
-            "Ship it today."
-        );
-        assert_eq!(
-            objective("## Current Objective\nOne\n## Active work\n"),
-            "One"
-        );
-        assert_eq!(objective("# H\n\nNo section.\n"), "");
+    fn the_objective_is_its_line() {
+        assert_eq!(objective("# H\n\n## Current objective\n\nShip it\n"), "");
         assert_eq!(
             objective("# Status\nObjective:  Ship the checkout\n## Asked\n"),
             "Ship the checkout"

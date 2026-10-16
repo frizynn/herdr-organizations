@@ -565,12 +565,12 @@ fn text_column(line: Line, node: &Node) -> Line {
 }
 
 /// A node as the screens name it: the root is "Coordinator".
-/// The STATUS.md a coordinator keeps: the project's for `root` (HANDOFF.md
-/// before the rename), its own for a coordinator node; `None` for a worker.
+/// The STATUS.md a coordinator keeps: the project's for `root`, its own for
+/// a coordinator node; `None` for a worker.
 fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf> {
     let dir = std::path::Path::new(&project.dir);
     if node.id == ROOT_ID {
-        return Some(crate::status_file::root_in(dir).path);
+        return Some(dir.join(crate::status_file::NAME));
     }
     (node.role == NodeRole::Coordinator.as_str()).then(|| {
         dir.join("nodes")

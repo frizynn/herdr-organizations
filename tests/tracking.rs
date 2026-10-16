@@ -122,16 +122,6 @@ fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     );
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
     assert!(!doctor.contains("status acme"), "{doctor}");
-
-    // A project from before the rename: its HANDOFF.md is measured instead.
-    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
-    fixture.write("HANDOFF.md", &status(9_000));
-    let context = fixture.text(&["context", "acme", "--peek"]);
-    assert!(
-        context
-            .contains("HANDOFF.md has 9000 characters and this digest shows only the first 8000"),
-        "{context}"
-    );
 }
 
 /// The lines of the digest's drift section.
@@ -163,43 +153,21 @@ fn a_new_project_keeps_its_status_in_status_md() {
     assert_eq!(drift(&context), ["(none)"]);
 }
 
+/// STATUS.md is the only name: a HANDOFF.md from before the rename is not
+/// read, and nothing renames it.
 #[test]
-fn context_prefers_status_md_and_falls_back_to_handoff_md_with_a_rename_line() {
+fn context_never_reads_handoff_md() {
     let fixture = Fixture::new();
+    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
     fixture.write("HANDOFF.md", "# Handoff\n\nOLD-SENTINEL\n");
-    fixture.write("STATUS.md", "# Status\nObjective: NEW-SENTINEL\n");
     let context = fixture.text(&["context", "acme", "--peek"]);
     assert!(
-        context.contains("## Status (STATUS.md)\n# Status\nObjective: NEW-SENTINEL"),
+        context.contains("## Status (STATUS.md)\n(none; coordinator must maintain STATUS.md)"),
         "{context}"
     );
     assert!(!context.contains("OLD-SENTINEL"), "{context}");
     assert_eq!(drift(&context), ["(none)"]);
-
-    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
-    let context = fixture.text(&["context", "acme", "--peek"]);
-    assert!(
-        context.contains("## Status (HANDOFF.md)\n# Handoff\n\nOLD-SENTINEL"),
-        "{context}"
-    );
-    assert_eq!(
-        drift(&context),
-        ["- [status-rename] rename HANDOFF.md to STATUS.md"]
-    );
-    // Reading never renames or rewrites the user's file.
     assert!(!fixture.dir().join("STATUS.md").exists());
-    assert_eq!(
-        std::fs::read_to_string(fixture.dir().join("HANDOFF.md")).unwrap(),
-        "# Handoff\n\nOLD-SENTINEL\n"
-    );
-    let status: serde_json::Value =
-        serde_json::from_str(&fixture.text(&["project", "status", "acme", "--json"])).unwrap();
-    assert_eq!(status["sources"]["status_file"], "HANDOFF.md");
-    assert_eq!(status["drift"]["status_rename"], 1);
-    assert_eq!(
-        status["problems"][0],
-        serde_json::json!({"rule": "status-rename", "line": 0, "task": "", "thread": "", "detail": "rename HANDOFF.md to STATUS.md"})
-    );
 }
 
 #[test]
