@@ -15,7 +15,7 @@ Your status file (path above) is the only project file you write besides your re
 # Status
 Objective: <one line>
 ## Asked
-- [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<link: thread id, PR or page>)
+- [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<links: thread id, PR, task or page>)
 ## Needs your decision
 - <decision> : <options in a few words> (<link to captures or designboard>)
 ## Decisions
@@ -23,6 +23,7 @@ Objective: <one line>
 ```
 
 - Every user message gets an Asked line, kept until it is answered or done.
+- End it with its links in parentheses: the thread id (`t-0007`), the PR (`#12` or its URL), `task:<id>` or a page URL. Link every ask that has a thread, PR or task: the binary confirms the state from the link and marks the line when it does not close (done while its PR is open or its thread works, open or working once they finished, working with no link). The user reads all asks with `asks`, in the popup and in Nenu; `asks --project <slug>` shows which of yours do not close.
 - What is in progress or done is computed (the tree, `node show`, Nenu): do not list threads here.
 - Before you answer, update the file when something changed for the user, with small edits. Never paste reports or transcripts.
 - Woken by the ticker or a child: update the file and write the user nothing. Speak only for a decision, a failure or an Asked line that changed state, in at most three lines.

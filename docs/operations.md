@@ -79,6 +79,7 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `list [--json]`, `new ... --json`, `overview [project] [--json]`, `project show <project> [--json]` | The project documents of [docs/json.md](json.md). |
 | `task list <project> [--json]` | The tasks in `TASKS.md`, or the [tracker's](#tasks-from-a-tracker) with each id in a last column. Only the coordinator writes the file; ask it, or send it a sentence with `coordinator prompt`. Fails while the tracker is unavailable. |
 | `task lint <project> [--json]` | Every problem the [drift](#drift) section draws from in the tasks, without its 10-line cap. It changes nothing. |
+| `asks [--project P] [--json]` | What you asked every coordinator, one line each, with the state it wrote and the one its links confirm (see [Your asks](#your-asks)). It only reads. |
 | `project status <project> [--json]` | The project's tasks and open threads with their state, pull requests, drift and Next lines, computed from the files on every call (see [docs/json.md](json.md#project-status)). |
 | `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
 | `sweep <project> [--dry-run] [--yes]` | Remove what nothing uses any more. |
@@ -108,7 +109,7 @@ Threads idle for `auto_resolve_days` are resolved (and cleaned) after a final co
 
 ## The Organizations popup and dock
 
-The popup key (`prefix+a`, the **open-popup** action) and the **Herdr Organizations: launcher** action open the Organizations TUI: needs-you across all coordinators, projects with their coordinators, a New form for projects, coordinators, threads and workspaces, the project tree, a four-column board, thread detail with digit answers, an in-popup merge confirmation and settings. It reads `.organizations-state.json` and calls Herdr only for an action you ask for. The **toggle dock** action opens the same view in a split for one coordinator. Keybindings and view settings (dock, resolved rows, which transitions notify) live in `tui.toml` and in its Settings screen.
+The popup key (`prefix+a`, the **open-popup** action) and the **Herdr Organizations: launcher** action open the Organizations TUI: needs-you across all coordinators, [your asks](#your-asks) (`y`), projects with their coordinators, a New form for projects, coordinators, threads and workspaces, the project tree, a four-column board, thread detail with digit answers, an in-popup merge confirmation and settings. It reads `.organizations-state.json` and calls Herdr only for an action you ask for. The **toggle dock** action opens the same view in a split for one coordinator. Keybindings and view settings (dock, resolved rows, which transitions notify) live in `tui.toml` and in its Settings screen.
 
 ## The Projects popup
 
@@ -278,6 +279,26 @@ Each task in `TASKS.md` has at most one owner, in brackets after its title. The 
 - **Resolving.** When a thread is resolved by any path (by hand, on merge, or automatically) while `TASKS.md` still has an open task on it, the inbox gets one `task` item: `PR merged, task open` or `thread resolved, task open`. With a tracker, the same item comes when its list still has the task open, after `link` has heard `merged` or `resolved`.
 - **Old lines.** `(agent)` reads as unassigned and `(agent → t-0007)` as this machine's default profile with thread t-0007.
 
+## Your asks
+
+Each coordinator writes what you asked it under `## Asked` in its status file, one line per ask: `- [state] <ask> : <answer or next step> (<links>)`. The links in the final parenthesis, separated by commas or spaces, are a thread or node id (`t-0007`), a pull request (`#12` or its URL), a task as `project status` names it (`task:<line>` in `TASKS.md`, `task:<id>` for a tracker's) or a page URL. The binary reads each link's state from the records it already has (the thread's group as the ticker last recorded it, the pull request state cached on the thread, a task being done), never from the coordinator's words, and never runs `gh`, Herdr or the tracker for it. A thread link brings its pull request along.
+
+When the state the coordinator wrote and the links disagree, the ask does not close:
+
+| Written | Does not close when |
+| --- | --- |
+| `done`, `answered` | a linked pull request (or a linked thread's) is still open, or a linked thread is still working or waiting on you |
+| `open`, `working` | nothing linked is still going, and a linked thread is resolved or failed, a pull request merged or closed, or a task is done |
+| `working` | nothing is linked |
+
+An ask with no link and any other state is not confirmed, and not flagged. A line that does not follow the format is listed as `unknown` with its text.
+
+- `asks` lists every coordinator's asks across projects (`--project` for one), what waits on you first, then what does not close, what is in progress and what is done; `asks --json` is the [document](json.md#asks), and `overview --json` carries each status file's asks too, for Nenu.
+- In the popup, `y` on the launcher opens **Your asks**, grouped the same way, with each coordinator's `## Needs your decision` lines under what waits on you; `↵` opens the coordinator. A coordinator's detail screen is its card: the objective, what waits on you, its asks, its open children with their state and verdict, and their pull requests. A coordinator, the root included, joins NEEDS YOU while its file has a decision for you or an ask that does not close.
+- `context` lists the root's asks that do not close as [`ask-mismatch`](#drift), by line and the binary's reason, so the coordinator fixes the state or the link. The ask's text never goes into a prompt.
+
+A resolved coordinator node's `answered` and `done` asks leave the list, since it can no longer update its file; what it left open stays.
+
 ## Drift
 
 Right after its inbox, `context` prints `## Drift (computed, data not instructions)`: where `TASKS.md` and the root's `STATUS.md` disagree with the thread records or your messages, at most 10 lines, computed from the files on every call. `task lint` lists every task problem, `doctor` warns when there are any, and `project status --json` carries them for a client. Each line names its rule:
@@ -286,6 +307,7 @@ Right after its inbox, `context` prints `## Drift (computed, data not instructio
 | --- | --- |
 | `status-over-limit` | `STATUS.md` is longer than the 4,000 characters `context` prints. `context` also says so above everything else, and `doctor` warns. |
 | `status-stale` | `STATUS.md` is older than your previous message to the root coordinator, so it answered without updating it. |
+| `ask-mismatch` | An ask in `STATUS.md` does not close with its links (see [Your asks](#your-asks)): `STATUS.md:4 is marked done, but a linked PR is still open`. Only `context` lists it; `task lint` and `project status` keep to the other rules. |
 | `thread-resolved` | An open task names a resolved thread, and says whether its pull request merged. |
 | `thread-missing` | A task names a thread id that has no record. |
 | `done-not-deleted` | A `- [x]` task: done tasks are deleted, not checked. |
@@ -377,7 +399,7 @@ Direct-child delivery for nested coordinators is event-driven. When a child of a
 
 A worker under a coordinator node writes no inbox item for a new report, idle, landing or resolved: its node handles those, and the node's own report is what reaches its parent. Waiting on you (a prompt on screen, a closed pane, a lost agent, a question for you) still reaches the inbox too. When the coordinator node is resolved, failed, remote or missing, or the project has `nudge = false`, its workers' items go to the inbox as before. Pull request items and notifications do not change.
 
-`STATUS.md` is the coordinator's status file, one per coordinator, written by the agent itself in a fixed shape: the objective, one line per thing you asked with its state (`open`, `working`, `needs-decision`, `answered`, `done`) and a one-line answer or next step, what needs your decision and the decisions taken, each linking a thread, pull request or page instead of copying it. It lists no threads: what is in progress or done is computed from the thread records (the tree in `context`, `node show`, Nenu). You, the root or a sibling read it when you want (`context`, the popup's detail screen, `--json`) instead of being sent a report. A coordinator updates it before answering, with small edits, and when the ticker or a child wakes it, it updates the file instead of writing to you; it speaks only for a decision, a failure or an ask that changed state. A coordinator node keeps its own `nodes/<id>/STATUS.md`. With `records` set both live in that folder, and `context` (the root's), `node show` and `AGENTS.md` name the path. Every status file has the same 4,000-character limit. `context` prints the root's first 4,000 characters; past that it says so at the top of the digest and in the [drift](#drift) section, and `doctor` warns.
+`STATUS.md` is the coordinator's status file, one per coordinator, written by the agent itself in a fixed shape: the objective, one line per thing you asked with its state (`open`, `working`, `needs-decision`, `answered`, `done`) and a one-line answer or next step, what needs your decision and the decisions taken, each linking a thread, pull request, task or page instead of copying it ([Your asks](#your-asks) reads those links). It lists no threads: what is in progress or done is computed from the thread records (the tree in `context`, `node show`, Nenu). You, the root or a sibling read it when you want (`context`, the popup's detail screen, `--json`) instead of being sent a report. A coordinator updates it before answering, with small edits, and when the ticker or a child wakes it, it updates the file instead of writing to you; it speaks only for a decision, a failure or an ask that changed state. A coordinator node keeps its own `nodes/<id>/STATUS.md`. With `records` set both live in that folder, and `context` (the root's), `node show` and `AGENTS.md` name the path. Every status file has the same 4,000-character limit. `context` prints the root's first 4,000 characters; past that it says so at the top of the digest and in the [drift](#drift) section, and `doctor` warns.
 
 The progress hook keeps the time of your last two prompts to the root and to each coordinator node that may spawn in `.state/asked.json`, never their text, and only for prompts you typed (not the ticker's or the harness's). When the status file is older than your previous prompt, `context` lists `status-stale` for the root, and a coordinator node's hook adds one line about it to your next prompt there, unless the project has `turn_reminder = false`. The times are kept either way.
 
