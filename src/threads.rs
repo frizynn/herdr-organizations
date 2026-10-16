@@ -1825,7 +1825,7 @@ pub struct ThreadJson {
     pub verdict: Option<report::Verdict>,
     /// Its report's `## Summary`, at most 600 characters. Agent-written.
     pub summary: Option<String>,
-    /// The library images its report lists, else the newest ones.
+    /// The library images its report lists under `## Captures`.
     pub captures: Vec<report::Capture>,
     /// The documents at the top of its library.
     pub deliverables: Vec<report::Deliverable>,

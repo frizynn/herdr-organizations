@@ -564,7 +564,6 @@ fn text_column(line: Line, node: &Node) -> Line {
     )
 }
 
-/// A node as the screens name it: the root is "Coordinator".
 /// The STATUS.md a coordinator keeps: the project's for `root`, its own for
 /// a coordinator node; `None` for a worker.
 fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf> {
@@ -579,6 +578,7 @@ fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf>
     })
 }
 
+/// A node as the screens name it: the root is "Coordinator".
 fn node_name(project: &ProjectView, id: &str) -> String {
     match project.node(id) {
         Some(n) if n.id == ROOT_ID => "Coordinator".into(),

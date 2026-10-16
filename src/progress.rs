@@ -146,9 +146,6 @@ pub fn clean(input: &str, columns: usize) -> String {
         .to_string()
 }
 
-/// The calling pane, when this process runs inside a Herdr pane: the id
-/// Herdr shows for it (a moved pane keeps its launch-time `HERDR_PANE_ID`),
-/// its terminal id and the agent Herdr detects. `None` outside Herdr.
 /// Who works in a pane the hooks speak in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneRole {
@@ -157,6 +154,9 @@ pub enum PaneRole {
     Worker,
 }
 
+/// The calling pane, when this process runs inside a Herdr pane: the id
+/// Herdr shows for it (a moved pane keeps its launch-time `HERDR_PANE_ID`),
+/// its terminal id and the agent Herdr detects. `None` outside Herdr.
 pub struct Current {
     pub socket: String,
     pub pane_id: String,
