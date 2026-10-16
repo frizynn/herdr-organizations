@@ -632,7 +632,13 @@ fn a_refusing_merge_gate_blocks_the_merge_and_its_reason_reaches_the_inbox_and_j
         "{}",
         stderr(&out)
     );
-    assert_eq!(fixture.inbox().matches("merge gate refused").count(), 2);
+    assert_eq!(
+        fixture
+            .inbox()
+            .matches("event = \"merge gate refused\"")
+            .count(),
+        2
+    );
     assert_eq!(
         fixture.thread_json()["pr"]["merge_blocker"],
         "merge gate exited 3"
@@ -771,4 +777,43 @@ fn an_agent_pane_cannot_merge_through_the_gate_or_change_the_merge_settings() {
         }
     }
     assert_eq!(fixture.config(), config);
+}
+
+#[test]
+fn context_and_project_show_name_the_gate_program_method_and_auto_merge() {
+    let fixture = Fixture::new();
+    let shown = |key: &str| {
+        let out = fixture.run(&["project", "show", "demo", "--json"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        printed(&out)["project"][key].clone()
+    };
+    assert_eq!(
+        (
+            shown("merge_gate"),
+            shown("merge_method"),
+            shown("auto_merge")
+        ),
+        ("".into(), "squash".into(), false.into())
+    );
+    fixture.gate("exit 0", "merge_method = \"merge\"\nauto_merge = true\n");
+    let gate = fixture.home.path().join("gate.sh");
+    assert_eq!(shown("merge_gate"), gate.display().to_string());
+    assert_eq!(shown("merge_method"), "merge");
+    assert_eq!(shown("auto_merge"), true);
+
+    let out = fixture.run(&["context", "demo", "--peek"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let context = String::from_utf8_lossy(&out.stdout);
+    let safety = context
+        .lines()
+        .find(|l| l.starts_with("Safety:"))
+        .unwrap_or_default();
+    assert!(
+        safety.ends_with(&format!(
+            "merge_gate={} merge_method=merge auto_merge=on",
+            gate.display()
+        )),
+        "{safety}"
+    );
+    assert!(!safety.contains("--strict"), "only the program: {safety}");
 }

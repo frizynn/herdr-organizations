@@ -126,9 +126,14 @@ pub fn gh(host: &str) -> Cmd {
 /// Check names and logins are attacker-chosen: cut to 80 characters and
 /// stripped of control characters and newlines before they are written.
 pub fn sanitize(name: &str) -> String {
-    name.chars()
+    clean(name, NAME_LIMIT)
+}
+
+/// `text` without control characters or newlines, cut to `limit` characters.
+pub fn clean(text: &str, limit: usize) -> String {
+    text.chars()
         .filter(|c| !c.is_control())
-        .take(NAME_LIMIT)
+        .take(limit)
         .collect::<String>()
         .trim()
         .to_string()
@@ -187,11 +192,23 @@ impl Checks {
     }
 }
 
+/// What decides that a pull request may merge, besides what always blocks
+/// it: a draft, a conflict, a check GitHub reports as failed or unfinished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Policy {
+    /// An approving review and at least one reported check.
+    #[default]
+    GitHub,
+    /// The project's `merge_gate` command, run just before the merge.
+    Gate,
+}
+
 /// Why a pull request may not be merged, or `None` when it is open, not a
-/// draft, approved, without conflicts, and every check finished green. No
-/// checks at all is not green: right after a push GitHub may not have
-/// registered them yet.
-pub fn merge_blocker(summary: &Summary) -> Option<String> {
+/// draft, without conflicts, and every reported check finished green. Under
+/// GitHub's policy it must also be approved and report a check: no checks at
+/// all is not green, because right after a push GitHub may not have
+/// registered them yet. Under a gate, the gate decides those two.
+pub fn merge_blocker(summary: &Summary, policy: Policy) -> Option<String> {
     let checks = summary.checks;
     if summary.state != "OPEN" {
         let state = if summary.state.is_empty() {
@@ -204,7 +221,7 @@ pub fn merge_blocker(summary: &Summary) -> Option<String> {
     if summary.is_draft {
         return Some("it is a draft".into());
     }
-    if summary.review_decision != "APPROVED" {
+    if policy == Policy::GitHub && summary.review_decision != "APPROVED" {
         let review = if summary.review_decision.is_empty() {
             "none"
         } else {
@@ -221,7 +238,7 @@ pub fn merge_blocker(summary: &Summary) -> Option<String> {
     if checks.pending > 0 {
         return Some(format!("{} check(s) have not finished", checks.pending));
     }
-    if checks.total() == 0 {
+    if policy == Policy::GitHub && checks.total() == 0 {
         return Some("no checks are reported".into());
     }
     if !valid_oid(&summary.head_oid) {
@@ -262,7 +279,8 @@ pub fn valid_oid(oid: &str) -> bool {
     oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MergeMethod {
     #[default]
     Squash,
@@ -277,6 +295,11 @@ impl MergeMethod {
             MergeMethod::Merge => "--merge",
             MergeMethod::Rebase => "--rebase",
         }
+    }
+
+    /// The word `merge_method` takes in config.toml.
+    pub fn word(self) -> &'static str {
+        &self.flag()[2..]
     }
 }
 
@@ -1006,7 +1029,7 @@ mod tests {
         assert_eq!((summary.additions, summary.deletions), (12, 3));
         assert_eq!(summary.failing_checks, ["lint"]);
         assert_eq!(
-            merge_blocker(&summary).as_deref(),
+            merge_blocker(&summary, Policy::GitHub).as_deref(),
             Some("1 check(s) failed")
         );
         summary.checks = Checks {
@@ -1014,12 +1037,12 @@ mod tests {
             pending: 0,
             failed: 0,
         };
-        assert_eq!(merge_blocker(&summary), None);
+        assert_eq!(merge_blocker(&summary, Policy::GitHub), None);
 
         let blocked = |change: fn(&mut Summary)| {
             let mut s = summary.clone();
             change(&mut s);
-            merge_blocker(&s).expect("blocked")
+            merge_blocker(&s, Policy::GitHub).expect("blocked")
         };
         assert!(blocked(|s| s.review_decision = "REVIEW_REQUIRED".into()).contains("not approved"));
         assert!(blocked(|s| s.review_decision.clear()).contains("not approved"));
@@ -1029,6 +1052,38 @@ mod tests {
         assert!(blocked(|s| s.checks.pending = 1).contains("not finished"));
         assert!(blocked(|s| s.checks = Checks::default()).contains("no checks"));
         assert!(blocked(|s| s.head_oid.clear()).contains("head commit"));
+
+        // A gate replaces the approval and the "no checks" rule, nothing else.
+        let gated = |change: fn(&mut Summary)| {
+            let mut s = summary.clone();
+            change(&mut s);
+            merge_blocker(&s, Policy::Gate)
+        };
+        assert_eq!(
+            gated(|s| {
+                s.review_decision = "REVIEW_REQUIRED".into();
+                s.checks = Checks::default();
+            }),
+            None
+        );
+        for change in [
+            (|s: &mut Summary| s.state = "CLOSED".into()) as fn(&mut Summary),
+            |s| s.is_draft = true,
+            |s| s.mergeable = "CONFLICTING".into(),
+            |s| s.checks.failed = 1,
+            |s| s.checks.pending = 1,
+            |s| s.head_oid.clear(),
+        ] {
+            assert_eq!(gated(change), merge_blocker_of(&summary, change));
+        }
+    }
+
+    fn merge_blocker_of(summary: &Summary, change: fn(&mut Summary)) -> Option<String> {
+        let mut s = summary.clone();
+        change(&mut s);
+        let blocker = merge_blocker(&s, Policy::GitHub);
+        assert!(blocker.is_some());
+        blocker
     }
 
     #[test]

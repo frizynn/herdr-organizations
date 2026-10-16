@@ -2615,7 +2615,19 @@ impl<'a> App<'a> {
                 frame.put(x + 1, y + 10, " esc back ", term::CHIP);
             }
             None => {
-                frame.put(x + 1, y + 5, "Squash and merge, then", Style::PLAIN);
+                let merge = match pr.method.as_str() {
+                    "merge" => "merge",
+                    "rebase" => "rebase and merge",
+                    _ => "squash and merge",
+                };
+                let first = if pr.gated {
+                    format!("If the merge gate passes, {merge}, then")
+                } else {
+                    let mut chars = merge.chars();
+                    let head = chars.next().map(|c| c.to_ascii_uppercase());
+                    format!("{}{}, then", head.unwrap_or_default(), chars.as_str())
+                };
+                frame.put(x + 1, y + 5, &term::fit(&first, w - 4), Style::PLAIN);
                 frame.put(x + 3, y + 6, "·", DIM);
                 frame.put(
                     x + 5,
@@ -4353,6 +4365,34 @@ mod tests {
             assert!(text.contains("tell coordinator mobile redesign"), "{text}");
             press(app, crossterm::event::KeyCode::Esc);
             assert!(matches!(app.stack.last(), Some(View::Tree { .. })));
+        });
+    }
+
+    #[test]
+    fn the_merge_dialog_names_the_projects_method_and_its_gate() {
+        with_app(|app| {
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.method = "rebase".into();
+                }
+            }
+            app.open_tree("acme", Some("t-0004"));
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(text.contains("Rebase and merge, then"), "{text}");
+            press(app, crossterm::event::KeyCode::Esc);
+
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.gated = true;
+                }
+            }
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(
+                text.contains("If the merge gate passes, rebase and merge, then"),
+                "{text}"
+            );
         });
     }
 
