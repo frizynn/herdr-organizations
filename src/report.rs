@@ -43,7 +43,7 @@ pub struct Capture {
     pub caption: String,
 }
 
-/// A document at the top of the library: `html`, `pdf` or `md`.
+/// A document at the top of the library that Nenu can open: `html` or `pdf`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Deliverable {
     pub path: String,
@@ -51,7 +51,7 @@ pub struct Deliverable {
 }
 
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
-const DOCUMENT_KINDS: [&str; 3] = ["html", "pdf", "md"];
+const DOCUMENT_KINDS: [&str; 2] = ["html", "pdf"];
 
 /// The home copy of a thread's report in a project folder, empty without one.
 pub fn home_text(project_dir: &Path, id: &str) -> String {
@@ -113,7 +113,7 @@ pub fn captures(report: &str, library: &Path) -> Vec<Capture> {
     found
 }
 
-/// Regular `html`, `pdf` and `md` files at the top of the library, by name.
+/// Regular `html` and `pdf` files at the top of the library, by name.
 pub fn deliverables(library: &Path) -> Vec<Deliverable> {
     if !is_real_dir(library) {
         return Vec::new();
@@ -388,9 +388,9 @@ mod tests {
         put(&library, "c-notes.md");
         put(&library, "d.png");
         put(&library, "e.htm");
-        put(&library, ".hidden.md");
-        put(&library, "sub/deep.md");
-        std::fs::create_dir_all(library.join("folder.md")).unwrap();
+        put(&library, ".hidden.pdf");
+        put(&library, "sub/deep.pdf");
+        std::fs::create_dir_all(library.join("folder.pdf")).unwrap();
         let found: Vec<(String, &str)> = deliverables(&library)
             .into_iter()
             .map(|d| {
@@ -403,11 +403,10 @@ mod tests {
             [
                 ("a-page.html".to_string(), "html"),
                 ("b-report.PDF".to_string(), "pdf"),
-                ("c-notes.md".to_string(), "md"),
             ]
         );
         for n in 0..12 {
-            put(&library, &format!("z{n:02}.md"));
+            put(&library, &format!("z{n:02}.html"));
         }
         assert_eq!(deliverables(&library).len(), MAX_DELIVERABLES);
     }
