@@ -1091,6 +1091,32 @@ mod tests {
     }
 
     #[test]
+    fn merge_settings_are_validated_and_unknown_keys_still_load() {
+        let here = Path::new("/projects/demo");
+        let load = |table: &str| {
+            load_safety_layers_from(
+                &format!("[safety.\"/projects/demo\"]\n{table}"),
+                "config.toml",
+                here,
+            )
+        };
+        for bad in [
+            "merge_gate = []\n",
+            "merge_gate = [\"\"]\n",
+            "merge_gate = \"./approve.sh\"\n",
+            "merge_gate_timeout = 0\n",
+            "merge_method = \"fast-forward\"\n",
+            "auto_merge = \"yes\"\n",
+        ] {
+            assert!(load(bad).is_err(), "{bad}");
+        }
+        load("merge_gate = [\"./approve.sh\", \"--pr\"]\nmerge_gate_timeout = 30\nmerge_method = \"rebase\"\nauto_merge = true\n").unwrap();
+        // A key a later version adds is ignored, so this binary keeps reading
+        // a config.toml written for a newer one, as an older binary reads ours.
+        load("a_later_setting = [1, 2]\n").unwrap();
+    }
+
+    #[test]
     fn safety_defaults_and_overrides_keyed_by_canonical_path() {
         let config = tempfile::tempdir().unwrap();
         let here = Path::new("/projects/demo");

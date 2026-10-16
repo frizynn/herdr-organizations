@@ -2254,6 +2254,110 @@ mod tests {
         }
 
         #[test]
+        fn project_auto_merge_asks_the_gate_again_on_the_same_commit_until_it_passes() {
+            let setup = Setup::new("idle", |_| {});
+            let ctx = setup.world.ctx();
+            std::fs::create_dir_all(&ctx.config_dir).unwrap();
+            std::fs::write(
+                ctx.config_dir.join("config.toml"),
+                format!(
+                    "[safety.\"{}\"]\nmerge_gate = [\"review-gate\", \"--pr\"]\nmerge_method = \"merge\"\nauto_merge = true\n",
+                    setup.project.canonical_dir().display()
+                ),
+            )
+            .unwrap();
+            // Not approved and no checks: only the gate decides.
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", "", 10);
+            let verdict = Rc::new(RefCell::new(crate::runner::Output {
+                code: Some(1),
+                stdout: "waiting for the reviewer\n".into(),
+                ..Default::default()
+            }));
+            let answer = verdict.clone();
+            setup.world.runner.on_fn(
+                |cmd| cmd.program == "review-gate",
+                move |_| Ok(answer.borrow().clone()),
+            );
+            let tick = || {
+                // A pull request check on every tick, as if two minutes passed.
+                let mut state = load_state(&setup.project);
+                state.last_pr_check.clear();
+                save_state(&setup.project, &state).unwrap();
+                let mut memory = Memory::new(&ctx);
+                crate::ticker::tick_for_test(&ctx, &mut memory);
+            };
+            let refusals = || {
+                setup
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event == "merge gate refused")
+                    .collect::<Vec<_>>()
+            };
+
+            tick();
+            tick();
+            assert_eq!(
+                setup.world.runner.count("review-gate --pr"),
+                2,
+                "a refusal on the same commit is asked again"
+            );
+            assert_eq!(setup.world.runner.count("gh pr merge"), 0);
+            let items = refusals();
+            assert_eq!(items.len(), 1, "one item per reason: {items:?}");
+            assert!(items[0].summary.contains("waiting for the reviewer"));
+            assert!(
+                setup
+                    .items()
+                    .iter()
+                    .all(|item| !item.summary.contains("auto-merge did not merge")),
+                "{:?}",
+                setup.items()
+            );
+
+            *verdict.borrow_mut() = ok("");
+            tick();
+            assert_eq!(setup.world.runner.count("gh pr merge"), 1);
+            let calls = setup.world.runner.calls.borrow();
+            let gate = calls
+                .iter()
+                .rfind(|cmd| cmd.program == "review-gate")
+                .unwrap();
+            assert!(
+                gate.env
+                    .iter()
+                    .any(|(k, v)| k == "HP_HEAD_SHA" && v == HEAD),
+                "{:?}",
+                gate.env
+            );
+            let merge = calls
+                .iter()
+                .find(|cmd| cmd.display().contains("gh pr merge"))
+                .unwrap();
+            assert_eq!(
+                merge.args,
+                [
+                    "pr",
+                    "merge",
+                    "--merge",
+                    "--match-head-commit",
+                    HEAD,
+                    "--",
+                    URL
+                ]
+            );
+            drop(calls);
+            assert_eq!(
+                thread::load(&setup.project, "t-0001").unwrap().pr_state,
+                "MERGED"
+            );
+            assert!(setup.items().iter().any(|item| {
+                item.summary
+                    .contains("merged by the ticker because auto-merge is on")
+            }));
+            assert_eq!(refusals().len(), 1);
+        }
+
+        #[test]
         fn auto_fix_treats_more_comments_or_a_change_request_as_news_but_not_an_approval() {
             let pending = r#"{"name":"build","status":"IN_PROGRESS"}"#;
             let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
