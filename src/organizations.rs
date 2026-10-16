@@ -2191,6 +2191,31 @@ mod tests {
         assert!(restarted.contains(&format!("STATUS-SENTINEL-{}", coordinator.id)));
     }
 
+    /// `progress = false`: neither a worker's nor a coordinator node's brief
+    /// tells it to report progress.
+    #[test]
+    fn a_project_without_progress_briefs_no_progress_section() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        let worker = start(&project, &coordinator.id, NodeRole::Worker, None);
+        for node in [&coordinator, &worker] {
+            assert!(brief(&project, node).contains("\n# Progress\n"));
+        }
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen("+++\n", "+++\nprogress = false\n", 1),
+        )
+        .unwrap();
+        for node in [&coordinator, &worker] {
+            let text = brief(&project, node);
+            assert!(!text.contains("# Progress"), "{text}");
+            assert!(!text.contains(" report --percent"), "{text}");
+            assert!(text.contains("\n# Task\n"), "{text}");
+        }
+    }
+
     /// With `records` set, a new node's task file is written there, and a
     /// spawning coordinator's brief names and inlines its status file from
     /// there; its scope stays in the project folder.
