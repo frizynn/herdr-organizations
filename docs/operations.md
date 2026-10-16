@@ -35,11 +35,11 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   inbox/, inbox/done/     events for the coordinator
   library/<id>/           home copy of files a thread produced
   .state/                 status, coordinator record, live coordinators, ticker state, merge gate verdicts, lock,
-                          the tracker's last task list (tracker.json)
+                          the tracker's last task list (tracker.json), token use read so far (usage.json)
 ~/.herdr-projects/.ticker.lock  .ticker.log  .progress/  .trash/
 ~/.herdr-projects/.organizations-state.json      the popup's view model, written by the ticker
 ~/.config/herdr-projects/tui.toml                popup and dock keybindings and view settings
-~/.config/herdr-projects/config.toml             yours: root, profiles, safety and tracker tables, machines
+~/.config/herdr-projects/config.toml             yours: root, profiles, safety, tracker and usage tables, machines
 ~/.config/herdr-projects/templates/<name>/       global node templates, laid out as a project's
 ~/.config/herdr-projects/owned.json              what `configure` changed, for `unconfigure`
 ~/.config/herdr-projects/approved-routines.json  written only by `routine approve`
@@ -74,6 +74,7 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `node start <project> --parent root\|<id> [--role worker\|coordinator] [--template NAME] --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] [--rules-file F] --task-file F [--from-task TITLE]` | A node in the tree (`node create` is an alias); `--role` defaults to the template's, else `worker`. `--from-task` works as for `thread start`. `thread start` is the same for a worker under `root`. |
 | `template save <project> <id> --name N [--global] [--description D] [--force]`, `template list [--project P] [--json]`, `template show <name> [--project P] [--json]`, `template delete <name> [--project P]` | [Templates](#templates). |
 | `node restart [--profile P]`, `node prompt`, `node list [--json]`, `node show [--json]`, `node ack`, `node resolve [--keep-worktree \| --close-view]` | Hierarchy-aware lifecycle; `node list` prints the tree in stable preorder. |
+| `node usage <project> [--json]` | Each node's [token use](#token-use), read from its agent's transcripts now: one row per node, the root first. |
 | `node rules <project> <id> [--text-file F]` | Print a node's standing instructions, or replace them. The node and its descendants read them on their next brief or restart. |
 | `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
 | `list [--json]`, `new ... --json`, `overview [project] [--json]`, `project show <project> [--json]` | The project documents of [docs/json.md](json.md). |
@@ -350,6 +351,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
   "Bash(<binary> --root <root> thread restart:*)",
   "Bash(<binary> --root <root> node list:*)",
   "Bash(<binary> --root <root> node show:*)",
+  "Bash(<binary> --root <root> node usage:*)",
   "Bash(<binary> --root <root> node prompt:*)",
   "Bash(<binary> --root <root> node ack:*)",
   "Bash(<binary> --root <root> node restart:*)"
@@ -369,7 +371,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
 - **A merge gate is your code.** It decides merges for the project, so whatever can change its script can merge. Keep it outside every agent's working directory, as `config.toml` is.
 - **Prompt injection is reduced, not removed.** No GitHub text reaches a prompt from the plugin, but threads read pull request comments themselves with `gh`, and memory is inlined into every later brief.
 - **Hooks run in every agent session on the machine.** They exit at once outside a Herdr pane.
-- **Cost.** Every thread is a full agent session, and each nudge and each `context` spends coordinator tokens.
+- **Cost.** Every thread is a full agent session, and each nudge and each `context` spends coordinator tokens. `node usage` shows what each node spent, and [caps](#token-use) tell you when one passes a limit.
 
 ## Nudges and notifications
 
@@ -383,6 +385,34 @@ The progress hook keeps the time of your last two prompts to the root and to eac
 
 - **Notifications** go out once per event, titled `<Project> · <thread>`: `needs you · ...` with Herdr's request sound; a new report or a merged pull request with the done sound; failed checks, review activity, merge conflicts and due routines without sound. `mute = true` silences a project except for errors (a broken routine file, `gh` failing for ten minutes).
 - **Nudges** (`nudge = true`, the default for new projects) prompt a coordinator with one line saying what happened (`[hp inbox] t-0040 PR merged; t-0043 blocked on a prompt`) once a set of new inbox items arrives. On Herdr 0.9.1 a prompt merges with text you have half-typed, so the ticker only prompts a coordinator whose state has not changed and been idle for 60 seconds and whose input box, read from its screen, has looked empty for 10 seconds, and picks the one that changed most recently when several qualify. A box it cannot read (a menu, a scrolled view, a harness other than Claude, Codex, Cursor, Gemini, OpenCode and Pi) counts as not empty, and the nudge waits. `thread prompt` refuses to type into a thread's box that holds a draft. `nudge = false` turns this off, and the one-line wake of a coordinator node about its children too: the ticker then types nothing into any coordinator of the project, and the inbox keeps every item. Notifications still come.
+
+## Token use
+
+Herdr reports no token use, only each pane's native session id. The ticker keeps every id a node's pane reported in its record (`sessions` in `threads/<id>.toml`, and in `.state/coordinator.json` for the root coordinator), and the binary reads the agent's own transcripts for them:
+
+- **Claude Code**: `~/.claude/projects/<working directory>/<id>.jsonl` (`CLAUDE_CONFIG_DIR` moves it), and the session's subagents in `<id>/subagents/*.jsonl`. Claude Code writes a request once per content block; each counts once. The context is the last request's input, cache read and cache write. A `compact_boundary` row is a compaction. Claude Code's own notices (model `<synthetic>`, all zeros) are not requests.
+- **Codex**: `~/.codex/sessions/**/rollout-*-<id>.jsonl` (`CODEX_HOME` moves it). Its `token_count` events carry running totals: a request is what they grew by, its input split into the uncached part and the cache read, and a total that went down (a compaction or a resume) counts as a compaction. This reader has not been checked against a real Codex transcript yet.
+- **Other harnesses, and nodes on other machines**: no data (`null` in `--json`).
+
+Per node, `input`, `output`, `cache_read` and `cache_write` sum every request, its subagents' included; `context` (now), `peak_context` and `compactions` are its own sessions', the context of the latest one. A read takes only the lines added since the last one: `.state/usage.json` keeps each file's offset and counts, so the totals stay after Claude Code deletes a transcript (it keeps them 30 days). A line it does not understand is skipped. Only numbers are kept; no transcript text is stored, printed or put in a prompt.
+
+The ticker reads at most every five minutes, and at once when a node stops working. `node usage <project> [--json]` reads now and prints one row per node, the root first. `--json` and the popup show the last read. A resolved node keeps what it had when it stopped.
+
+Caps are set by hand in `config.toml`, resolved as the safety tables are (the project's own table, then the default):
+
+```toml
+[usage.default]
+context_warn = 800000              # tokens of context now
+compaction_warn = 5                # compactions
+tokens_warn = 50000000             # input, cache writes and output, summed
+
+[usage."/Users/you/.herdr-projects/billing"]
+compaction_warn = 0                # 0: no cap for this project
+```
+
+A node at or above a cap gets one notification per cap, without sound (`<Project> · t-0007: context 812k tokens, at or above its cap of 800k`; the root is `coordinator`), `over_cap` in `--json` names the cap, and its row in the popup's tree says `over cap`. It notifies again only once the node went below the cap and reached it again: a compaction lowers the context, while compactions and tokens only grow. A cap does not make a node wait on you, does not change its group or auto-resolve, and writes no inbox item. `mute = true` silences it. Without a `[usage]` table there are no caps.
+
+Cache reads are left out of `tokens_warn`: every request reads the whole context from the cache again, so they dominate the totals and would pass any cap.
 
 ## What runs, and where records go
 
