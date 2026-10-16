@@ -224,7 +224,8 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "status_file": {
             "path": format!("{}/nodes/t-0001/STATUS.md", fixture.dir()),
             "text": NODE_STATUS,
-            "updated": "2026-10-02T09:00:00Z"
+            "updated": "2026-10-02T09:00:00Z",
+            "objective": "Checkout"
         }
     })
 }
@@ -298,8 +299,28 @@ fn project(fixture: &Fixture) -> Value {
         "status_file": {
             "path": format!("{}/STATUS.md", fixture.dir()),
             "text": ROOT_STATUS,
-            "updated": "2026-10-02T08:00:00Z"
+            "updated": "2026-10-02T08:00:00Z",
+            "objective": "Ship it",
+            "asks": [root_ask()]
         }
+    })
+}
+
+/// The one ask of `ROOT_STATUS`: it links the coordinator node, whose pull
+/// request is open, so it is in progress.
+fn root_ask() -> Value {
+    json!({
+        "line": 4,
+        "state": "open",
+        "text": "Is it in the skill?",
+        "answer": "checking",
+        "links": [{
+            "kind": "thread", "text": "t-0001", "target": "t-0001",
+            "thread": "t-0001", "title": "Checkout", "state": "ready-for-review",
+            "pr": URL, "pr_state": "open"
+        }],
+        "confirmed": "in-progress",
+        "mismatch": ""
     })
 }
 
@@ -583,7 +604,8 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
         json!({
             "path": format!("{v}/nodes/t-0001/STATUS.md"),
             "text": NODE_STATUS,
-            "updated": "2026-10-02T09:00:00Z"
+            "updated": "2026-10-02T09:00:00Z",
+            "objective": "Checkout"
         })
     );
     let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
@@ -598,7 +620,9 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
         json!({
             "path": format!("{v}/STATUS.md"),
             "text": ROOT_STATUS,
-            "updated": "2026-10-02T08:00:00Z"
+            "updated": "2026-10-02T08:00:00Z",
+            "objective": "Ship it",
+            "asks": [root_ask()]
         })
     );
     let status = fixture.json(&["project", "status", "demo", "--json"]);
@@ -630,6 +654,138 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
         thread["report"],
         format!("{}/threads/t-0002.md", fixture.dir())
     );
+}
+
+/// A project that was opened names its coordinator as the ticker last saw
+/// it; one that never was has no `coordinator`.
+#[test]
+fn a_project_names_its_coordinator() {
+    let fixture = fixture();
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(listed["projects"][0].get("coordinator"), None);
+    write(
+        &fixture,
+        ".state/coordinator.json",
+        r#"{"pane_id": "w1:p1", "agent": "claude", "model": "opus", "profile": "claude"}"#,
+    );
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(
+        listed["projects"][0]["coordinator"],
+        json!({"pane_id": "w1:p1", "agent": "claude", "model": "opus", "state": ""})
+    );
+    write(
+        &fixture,
+        ".state/coordinators.json",
+        r#"[{"pane_id": "w9:p9", "agent_status": "idle"}, {"pane_id": "w1:p1", "agent_status": "working"}]"#,
+    );
+    let shown = fixture.json(&["overview", "demo", "--json"]);
+    assert_eq!(shown["projects"][0]["coordinator"]["state"], "working");
+}
+
+/// Every coordinator's asks, the root's and a node's, of two projects: what
+/// waits on the user first, then what does not close, what is in progress
+/// and what is done. A done ask on a thread whose pull request is open does
+/// not close.
+#[test]
+fn asks_json_lists_every_coordinators_asks_in_order() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\nObjective: Ship it\n## Asked\n- [done] Ship the checkout : merged (t-0001)\n- [needs-decision] Pilot or not : yes or no\n- [answered] Is it fast? : yes, measured\n## Needs your decision\n- Pilot : yes or no\n",
+    );
+    write(
+        &fixture,
+        "nodes/t-0001/STATUS.md",
+        "# Status\nObjective: Checkout\n## Asked\n- [working] Copy fix : landing it (t-0002)\n- [open] Docs : next\n",
+    );
+    fixture.text(&["new", "Beta"]);
+    std::fs::write(
+        Path::new(&fixture.root).join("beta/STATUS.md"),
+        "# Status\n## Asked\n- [working] Research : reading (https://example.com/notes)\n- [needs-decision] Budget : pick one\n",
+    )
+    .unwrap();
+
+    let listed = fixture.json(&["asks", "--json"]);
+    assert_eq!(listed["schema_version"], 1);
+    let rows: Vec<(String, String, String, String, String, String)> = listed["asks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let s = |v: &Value| v.as_str().unwrap().to_string();
+            (
+                s(&a["project"]),
+                s(&a["coordinator"]["id"]),
+                s(&a["state"]),
+                s(&a["confirmed"]),
+                s(&a["mismatch"]),
+                s(&a["text"]),
+            )
+        })
+        .collect();
+    let row = |p: &str, c: &str, state: &str, confirmed: &str, mismatch: &str, text: &str| {
+        let s = |v: &str| v.to_string();
+        (s(p), s(c), s(state), s(confirmed), s(mismatch), s(text))
+    };
+    assert_eq!(
+        rows,
+        [
+            row("demo", "root", "needs-decision", "", "", "Pilot or not"),
+            row("beta", "root", "needs-decision", "", "", "Budget"),
+            row("demo", "root", "done", "in-progress", "a linked PR is still open", "Ship the checkout"),
+            row("demo", "t-0001", "working", "done", "a linked thread is resolved", "Copy fix"),
+            row("demo", "t-0001", "open", "", "", "Docs"),
+            row("beta", "root", "working", "", "", "Research"),
+            row("demo", "root", "answered", "", "", "Is it fast?"),
+        ]
+    );
+    let first = &listed["asks"][2];
+    assert_eq!(first["coordinator"], json!({"id": "root", "title": ""}));
+    assert_eq!(first["line"], 4);
+    assert_eq!(first["answer"], "merged");
+    assert_eq!(first["links"][0]["pr_state"], "open");
+    assert_eq!(
+        listed["asks"][3]["coordinator"],
+        json!({"id": "t-0001", "title": "Checkout"})
+    );
+
+    let one = fixture.json(&["asks", "--project", "beta", "--json"]);
+    assert_eq!(one["asks"].as_array().unwrap().len(), 2);
+    let text = fixture.text(&["asks", "--project", "demo"]);
+    assert_eq!(
+        text.lines().next().unwrap(),
+        "demo\troot\tneeds-decision\t\t\tPilot or not : yes or no\t"
+    );
+    assert!(
+        text.contains("demo\troot\tdone\tin-progress\ta linked PR is still open\tShip the checkout : merged\tt-0001 ready-for-review, PR open\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("demo\tt-0001 Checkout\tworking\tdone\ta linked thread is resolved\tCopy fix : landing it\tt-0002 resolved\n"),
+        "{text}"
+    );
+}
+
+/// A project whose status file has no asks lists none, and its documents
+/// are what they were.
+#[test]
+fn a_project_without_asks_lists_none() {
+    let fixture = fixture();
+    write(&fixture, "STATUS.md", NEW_STATUS);
+    write(&fixture, "nodes/t-0001/STATUS.md", NEW_STATUS);
+    assert_eq!(
+        fixture.json(&["asks", "--json"]),
+        json!({"schema_version": 1, "asks": []})
+    );
+    assert_eq!(fixture.text(&["asks"]), "");
+    let listed = fixture.json(&["list", "--json"]);
+    let keys: Vec<&String> = listed["projects"][0]["status_file"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(keys, ["path", "text", "updated"]);
 }
 
 #[test]
