@@ -88,6 +88,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `ticker start \| run \| stop \| status`, `doctor [--fix]`, `skill` | Housekeeping. `doctor --fix` also relinks `~/.local/bin/herdr-projects`. |
 | `update [--check]` | Update to the newest `vX.Y.Z` tag on origin: fetch, rebuild, `doctor --fix`, restart the ticker. This fork publishes no tags yet, so it exits 1 ([Updating](getting-started.md#updating)). |
 
+`coordinator prompt`, `thread prompt` and `node prompt` sign what they send from a pane the project recorded for its coordinator or one of its local nodes: the text starts with `[from the root coordinator]` or `[from <id> "<title>"]` (the title on one line, at most 60 characters), so the receiver can tell another coordinator from you. That is the text typed and recorded in the task file. From your own terminal or any other pane, the text goes as typed.
+
 ## Groups
 
 Every thread is in one group, shown in the sidebar, the popup and the digest, needs-you first:
