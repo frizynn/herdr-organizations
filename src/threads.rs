@@ -1915,16 +1915,6 @@ pub fn merge_blocker(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> O
     pr::merge_blocker(summary, policy).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
 }
 
-/// What `--json` and the popup show: `merge_blocker`, then the gate's
-/// refusal when it last ran on this head commit.
-pub fn shown_merge_blocker(
-    t: &Thread,
-    summary: &pr::Summary,
-    rule: &merge_gate::Rule,
-) -> Option<String> {
-    merge_blocker(t, summary, rule.policy).or_else(|| rule.refusal(&t.id, &summary.head_oid))
-}
-
 pub fn thread_json(
     project: &Project,
     row: &Row,
@@ -1959,7 +1949,11 @@ pub fn thread_json(
                 _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => {
                     Some(format!("it is not open (state {})", t.pr_state))
                 }
-                Some(s) => shown_merge_blocker(t, s, rule),
+                // The gate's last refusal on this commit shows too; a merge
+                // asks the gate again, so `actions` still offers it.
+                Some(s) => {
+                    merge_blocker(t, s, rule.policy).or_else(|| rule.refusal(&t.id, &s.head_oid))
+                }
                 None => Some("the ticker has not read this pull request yet".into()),
             },
             actions: match summary {

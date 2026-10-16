@@ -52,6 +52,19 @@ pub fn valid_pr_url(url: &str) -> bool {
         && parts[3].chars().all(|c| c.is_ascii_digit())
 }
 
+/// `owner/repo` and the number of a pull request URL, as written; `None`
+/// when `url` is not one.
+pub fn url_parts(url: &str) -> Option<(String, &str)> {
+    if !valid_pr_url(url) {
+        return None;
+    }
+    let parts: Vec<&str> = url
+        .trim_start_matches("https://github.com/")
+        .split('/')
+        .collect();
+    Some((format!("{}/{}", parts[0], parts[1]), parts[3]))
+}
+
 /// A GitHub repository named by a git remote URL: the host `gh` must talk to
 /// and `owner/repo`, both lower-cased.
 #[derive(Debug, Clone, PartialEq)]
@@ -568,19 +581,12 @@ pub fn own_login(runner: &dyn Runner, origin: &str) -> Option<String> {
 /// `gh` sends a URL to the URL's own host, so off `github.com` the pull
 /// request goes by number and `--repo` instead.
 fn target(host: &str, url: &str) -> Vec<String> {
-    if host == "github.com" {
-        return vec!["--".into(), url.into()];
+    match url_parts(url) {
+        Some((repo, number)) if host != "github.com" => {
+            vec!["--repo".into(), repo, "--".into(), number.into()]
+        }
+        _ => vec!["--".into(), url.into()],
     }
-    let parts: Vec<&str> = url
-        .trim_start_matches("https://github.com/")
-        .split('/')
-        .collect();
-    vec![
-        "--repo".into(),
-        format!("{}/{}", parts[0], parts[1]),
-        "--".into(),
-        parts[3].into(),
-    ]
 }
 
 /// `gh pr view` of a pull request URL, asked through `origin`'s host.
@@ -727,28 +733,16 @@ pub fn report_refs(
         c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '`' | ',' | ';' | '"')
     }) {
         let url = word.trim_end_matches(['.', ':', '!', '?']);
-        if !valid_pr_url(url) {
-            continue;
-        }
-        let parts: Vec<&str> = url
-            .trim_start_matches("https://github.com/")
-            .split('/')
-            .collect();
-        if let Ok(n) = parts[3].parse::<u32>() {
-            refs.entry(format!("{}/{}", parts[0], parts[1]).to_lowercase())
-                .or_default()
-                .insert(n);
+        if let Some((repo, number)) = url_parts(url)
+            && let Ok(n) = number.parse::<u32>()
+        {
+            refs.entry(repo.to_lowercase()).or_default().insert(n);
         }
     }
-    if valid_pr_url(except) {
-        let parts: Vec<&str> = except
-            .trim_start_matches("https://github.com/")
-            .split('/')
-            .collect();
-        let repo = format!("{}/{}", parts[0], parts[1]).to_lowercase();
-        if let (Some(set), Ok(n)) = (refs.get_mut(&repo), parts[3].parse::<u32>()) {
-            set.remove(&n);
-        }
+    if let Some((repo, number)) = url_parts(except)
+        && let (Some(set), Ok(n)) = (refs.get_mut(&repo.to_lowercase()), number.parse::<u32>())
+    {
+        set.remove(&n);
     }
     refs.retain(|_, set| !set.is_empty());
     refs

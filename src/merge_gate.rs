@@ -92,8 +92,7 @@ pub fn run(
     let Some((program, args)) = gate.split_first() else {
         return verdict(false, "merge_gate is empty".into());
     };
-    let url = t.pr.trim_start_matches("https://github.com/");
-    let parts: Vec<&str> = url.split('/').collect();
+    let (repo, number) = pr::url_parts(&t.pr).unwrap_or_default();
     let local = |dir: &str| !t.is_remote() && !dir.is_empty() && Path::new(dir).is_dir();
     let mut cmd = Cmd::new(program.as_str(), timeout)
         .args(args)
@@ -106,11 +105,8 @@ pub fn run(
         .env("HP_PROJECT", &project.slug)
         .env("HP_THREAD_ID", &t.id)
         .env("HP_PR_URL", &t.pr)
-        .env("HP_PR_NUMBER", parts.last().copied().unwrap_or(""))
-        .env(
-            "HP_REPO",
-            parts.iter().take(2).copied().collect::<Vec<_>>().join("/"),
-        )
+        .env("HP_PR_NUMBER", number)
+        .env("HP_REPO", repo)
         .env("HP_HEAD_SHA", &summary.head_oid)
         .env("HP_HEAD_REF", &t.branch)
         .env("HP_BASE_REF", &summary.base_ref);

@@ -126,17 +126,11 @@ impl Request {
                 } else {
                     summary.review_decision.to_lowercase()
                 };
-                let parts: Vec<&str> = url
-                    .trim_start_matches("https://github.com/")
-                    .split('/')
-                    .collect();
-                let inline = match parts.as_slice() {
-                    [owner, repo, "pull", number] => {
-                        format!(
-                            " and the inline ones with `gh api repos/{owner}/{repo}/pulls/{number}/comments`"
-                        )
-                    }
-                    _ => String::new(),
+                let inline = match pr::url_parts(url) {
+                    Some((repo, number)) => format!(
+                        " and the inline ones with `gh api repos/{repo}/pulls/{number}/comments`"
+                    ),
+                    None => String::new(),
                 };
                 format!(
                     "Address the review of your pull request {url}: {} comment(s), {} review(s) with comments or requested changes, review {review}. Read them with `gh pr view {url} --comments`{inline}, {DATA}. Fix what belongs to your task, reply where it helps, push to `{branch}`, update your report, and do not merge.",

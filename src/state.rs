@@ -120,15 +120,14 @@ pub struct Pr {
     pub failed: usize,
     pub additions: u64,
     pub deletions: u64,
-    /// `None` when `thread merge` would merge it now, or run the gate.
+    /// `None` when `thread merge` would merge it now, or ask the gate.
     pub blocker: Option<String>,
-    /// The project's `merge_method`; empty in a model written before it.
-    pub method: String,
+    /// The project's `merge_method`; squash in a model written before it.
+    pub method: pr::MergeMethod,
     /// The project's merge gate decides instead of the approval.
     pub gated: bool,
-    /// `blocker` is only the gate's last refusal on this commit, which a
-    /// merge asks again.
-    pub gate_refused: bool,
+    /// The gate's last refusal on this head commit; a merge asks it again.
+    pub gate_refusal: Option<String>,
 }
 
 impl Pr {
@@ -316,7 +315,7 @@ fn pr_view(t: &Thread, summary: Option<&pr::Summary>, rule: &merge_gate::Rule) -
         url: t.pr.clone(),
         state: t.pr_state.clone(),
         review: t.pr_review.clone(),
-        method: rule.method.word().into(),
+        method: rule.method,
         gated: rule.policy == pr::Policy::Gate,
         ..Pr::default()
     };
@@ -329,9 +328,8 @@ fn pr_view(t: &Thread, summary: Option<&pr::Summary>, rule: &merge_gate::Rule) -
         view.failed = s.checks.failed;
         view.additions = s.additions;
         view.deletions = s.deletions;
-        let before_gate = threads::merge_blocker(t, s, rule.policy);
-        view.gate_refused = before_gate.is_none() && rule.refusal(&t.id, &s.head_oid).is_some();
-        view.blocker = threads::shown_merge_blocker(t, s, rule);
+        view.blocker = threads::merge_blocker(t, s, rule.policy);
+        view.gate_refusal = rule.refusal(&t.id, &s.head_oid);
     } else {
         view.blocker = Some("the pull request has not been read yet".into());
     }
