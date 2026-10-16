@@ -618,9 +618,10 @@ const PARENT_PHRASES: [&str; 5] = [
 ];
 /// Every phrase a parent nudge says, in the order it names them: what may
 /// need the user first.
-const PARENT_LINE_ORDER: [&str; 9] = [
+const PARENT_LINE_ORDER: [&str; 10] = [
     WAITING_ON_YOU,
     Verdict::Failed.words(),
+    Verdict::Issues.words(),
     Verdict::Blocked.words(),
     Verdict::NeedsDecision.words(),
     STOPPED,
@@ -2088,6 +2089,8 @@ mod tests {
         let failed = child("Status: failed");
         let unknown = child("Status: finished");
         let waiting = child("Status: done");
+        let issues = child("Status: ISSUES");
+        let pass = child("Status: PASS");
         let to = |id: &str, group: Group| Transition {
             id: id.into(),
             from: None,
@@ -2105,6 +2108,8 @@ mod tests {
                 to(&failed, Group::ReadyForReview),
                 to(&unknown, Group::ReadyForReview),
                 to(&waiting, Group::WaitingOnYou),
+                to(&issues, Group::ReadyForReview),
+                to(&pass, Group::ReadyForReview),
             ],
         );
         let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
@@ -2131,7 +2136,7 @@ mod tests {
         assert_eq!(
             *prompt,
             format!(
-                "{PARENT_NUDGE_PREFIX} {waiting} waiting on you; {failed} failed; {blocked} blocked; {decide} needs decision; {unknown} ready for review; {done} done. Inspect with `{prefix} node show demo <id>`."
+                "{PARENT_NUDGE_PREFIX} {waiting} waiting on you; {failed} failed; {issues} issues; {blocked} blocked; {decide} needs decision; {unknown} ready for review; {done}, {pass} done. Inspect with `{prefix} node show demo <id>`."
             )
         );
         assert!(!prompt.contains("IGNORE-SUMMARY-TEXT"));

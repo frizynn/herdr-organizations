@@ -554,6 +554,32 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     assert_eq!(shown["thread"]["remember"], json!([]));
 }
 
+/// A `Status:` line in any case, or with `PASS` or `ISSUES` as other
+/// harnesses write it, is a verdict: `PASS` is `done`, `ISSUES` is `issues`.
+#[test]
+fn a_status_line_in_any_case_or_with_pass_or_issues_is_a_verdict() {
+    let fixture = fixture();
+    for (status, verdict, words) in [
+        ("PASS", "done", "done"),
+        ("ISSUES", "issues", "issues"),
+        ("Blocked", "blocked", "blocked"),
+        ("FAIL", "failed", "failed"),
+    ] {
+        write(
+            &fixture,
+            "threads/t-0002.md",
+            &format!("Status: {status}\n## Summary\nChecked.\n"),
+        );
+        let shown = fixture.json(&["thread", "show", "demo", "t-0002", "--json"]);
+        assert_eq!(shown["thread"]["verdict"], verdict, "{status}");
+        let shown = fixture.text(&["node", "show", "demo", "t-0002"]);
+        assert!(
+            shown.contains(&format!("# verdict: {words}\n# summary:\n#   Checked.\n")),
+            "{shown}"
+        );
+    }
+}
+
 /// A coordinator node's report is only its verdict, its summary and where
 /// its status file is: no `## Report` and no `## Next`, so no Next list.
 #[test]

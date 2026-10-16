@@ -27,6 +27,9 @@ pub enum Verdict {
     NeedsDecision,
     Blocked,
     Failed,
+    /// A review found problems to fix, as `Status: ISSUES` says in reports
+    /// other harnesses write.
+    Issues,
 }
 
 impl Verdict {
@@ -37,6 +40,7 @@ impl Verdict {
             Verdict::NeedsDecision => "needs decision",
             Verdict::Blocked => "blocked",
             Verdict::Failed => "failed",
+            Verdict::Issues => "issues",
         }
     }
 }
@@ -65,17 +69,19 @@ pub fn home_text(records: &Path, id: &str) -> String {
 }
 
 /// The value of the first `Status:` line above the report's first `##`
-/// section, when it is exactly one of the verdicts.
+/// section, when it is one of the verdicts in any case. `pass` and `fail`,
+/// which other harnesses write, are done and failed.
 pub fn verdict(report: &str) -> Option<Verdict> {
     let value = report
         .lines()
         .take_while(|line| !(is_heading(line) && line.starts_with("##")))
         .find_map(|line| line.strip_prefix("Status:"))?;
-    match value.trim() {
-        "done" => Some(Verdict::Done),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "done" | "pass" => Some(Verdict::Done),
         "needs-decision" => Some(Verdict::NeedsDecision),
         "blocked" => Some(Verdict::Blocked),
-        "failed" => Some(Verdict::Failed),
+        "failed" | "fail" => Some(Verdict::Failed),
+        "issues" => Some(Verdict::Issues),
         _ => None,
     }
 }
@@ -269,7 +275,6 @@ mod tests {
             assert_eq!(verdict(&format!("Status:  {value} \n")), Some(expected));
         }
         for report in [
-            "Status: Done\n",
             "Status: done, mostly\n",
             "Status: needs decision\n",
             "Status: done | blocked\n",
@@ -289,6 +294,42 @@ mod tests {
             "needs-decision"
         );
         assert_eq!(Verdict::NeedsDecision.words(), "needs decision");
+    }
+
+    /// Case does not matter, and the words other harnesses write read too:
+    /// `pass` is done, `fail` is failed and `issues` is a verdict of its own.
+    #[test]
+    fn the_verdict_ignores_case_and_reads_pass_issues_and_fail() {
+        for (value, words, json) in [
+            ("Done", "done", "done"),
+            ("PASS", "done", "done"),
+            ("pass", "done", "done"),
+            ("Pass", "done", "done"),
+            ("NEEDS-DECISION", "needs decision", "needs-decision"),
+            ("Blocked", "blocked", "blocked"),
+            ("BLOCKED", "blocked", "blocked"),
+            ("FAILED", "failed", "failed"),
+            ("fail", "failed", "failed"),
+            ("FAIL", "failed", "failed"),
+            ("issues", "issues", "issues"),
+            ("ISSUES", "issues", "issues"),
+            ("Issues", "issues", "issues"),
+        ] {
+            let found = verdict(&format!("Status: {value}\n## Summary\nx\n"));
+            assert_eq!(found.map(Verdict::words), Some(words), "{value}");
+            assert_eq!(serde_json::to_value(found).unwrap(), json, "{value}");
+        }
+        for value in [
+            "passed",
+            "issue",
+            "failure",
+            "ok",
+            "PASS, mostly",
+            "ISSUES | PASS",
+            "NEEDS DECISION",
+        ] {
+            assert_eq!(verdict(&format!("Status: {value}\n")), None, "{value}");
+        }
     }
 
     #[test]
