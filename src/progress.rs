@@ -210,7 +210,7 @@ fn managed(ctx: &Ctx, current: &Current) -> bool {
         .collect();
     let in_home = |project: &project::Project| {
         let home = project.canonical_dir().to_string_lossy().into_owned();
-        pane.cwd == home || pane.foreground_cwd == home
+        crate::herdr::own_dir(&pane.cwd, &pane.foreground_cwd) == home
     };
     // A thread record carries no socket of its own: only the project's
     // coordinator record ties its pane ids to this server.
