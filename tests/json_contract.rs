@@ -359,6 +359,22 @@ fn inbox_list_json_reads_without_consuming() {
 }
 
 #[test]
+fn node_show_names_a_coordinator_nodes_handoff() {
+    let fixture = fixture();
+    let handoff = format!("{}/nodes/t-0001/HANDOFF.md", fixture.dir());
+    let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
+    assert!(
+        shown.contains(&format!("# handoff: {handoff} (not written yet)\n")),
+        "{shown}"
+    );
+    write(&fixture, "nodes/t-0001/HANDOFF.md", "# Handoff\n");
+    let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
+    assert!(shown.contains(&format!("# handoff: {handoff}\n")), "{shown}");
+    let worker = fixture.text(&["node", "show", "demo", "t-0002"]);
+    assert!(!worker.contains("handoff"), "{worker}");
+}
+
+#[test]
 fn text_output_is_unchanged() {
     let fixture = fixture();
     assert_eq!(
