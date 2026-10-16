@@ -6234,6 +6234,12 @@ fn a_worker_idle_after_its_report_was_acknowledged_wakes_nobody() {
 fn tracked_world(link: Output) -> (World, Project) {
     let world = World::new();
     let project = world.project("demo", "a.sock");
+    track(&world, &project, link);
+    (world, project)
+}
+
+/// Names `tracker-list` and `tracker-link` as `project`'s tracker.
+fn track(world: &World, project: &Project, link: Output) {
     let config = world.ctx().config_dir;
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
@@ -6249,7 +6255,23 @@ fn tracked_world(link: Output) -> (World, Project) {
         ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research","owner":"","description":"Start with the 2025 papers."}]}"#),
     );
     world.runner.on("tracker-link", link);
-    (world, project)
+}
+
+/// `(HP_EVENT, HP_PR_URL)` of every `link` call so far.
+fn link_events(world: &World) -> Vec<(String, String)> {
+    world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .map(|c| {
+            (
+                env_of(c, "HP_EVENT").to_string(),
+                env_of(c, "HP_PR_URL").to_string(),
+            )
+        })
+        .collect()
 }
 
 fn env_of<'a>(cmd: &'a Cmd, key: &str) -> &'a str {
@@ -6372,5 +6394,49 @@ fn a_failing_link_never_stops_a_delegated_thread() {
     assert_eq!(
         items[0].summary,
         "the tracker's link command failed for task TRK-1 (started): it timed out after 30 s"
+    );
+}
+
+/// The tracker hears `merged` when the ticker sees the merge, while the
+/// thread's agent is still at work and long before it is resolved.
+#[test]
+fn a_merge_tells_link_before_its_thread_is_resolved() {
+    let (world, project) = merged_world("working");
+    track(&world, &project, ok(""));
+    thread::update(&project, "t-0001", |t| t.task_id = "TRK-1".into()).unwrap();
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().status,
+        Status::Open
+    );
+    assert_eq!(
+        link_events(&world),
+        [("merged".to_string(), PR_URL.to_string())]
+    );
+    // Nothing new on the next pass: it is not told again.
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(link_events(&world).len(), 1);
+}
+
+/// A thread resolved before its pull request merged told the tracker
+/// `resolved`; the merge, seen later by the pass over resolved threads, is
+/// told too.
+#[test]
+fn a_merge_after_the_thread_was_resolved_still_tells_link() {
+    let (world, project) = pr_world(MERGED_JSON);
+    track(&world, &project, ok(""));
+    thread::update(&project, "t-0001", |t| {
+        t.status = Status::Resolved;
+        t.resolved_reason = "auto".into();
+        t.pr = PR_URL.into();
+        t.pr_state = "OPEN".into();
+        t.task_id = "TRK-1".into();
+    })
+    .unwrap();
+    ticker::tick_project(&world.ctx(), &project).unwrap();
+    assert_eq!(thread::load(&project, "t-0001").unwrap().pr_state, "MERGED");
+    assert_eq!(
+        link_events(&world),
+        [("merged".to_string(), PR_URL.to_string())]
     );
 }

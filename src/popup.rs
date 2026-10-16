@@ -3257,7 +3257,7 @@ mod tests {
         assert_eq!(
             sent.stdin.as_deref(),
             Some(
-                "(from the projects popup) Please mark as done the task TRK-1 \"Fix login\" in the tracker, with the tracker's own tool."
+                "(from the projects popup) Please mark as done the tracker task TRK-1, with the tracker's own tool."
             )
         );
     }

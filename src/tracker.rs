@@ -300,8 +300,24 @@ mod tests {
             );
         }
         assert_eq!(
-            parse(r#"{"schema_version":1,"tasks":[{"id":"","title":"x"}]}"#).unwrap_err(),
+            parse(r#"{"schema_version":1,"tasks":[{"id":"x","title":" "}]}"#).unwrap_err(),
             "printed a task without an id or a title"
         );
+        // An id reaches a prompt and a command line: a plain identifier only.
+        let long = "x".repeat(65);
+        for bad in ["", "TRK 1", "TRK\\\"1", "-rf", "#12", "a;b", long.as_str()] {
+            let json =
+                serde_json::json!({"schema_version": 1, "tasks": [{"id": bad, "title": "x"}]});
+            assert_eq!(
+                parse(&json.to_string()).unwrap_err(),
+                "printed a task whose id is not a plain identifier",
+                "{bad}"
+            );
+        }
+        for good in ["TRK-1", "owner/repo:12", "a.b_c", &"x".repeat(64)] {
+            let json =
+                serde_json::json!({"schema_version": 1, "tasks": [{"id": good, "title": "x"}]});
+            assert!(parse(&json.to_string()).is_ok(), "{good}");
+        }
     }
 }
