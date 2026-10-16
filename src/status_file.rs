@@ -23,7 +23,8 @@ pub const OLD_NAME: &str = "HANDOFF.md";
 /// What `context` prints of the root's file and what `--json` carries.
 pub const MAX_CHARS: usize = 8_000;
 /// What `new` writes: the skill's template with nothing filled in.
-pub const TEMPLATE: &str = "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## In progress\n## Done\n## Decisions\n## Next\n";
+pub const TEMPLATE: &str =
+    "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## Decisions\n";
 /// The root coordinator's key in `.state/asked.json`; nodes use their id.
 pub const ROOT_KEY: &str = "root";
 /// What a coordinator node's hook adds when its file is stale.
@@ -173,6 +174,25 @@ mod tests {
         assert_eq!(record_ask(&project, ROOT_KEY, 300).unwrap(), Some(200));
         assert_eq!(previous_ask(&project, ROOT_KEY), Some(200));
         assert_eq!(previous_ask(&project, "t-0001"), None);
+    }
+
+    /// Both coordinator skills show the shape `new` writes.
+    #[test]
+    fn the_skills_show_the_template() {
+        let headings = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| line.starts_with('#') || line.starts_with("Objective:"))
+                .map(|line| line.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        for skill in [
+            include_str!("../skill/COORDINATOR.md"),
+            include_str!("../skill/COORDINATOR_NODE.md"),
+        ] {
+            let block = skill.split_once("```\n# Status\n").unwrap().1;
+            let block = format!("# Status\n{}", block.split_once("```").unwrap().0);
+            assert_eq!(headings(&block), headings(TEMPLATE));
+        }
     }
 
     #[test]

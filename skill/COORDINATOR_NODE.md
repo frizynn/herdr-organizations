@@ -18,17 +18,12 @@ Objective: <one line>
 - [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<link: thread id, PR or page>)
 ## Needs your decision
 - <decision> : <options in a few words> (<link to captures or designboard>)
-## In progress
-- <thread id> <what> : <state>
-## Done
-- <thread id> <what> (<PR>)   (last 7 days only)
 ## Decisions
 - <date> <decision>
-## Next
-- <next action>
 ```
 
 - Every user message gets an Asked line, kept until it is answered or done.
+- What is in progress or done is computed (the tree, `node show`, Nenu): do not list threads here.
 - Before you answer, update the file when something changed for the user, with small edits. Never paste reports or transcripts.
 - Woken by the ticker or a child: update the file and write the user nothing. Speak only for a decision, a failure or an Asked line that changed state, in at most three lines.
 

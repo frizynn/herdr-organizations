@@ -60,7 +60,8 @@ impl Fixture {
 }
 
 /// What `new` writes to a project's STATUS.md.
-const NEW_STATUS: &str = "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## In progress\n## Done\n## Decisions\n## Next\n";
+const NEW_STATUS: &str =
+    "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## Decisions\n";
 const ROOT_STATUS: &str =
     "# Status\nObjective: Ship it\n## Asked\n- [open] Is it in the skill? : checking (t-0001)\n";
 const NODE_STATUS: &str =
