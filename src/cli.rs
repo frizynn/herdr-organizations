@@ -1151,7 +1151,7 @@ pub fn run() -> Result<()> {
         ),
         Command::Coordinator { command } => match command {
             CoordinatorCommand::Prompt { slug, text_file } => {
-                let text = read_text(&text_file)?;
+                let text = organizations::signed(&ctx, &slug, &read_text(&text_file)?)?;
                 coordinator::prompt(&ctx, &slug, &text)
             }
             CoordinatorCommand::Replace {
@@ -1279,7 +1279,7 @@ pub fn run() -> Result<()> {
                 id,
                 text_file,
             } => {
-                let text = read_text(&text_file)?;
+                let text = organizations::signed(&ctx, &slug, &read_text(&text_file)?)?;
                 let state = threads::prompt(&ctx, &slug, &id, &text)?;
                 println!("sent to {id} (agent was {state})");
                 Ok(())
@@ -1531,7 +1531,7 @@ pub fn run() -> Result<()> {
                 id,
                 text_file,
             } => {
-                let text = read_text(&text_file)?;
+                let text = organizations::signed(&ctx, &slug, &read_text(&text_file)?)?;
                 let state = threads::prompt(&ctx, &slug, &id, &text)?;
                 println!("sent to {id} (agent was {state})");
                 Ok(())
