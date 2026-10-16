@@ -3,8 +3,8 @@
 //! (`Agent::session_id`). The ticker keeps every id a node's pane reported in
 //! its record (`sessions`), and this module reads the harness's own
 //! transcripts for them: Claude Code's `<config>/projects/<cwd>/<id>.jsonl`,
-//! with its subagents in `<id>/subagents/*.jsonl`, and Codex's
-//! `sessions/**/rollout-*-<id>.jsonl`.
+//! with its subagents under `<id>/subagents/` (a workflow's one level further
+//! down), and Codex's `sessions/**/rollout-*-<id>.jsonl`.
 //!
 //! A read takes only the lines added since the last one: `.state/usage.json`
 //! keeps each file's offset and counts, so the totals outlive a transcript the
@@ -12,7 +12,7 @@
 //! kept; no transcript text is stored, printed or sent anywhere.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -61,9 +61,11 @@ pub struct File {
     pub subagent: bool,
     /// Bytes read, always at the end of a line.
     pub offset: u64,
-    /// Claude Code writes a request once per content block, the rows one after
-    /// another: the last `message.id`/`requestId` counted.
+    /// Claude Code writes a request in several rows, one after another: the
+    /// last `message.id`/`requestId` counted, and the input, output, cache
+    /// read and cache write of its last row.
     pub last_key: String,
+    pub last_row: [u64; 4],
     /// Codex: the last cumulative input, cached input and output.
     pub cumulative: [u64; 3],
     pub requests: u64,
@@ -89,12 +91,21 @@ impl File {
         }
     }
 
-    fn count(&mut self, input: u64, output: u64, read: u64, write: u64, context: u64, at: &str) {
-        self.requests += 1;
-        self.input += input;
-        self.output += output;
-        self.cache_read += read;
-        self.cache_write += write;
+    /// Counts a request's input, output, cache read and cache write. A
+    /// `repeat` is a later row of the request counted last, whose output may
+    /// have grown: its numbers replace that row's.
+    fn count(&mut self, row: [u64; 4], context: u64, at: &str, repeat: bool) {
+        let before = if repeat {
+            self.last_row
+        } else {
+            self.requests += 1;
+            [0; 4]
+        };
+        self.input = self.input - before[0] + row[0];
+        self.output = self.output - before[1] + row[1];
+        self.cache_read = self.cache_read - before[2] + row[2];
+        self.cache_write = self.cache_write - before[3] + row[3];
+        self.last_row = row;
         self.context = context;
         self.peak_context = self.peak_context.max(context);
         if let Some(at) = instant(at) {
@@ -223,9 +234,11 @@ pub fn load(project: &Project) -> Store {
 
 /// Reads what every open local node's transcripts gained since the last
 /// read, records the caps each node is at or above, and notifies each cap a
-/// node newly reached, once and without sound.
+/// node newly reached, once and without sound. A `[usage]` table that does
+/// not parse stops only the caps: the read goes on, the caps a node had
+/// reached stay as they were, and the error is returned after it.
 pub fn refresh(ctx: &Ctx, project: &Project) -> Result<Store> {
-    let caps = project.usage_caps(&ctx.config_dir)?;
+    let caps = project.usage_caps(&ctx.config_dir);
     let mut reached = Vec::new();
     let store = {
         let _lock = lock(project)?;
@@ -233,14 +246,16 @@ pub fn refresh(ctx: &Ctx, project: &Project) -> Result<Store> {
         for node in local_nodes(project) {
             let mut entry = store.nodes.remove(&node.id).unwrap_or_default();
             read_node(ctx, &node, &mut entry);
-            let now = entry.usage().map(|u| caps.reached(&u)).unwrap_or_default();
-            for cap in now
-                .iter()
-                .filter(|c| !entry.over.iter().any(|k| k == c.key))
-            {
-                reached.push((node.id.clone(), cap.text.clone()));
+            if let Ok(caps) = &caps {
+                let now = entry.usage().map(|u| caps.reached(&u)).unwrap_or_default();
+                for cap in now
+                    .iter()
+                    .filter(|c| !entry.over.iter().any(|k| k == c.key))
+                {
+                    reached.push((node.id.clone(), cap.text.clone()));
+                }
+                entry.over = now.iter().map(|c| c.key.to_string()).collect();
             }
-            entry.over = now.iter().map(|c| c.key.to_string()).collect();
             if !entry.files.is_empty() {
                 store.nodes.insert(node.id, entry);
             }
@@ -256,7 +271,7 @@ pub fn refresh(ctx: &Ctx, project: &Project) -> Result<Store> {
             notifier.send(subject, &body, Sound::None, false);
         }
     }
-    Ok(store)
+    caps.map(|_| store)
 }
 
 /// The ticker's pass: a read at most every five minutes, and at once when a
@@ -433,51 +448,55 @@ fn locate(ctx: &Ctx, harness: &str, cwd: &str, session: &str) -> Option<PathBuf>
                 .var("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| ctx.env.home.join(".codex"));
-            rollout(&home.join("sessions"), &format!("-{file}"), 4)
+            // `sessions/<year>/<month>/<day>/rollout-<time>-<id>.jsonl`.
+            let suffix = format!("-{file}");
+            files_under(&home.join("sessions"), 4, &|name| {
+                name.starts_with("rollout-") && name.ends_with(&suffix)
+            })
+            .into_iter()
+            .next()
         }
         _ => None,
     }
 }
 
-/// `rollout-<time>-<id>.jsonl` under Codex's dated session folders.
-fn rollout(dir: &Path, suffix: &str, depth: usize) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+/// The subagent transcripts Claude Code keeps beside the session in `main`:
+/// `subagents/*.jsonl`, and a workflow's in `subagents/workflows/<id>/`.
+fn subagents(main: &Path) -> Vec<PathBuf> {
+    files_under(&main.with_extension("").join("subagents"), 3, &|name| {
+        name.ends_with(".jsonl")
+    })
+}
+
+/// The regular files under `dir`, at most `depth` folders down, whose name
+/// `keep` accepts. Links are not followed.
+fn files_under(dir: &Path, depth: usize, keep: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(kind) = entry.file_type() else {
             continue;
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
         if kind.is_dir() && depth > 0 {
-            if let Some(found) = rollout(&entry.path(), suffix, depth - 1) {
-                return Some(found);
-            }
-        } else if kind.is_file() && name.starts_with("rollout-") && name.ends_with(suffix) {
-            return Some(entry.path());
+            found.extend(files_under(&entry.path(), depth - 1, keep));
+        } else if kind.is_file() && keep(&entry.file_name().to_string_lossy()) {
+            found.push(entry.path());
         }
     }
-    None
+    found
 }
 
-/// The subagent transcripts Claude Code keeps beside the session in `main`.
-fn subagents(main: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(main.with_extension("").join("subagents")) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
-        .collect()
-}
+/// A row with usage is well under this; a longer line is no such row.
+const MAX_LINE: usize = 16 << 20;
 
 /// Reads the lines `file` gained since its offset. A missing transcript
 /// keeps what was read from it (the harness deletes old ones); a shorter one
 /// was rewritten and is read again from its start.
-fn read_lines(path: &Path, file: &mut File, _max: usize) {
-    read(path, file)
+fn read(path: &Path, file: &mut File) {
+    read_lines(path, file, MAX_LINE)
 }
 
-fn read(path: &Path, file: &mut File) {
+/// [`read`], skipping a line longer than `max` bytes without holding it.
+fn read_lines(path: &Path, file: &mut File, max: usize) {
     let Ok(meta) = std::fs::metadata(path) else {
         return;
     };
@@ -500,17 +519,28 @@ fn read(path: &Path, file: &mut File) {
     let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(n) if n > 0 && line.ends_with(b"\n") => {
-                file.offset += n as u64;
-                match file.harness.as_str() {
-                    CLAUDE => claude_line(&line, file),
-                    CODEX => codex_line(&line, file),
-                    _ => {}
-                }
-            }
-            // The end, or a line the harness is still writing.
+        let n = match (&mut reader)
+            .take(max as u64 + 1)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(n) if n > 0 => n,
             _ => break,
+        };
+        if line.ends_with(b"\n") {
+            file.offset += n as u64;
+            match file.harness.as_str() {
+                CLAUDE => claude_line(&line, file),
+                CODEX => codex_line(&line, file),
+                _ => {}
+            }
+        } else if n > max {
+            // Too long to be a row with usage: skipped to its end, or to what
+            // is written of it; the rest of it does not parse either.
+            let rest = reader.skip_until(b'\n').unwrap_or(0);
+            file.offset += (n + rest) as u64;
+        } else {
+            // A line the harness is still writing.
+            break;
         }
     }
 }
@@ -578,19 +608,20 @@ fn claude_line(line: &[u8], file: &mut File) {
         message.id.unwrap_or_default(),
         row.request_id.unwrap_or_default()
     );
-    if key == file.last_key {
-        return;
-    }
+    let repeat = key == file.last_key;
     file.last_key = key;
     let context =
         usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
     file.count(
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_read_input_tokens,
-        usage.cache_creation_input_tokens,
+        [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_input_tokens,
+            usage.cache_creation_input_tokens,
+        ],
         context,
         row.timestamp.as_deref().unwrap_or(""),
+        repeat,
     );
 }
 
@@ -672,12 +703,10 @@ fn codex_line(line: &[u8], file: &mut File) {
         return;
     }
     file.count(
-        delta[0].saturating_sub(delta[1]),
-        delta[2],
-        delta[1],
-        0,
+        [delta[0].saturating_sub(delta[1]), delta[2], delta[1], 0],
         last.input_tokens,
         row.timestamp.as_deref().unwrap_or(""),
+        false,
     );
 }
 
@@ -1001,12 +1030,13 @@ mod tests {
         let mut file = File::new(CLAUDE, "root-1", false);
         read_lines(&transcript, &mut file, max);
         assert_eq!((file.offset, file.requests), (3 * max as u64, 0));
+        let other = assistant("m2", "2026-10-16T10:01:00Z", 1, 1, 1, 1);
         append(
             &transcript,
-            &[String::new(), row.clone(), "y".repeat(2 * max), row],
+            &[String::new(), row, "y".repeat(2 * max), other],
         );
         read_lines(&transcript, &mut file, max);
-        assert_eq!(file.requests, 1);
+        assert_eq!(file.requests, 2);
         assert_eq!(file.offset, std::fs::metadata(&transcript).unwrap().len());
     }
 

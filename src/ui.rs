@@ -1172,13 +1172,12 @@ impl<'a> App<'a> {
         let mut lines = Vec::new();
         let root = &project.coordinators[0];
         let (glyph, style) = dot(root.status);
+        let line = Line::new()
+            .at(3, glyph, style)
+            .at(5, "Coordinator", BOLD)
+            .at(30, root.status.word(), style);
         lines.push(
-            Line::new()
-                .at(3, glyph, style)
-                .at(5, "Coordinator", BOLD)
-                .at(30, root.status.word(), style)
-                .at(41, term::fit(&root.text, 40), Style::PLAIN)
-                .target(Target::Node(project.slug.clone(), ROOT_ID.into())),
+            text_column(line, root).target(Target::Node(project.slug.clone(), ROOT_ID.into())),
         );
         let open = open_tree(project);
         if open.is_empty() {
