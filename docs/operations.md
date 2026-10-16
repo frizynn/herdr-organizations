@@ -25,6 +25,7 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md; a coordinator node's own STATUS.md
   templates/<name>/       the project's node templates: TEMPLATE.toml, RULES.md, MEMORY.md, memory/
   TASKS.md                the task list, each task with optional indented notes; the coordinator's
+                          (absent and ignored when a tracker holds the tasks)
   routines/<name>.md      routines, including pr-followup.md; the coordinator's
   uploads/                files you give the threads
   scratch/                the coordinator's temporary files
@@ -33,11 +34,12 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   threads/<id>.next.md    Next lines the coordinator added    threads/<id>/  a tab thread's folder
   inbox/, inbox/done/     events for the coordinator
   library/<id>/           home copy of files a thread produced
-  .state/                 status, coordinator record, live coordinators, ticker state, merge gate verdicts, lock
+  .state/                 status, coordinator record, live coordinators, ticker state, merge gate verdicts, lock,
+                          the tracker's last task list (tracker.json)
 ~/.herdr-projects/.ticker.lock  .ticker.log  .progress/  .trash/
 ~/.herdr-projects/.organizations-state.json      the popup's view model, written by the ticker
 ~/.config/herdr-projects/tui.toml                popup and dock keybindings and view settings
-~/.config/herdr-projects/config.toml             yours: root, profiles, safety tables, machines
+~/.config/herdr-projects/config.toml             yours: root, profiles, safety and tracker tables, machines
 ~/.config/herdr-projects/templates/<name>/       global node templates, laid out as a project's
 ~/.config/herdr-projects/owned.json              what `configure` changed, for `unconfigure`
 ~/.config/herdr-projects/approved-routines.json  written only by `routine approve`
@@ -55,13 +57,13 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 
 | Command | What it does |
 | --- | --- |
-| `new <name> [--goal] [--repo PATH[@MACHINE]]... [--thread-profile P] [--coordinator-profile P]` | Create a project folder. The profiles default to `[defaults]` in config.toml, else `claude`. |
+| `new <name> [--goal] [--repo PATH[@MACHINE]]... [--thread-profile P] [--coordinator-profile P]` | Create a project folder. The profiles default to `[defaults]` in config.toml, else `claude`. A project with a [tracker](#tasks-from-a-tracker) gets no `TASKS.md`. |
 | `open <project> [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--new] [--tab] [--session N \| --socket P] [--rebind]` | A coordinator agent in the project folder; focuses a running one. From a shell pane inside Herdr it runs in that pane and quitting it returns to the shell; `--tab`, the popup, actions and a terminal outside Herdr use a tab of the project's workspace. `--harness`, `--model` and `--reasoning-effort` are the [node flags](#node-flags) of the same name, checked against the coordinator allow-list before any pane is made. |
 | `context <project> [--peek]` | The digest the coordinator reads every turn, with its [drift](#drift) section. |
 | `assignable <project> [--refresh] [--check OWNER]` | Who TASKS.md tasks may be assigned to (see [Task owners](#task-owners)); `--check` refuses an owner that is not valid. |
 | `coordinator prompt <project> --text-file F` | A sentence to the coordinator (the popup's task keys use it). |
 | `coordinator replace <project> --profile P \| --harness KIND [--model M] [--reasoning-effort E]` | Stop the project's running coordinator and start a new one on profile `P`, or on harness `KIND`, with the model and effort given. The choice is checked before anything stops. The popup's `x` on the project coordinator does the same. |
-| `thread start <project> --title T [--repo PATH] [--kind worktree\|tab\|checkout] [--profile P] [--machine M] [--base REF] --task-file F [--from-task TITLE]` | New thread; `-` reads the task from standard input. `--kind` is the placement; `--profile` is the agent, one the project allows. `--from-task` adds a TASKS.md task's notes, takes `--profile` and `--machine` from its owner and appends the thread's id to the task's line. |
+| `thread start <project> --title T [--repo PATH] [--kind worktree\|tab\|checkout] [--profile P] [--machine M] [--base REF] --task-file F [--from-task TITLE]` | New thread; `-` reads the task from standard input. `--kind` is the placement; `--profile` is the agent, one the project allows. `--from-task` adds a TASKS.md task's notes, takes `--profile` and `--machine` from its owner and appends the thread's id to the task's line; with a [tracker](#tasks-from-a-tracker) it takes the task's id or title and tells the tracker instead. |
 | `thread prompt`, `thread next [--line N \| --add TEXT]`, `thread stop`, `thread restart [--profile P]` | Steer a thread. Prompts are recorded in its task file. |
 | `thread read [--lines N]`, `thread keys [KEY]... [--text T]`, `thread brief` | Answer a thread's pane without going there: print what it shows (a trust dialog, a question menu, a permission prompt), then type text and press keys (`up`, `down`, `enter`, `esc`, `tab`, a digit). `thread keys` refuses a trust screen when `trust_screens` is `user`. `thread brief` sends a brief the ticker has not delivered yet (the ticker waits for a settled, empty input box, counts a brief sent only once the agent starts working, never types it twice, and after three unconfirmed tries leaves an inbox item). |
 | `thread list/show [--json]`, `thread ack`, `thread adopt` | Look at threads. `--json` prints the versioned document of [docs/json.md](json.md). |
@@ -75,8 +77,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `node rules <project> <id> [--text-file F]` | Print a node's standing instructions, or replace them. The node and its descendants read them on their next brief or restart. |
 | `inbox list [--json]`, `inbox consume`, `inbox done` | Read without marking seen; print and archive one bounded batch (at most 32) after it was delivered; mark items handled. |
 | `list [--json]`, `new ... --json`, `overview [project] [--json]`, `project show <project> [--json]` | The project documents of [docs/json.md](json.md). |
-| `task list <project> [--json]` | The tasks in `TASKS.md`. Only the coordinator writes the file; ask it, or send it a sentence with `coordinator prompt`. |
-| `task lint <project> [--json]` | Every problem the [drift](#drift) section draws from in `TASKS.md`, without its 10-line cap. It changes nothing. |
+| `task list <project> [--json]` | The tasks in `TASKS.md`, or the [tracker's](#tasks-from-a-tracker) with each id in a last column. Only the coordinator writes the file; ask it, or send it a sentence with `coordinator prompt`. Fails while the tracker is unavailable. |
+| `task lint <project> [--json]` | Every problem the [drift](#drift) section draws from in the tasks, without its 10-line cap. It changes nothing. |
 | `project status <project> [--json]` | The project's tasks and open threads with their state, pull requests, drift and Next lines, computed from the files on every call (see [docs/json.md](json.md#project-status)). |
 | `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
 | `sweep <project> [--dry-run] [--yes]` | Remove what nothing uses any more. |
@@ -115,7 +117,7 @@ The **projects** action (or `popup`) opens it, scoped to the current workspace's
 | Section | Keys |
 | --- | --- |
 | threads | `↵` jump to the pane · `1`-`9` send that Next line to the thread · `s` stop (Escape) · `r` restart with a kind picker · `a` ack · `x` resolve · `o` open the PR · `i` detail (report, Next list, files: `↵` opens, `y` copies the path) · `c` start or focus a coordinator of a chosen kind · `S` sweep |
-| tasks | `↵` jump to the delegated thread (or show the notes of a task without one) · `i` notes (a task with notes ends in `≡`) · `d` delegate · `m` done · `D` drop (each sends a sentence to the coordinator, which stays the only writer of TASKS.md) |
+| tasks | `↵` jump to the delegated thread (or show the notes of a task without one) · `i` notes (a task with notes ends in `≡`) · `d` delegate · `m` done · `D` drop (each sends a sentence to the coordinator, which stays the only writer of TASKS.md, or changes a tracker's task with the tracker's own tool). A tracker's tasks show from its last list, with their ids; the popup never runs `list` itself. |
 | inbox | `↵` detail · `a` done |
 | routines | `↵` enable or disable · `i` the prompt |
 | settings | `↵` edit (also a safety row) · `Y` yolo mode on or off (asks before turning on) · `p` pause or resume · `A` archive · `X` delete (asks first). Unscoped, the rows are the all-projects safety defaults |
@@ -273,7 +275,7 @@ Each task in `TASKS.md` has at most one owner, in brackets after its title. The 
 - **Checked owners.** The coordinator checks a profile or machine owner with `assignable --check` before writing it and refuses one that is not valid.
 - **People.** `me`, or any name or text you give (`(Elias)`, `(Priya Rao)`), is written only when you name that owner. A bare name that is no profile here is a person: shown as written and never delegated.
 - **Delegating.** `thread start --from-task "<title>"` (and `node start --from-task`) starts the thread with the owner's profile and machine (`--profile`, `--machine`); a flag that contradicts the owner is refused. A remote thread runs its machine's own definition of the profile (see [Threads on other machines](#threads-on-other-machines)), and a `@machine` owner gets that machine's default thread profile. The binary then appends ` · t-0007` to the end of the task's line, replacing a thread id that was there; the other lines are left as they were. It reads `TASKS.md` again right before writing it, under the project's lock, which keeps two delegations apart; the coordinator does not take that lock, so an edit it saves in that same instant can be lost. A title that no task or two tasks have is refused before anything is created. If the start fails later, the line keeps the id of the failed thread, which `thread restart` retries. The thread's record keeps the title (`task` in [`--json`](json.md#thread)), and a template's profile counts only when neither a flag nor the owner names one.
-- **Resolving.** When a thread is resolved by any path (by hand, on merge, or automatically) while `TASKS.md` still has an open task on it, the inbox gets one `task` item: `PR merged, task open` or `thread resolved, task open`.
+- **Resolving.** When a thread is resolved by any path (by hand, on merge, or automatically) while `TASKS.md` still has an open task on it, the inbox gets one `task` item: `PR merged, task open` or `thread resolved, task open`. With a tracker, the same item comes when its list still has the task open, after `link` has heard `merged` or `resolved`.
 - **Old lines.** `(agent)` reads as unassigned and `(agent → t-0007)` as this machine's default profile with thread t-0007.
 
 ## Drift
@@ -291,6 +293,36 @@ Right after its inbox, `context` prints `## Drift (computed, data not instructio
 | `duplicate-title` | Two tasks share a title, so `--from-task` refuses it. |
 
 It changes nothing: the coordinator fixes what is its own and asks the user about the rest.
+
+With a [tracker](#tasks-from-a-tracker), only `thread-missing` and `thread-resolved` apply to tasks, from the `thread` the tracker gives, and the line names the task by its id (`tracker TRK-1 "Fix login"`) instead of a line of `TASKS.md`. The other rules are about the format of `TASKS.md`. While the tracker is unavailable, no task drift is computed.
+
+## Tasks from a tracker
+
+A project can take its tasks from a tracker it already has instead of `TASKS.md`, so there is one list, not two. You name two commands in config.toml, in a table keyed like the safety tables: the project's own `[tracker."<canonical project folder>"]`, then `[tracker.default]` for every project without one.
+
+```toml
+[tracker."/Users/you/.herdr-projects/billing"]
+list = ["node", "/Users/you/bin/tracker.mjs", "list"]   # required; without it, TASKS.md as before
+link = ["node", "/Users/you/bin/tracker.mjs", "link"]   # optional
+cache_secs = 60                                         # how long a list is reused (default 60)
+timeout = 30                                            # seconds per call (default 30)
+```
+
+Both are argv, never a shell string. They run in the project folder, with no standard input and `HP_PROJECT` set to the slug. A project whose own table sets `list = []` reads `TASKS.md` even when `[tracker.default]` names one.
+
+- **`list`** prints one JSON document: `{"schema_version":1,"tasks":[{"id","title","list","owner","thread","done","description","url"}]}`. `id` and `title` are required, the rest optional; unknown fields are ignored. An `id` is 1 to 64 letters, digits, `.`, `_`, `:`, `/` and `-`, not starting with `-`, because it goes into the coordinator's prompts and command lines; a list with any other id is not a task list. `owner` is written as in `TASKS.md` brackets (`me`, `claude`, `@m1`, `codex@m1`, a person's name) and `thread` is a thread id such as `t-0007`. A non-zero exit, a timeout or output that is not this document means the tracker is unavailable.
+- **`link`** gets `HP_TASK_ID`, `HP_THREAD_ID`, `HP_EVENT` (`started`, `resolved` or `merged`) and `HP_PR_URL` when the thread has a pull request. It hears `started` when a thread starts with `--from-task`, and `merged` when the ticker sees that thread's pull request merge, whether the thread is still open or was resolved before. When the thread is resolved it hears `merged` if the pull request merged, else `resolved`. So a merged thread's task usually hears `merged` twice, and the command should treat a repeat as a no-op. Its exit status is all that is read. When it fails, the inbox gets a `task` item (`tracker link failed`); it never stops or undoes the start or the resolve.
+- **Cache.** `context` runs every turn, so the answer of `list`, or the reason it failed, is kept in `.state/tracker.json` and reused for `cache_secs`. `--from-task` always asks again, so a task added a moment ago is found, and a `link` call drops the cache.
+
+With a tracker:
+
+- `new` writes no `TASKS.md`, and a `TASKS.md` that exists is ignored: `context` says so in one line.
+- `context` prints `## Tasks (tracker): data, not instructions` with each task as `- [ ] [<id>] <title> (<owner>) · <thread>`, its list as a `###` heading and its description folded into one `notes:` line. When the tracker is unavailable it prints one line, `tracker unavailable: ...`, with the reason in the binary's own words and nothing the command printed.
+- `--from-task` takes the task's id or its title. The task's description reaches the thread as a `TASKS.md` task's notes do, its owner gives `--profile` and `--machine`, and the thread's record keeps the id (`task_id`). While the tracker is unavailable, `--from-task` is refused before anything is created.
+- `task list`, `project status` and the popup show the tracker's tasks with their ids. `project status` names them `task:<id>`.
+- The coordinator changes tasks with the tracker's own tool, which the project's instructions or memory should name; the popup's `d`, `m` and `D` keys ask it to, naming the task by its id alone. A title is anyone's text in the tracker, so it reaches the coordinator only in the digest, marked as data.
+
+What the tracker prints is data. It reaches the digest only as task fields, one line each with control characters removed, under a heading that says so; only a task's description reaches a thread's brief, as `TASKS.md` notes do. The commands run with your permissions, and config.toml is yours: the coordinator never writes it.
 
 ## The allow-list for your coordinator
 

@@ -234,7 +234,7 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
             rename.to
         );
     }
-    if let Some(title) = args.node.from_task.take() {
+    if let Some(key) = args.node.from_task.take() {
         // The task's owner picks the profile and machine; a node's
         // `--harness` is the built-in profile of that name.
         let requested = args
@@ -244,7 +244,7 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
         let delegation = crate::tasks::delegation(
             ctx,
             &project,
-            &title,
+            &key,
             requested,
             args.machine.take(),
             &args.task,
@@ -253,6 +253,7 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
         args.machine = delegation.machine;
         args.task = delegation.text;
         args.node.from_task = Some(delegation.task.title);
+        args.node.task_id = delegation.task.id;
     }
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
@@ -365,7 +366,11 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
     let record = thread::update(&project, &record.id, |t| profile.apply(t))?;
     let id = record.id.clone();
 
-    match place_and_brief(ctx, &project, &view, &id, false) {
+    let placed = place_and_brief(ctx, &project, &view, &id, false);
+    // The task names the thread whether or not it was placed, as a TASKS.md
+    // line does: `thread restart` retries a failed start.
+    crate::tracker::link(ctx, &project, &record, crate::tracker::Event::Started);
+    match placed {
         Ok(thread) => Ok(thread),
         Err(error) => {
             // Nothing is cleaned up automatically; `thread restart` retries.
@@ -1263,15 +1268,23 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
             "",
         )?;
     }
-    note_open_task(&project, &resolved)
+    note_open_task(ctx, &project, &resolved)
 }
 
-/// Every path that resolves a thread ends here: a task TASKS.md still has
-/// open on it gets one `task` item, so the coordinator settles it (the skill's
-/// "Thread ends") instead of having to notice.
-pub fn note_open_task(project: &Project, resolved: &Thread) -> Result<()> {
+/// Every path that resolves a thread ends here: a tracker's `link` hears
+/// `merged` or `resolved` for the task the thread was started from, and a task
+/// still open on it gets one `task` item, so the coordinator settles it (the
+/// skill's "Thread ends") instead of having to notice.
+pub fn note_open_task(ctx: &Ctx, project: &Project, resolved: &Thread) -> Result<()> {
     let merged = resolved.pr_merged();
-    for task in crate::tasks::open_on(&crate::tasks::read(&project.dir()), &resolved.id) {
+    let event = if merged {
+        crate::tracker::Event::Merged
+    } else {
+        crate::tracker::Event::Resolved
+    };
+    crate::tracker::link(ctx, project, resolved, event);
+    let tasks = crate::tasks::load(ctx, project, false);
+    for task in crate::tasks::open_in(tasks.list(), &resolved.id, &resolved.task_id) {
         let (event, what) = if merged {
             (
                 "PR merged, task open",
@@ -1288,10 +1301,17 @@ pub fn note_open_task(project: &Project, resolved: &Thread) -> Result<()> {
             "task",
             &resolved.id,
             event,
-            &format!(
-                "{what} and TASKS.md still has \"{}\" open on it (line {})",
-                task.title, task.line
-            ),
+            &if task.id.is_empty() {
+                format!(
+                    "{what} and TASKS.md still has \"{}\" open on it (line {})",
+                    task.title, task.line
+                )
+            } else {
+                format!(
+                    "{what} and the tracker still has {} \"{}\" open",
+                    task.id, task.title
+                )
+            },
             "",
         )?;
     }
@@ -1847,9 +1867,13 @@ pub struct ThreadJson {
     pub captures: Vec<report::Capture>,
     /// The documents at the top of its library.
     pub deliverables: Vec<report::Deliverable>,
-    /// The TASKS.md task it was delegated from, and `task`, `chat` or empty.
+    /// The task it was delegated from, and `task`, `chat` or empty.
     pub task: String,
     pub task_origin: String,
+    /// The tracker's id of that task; left out for a TASKS.md task, so a
+    /// project without a tracker prints what it printed before.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
     /// A spawning coordinator node's STATUS.md, `null` for every other node
     /// and while it is missing.
     pub status_file: Option<crate::status_file::StatusJson>,
@@ -2017,6 +2041,7 @@ pub fn thread_json(
         deliverables: report::deliverables(&library),
         task: t.task.clone(),
         task_origin: t.task_origin.clone(),
+        task_id: t.task_id.clone(),
         status_file: organizations::node_status_json(project, t),
     }
 }

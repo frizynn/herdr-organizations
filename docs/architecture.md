@@ -83,12 +83,19 @@ The optional dock runs the same TUI in a split. The toggle finds it by a stored 
 
 Keybindings and view settings live in `~/.config/herdr-projects/tui.toml`. Commands are scoped to screens, so a key may be shared only by commands that never appear on the same screen; conflicts are refused in Settings and reported for hand edits.
 
+## Tasks from a tracker
+
+A project's tasks come from `TASKS.md` unless config.toml names a tracker for it (`[tracker."<canonical folder>"]`, then `[tracker.default]`, resolved as the safety tables are). `tasks::load` is the one place that decides: it returns `Tasks::File`, `Tasks::Tracker` or `Tasks::Unavailable`, and `context`, `task list`, `task lint`, `project status`, `doctor`, `--from-task` and the resolve path all read through it. The tracker module runs the user's `list` command through the Runner as argv in the project folder, with no standard input, and keeps its answer, or why it failed, in `.state/tracker.json` for `cache_secs`. There is no process that polls it: a reader asks, and the cache spares the tracker a call every turn. The popup, which has no timer, reads only that cache.
+
+`--from-task` asks the tracker again, finds the task by id or title, and the record keeps the id in `task_id` (a serde default). The optional `link` command is told `started` after the thread is placed (or failed to be), `merged` where the ticker records a merge (the pull request pass over open threads and the one over resolved threads), and `merged` or `resolved` at the end of every resolve path (`threads::note_open_task`). A merged thread is told `merged` twice, so `link` must take a repeat as a no-op; a failure leaves an inbox item and changes nothing else. Ids are plain identifiers of at most 64 characters, and the popup's sentences to the coordinator name a task by its id only. What the tracker prints is data: fields are cut to one line without control characters, the digest shows them under a heading that says so, and a failure is described in this binary's words, never with the command's output.
+
 ## Compatibility and intentional limits
 
 - `~/.herdr-projects/`, `~/.config/herdr-projects/` and `HERDR_PROJECTS_ROOT` remain unchanged.
 - `herdr-organizations` is the primary binary. Cargo also builds `herdr-projects` as a compatibility name; it is the same program. Paths written into hooks, the tab bar, `AGENTS.md` and the `~/.local/bin` link name `herdr-projects`, so entries written by Herdr Projects keep working and are recognized as this plugin's.
 - Herdr Projects 0.2.34 features are kept as they are: the sidebar grouping (`hp_*` tokens, written by `configure`), the Projects popup (`projects` pane), progress hooks, profiles, tasks, cleanup on resolve, rename, update. Where both changed the same thing the upstream mechanism wins and the organization feature sits on top: brief delivery is upstream's `brief::deliver`, the nudge is upstream's `[hp inbox]` line, notifications are upstream's `Notifier` filtered by the popup's notify setting, and organization tokens no longer use the `project`/`thread`/`review`/`rank` names that upstream clears.
 - `thread start` remains a direct worker-under-root alias. Node lifecycle commands provide the hierarchy-aware names.
+- A project with no `[tracker]` table reads and writes `TASKS.md` as before, and its JSON documents carry none of the tracker fields (`id`, `url`, `task_id`, `tasks_source`).
 - Existing ticker cadence, inbox format, reports, routines, worktree behavior and SSH transport remain in place.
 - Remote workers remain supported. Remote coordinators with child-spawn permission are refused until a remote CLI bridge exists.
 - `can_spawn` is deterministic CLI validation, not an ACL. Agents still have the shell and permissions of their harness.

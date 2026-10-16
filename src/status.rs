@@ -1,7 +1,7 @@
 //! `project status [--json]`: the project's work in one document, computed on
-//! every call from TASKS.md, the root's STATUS.md, the thread records with their pull
-//! requests, and the inbox. Nobody writes it, so it cannot drift from them the
-//! way a hand-kept notes file does.
+//! every call from the tasks (TASKS.md, or a tracker's), the root's STATUS.md,
+//! the thread records with their pull requests, and the inbox. Nobody writes
+//! it, so it cannot drift from them the way a hand-kept notes file does.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +17,7 @@ use crate::tasks::{self, Task};
 use crate::thread::{Status, Thread};
 use crate::threads::{self, PrJson, ThreadJson};
 
-/// One row of the status: a TASKS.md task, or an open thread no task names.
+/// One row of the status: a task, or an open thread no task names.
 #[derive(Serialize)]
 struct Item {
     kind: &'static str,
@@ -65,7 +65,7 @@ fn task_item(
 ) -> Item {
     let mut flags: Vec<&'static str> = problems
         .iter()
-        .filter(|p| p.line == task.line)
+        .filter(|p| p.is_about(task))
         .map(|p| p.rule.name())
         .collect();
     let (state, group, pr, created, updated) = match thread {
@@ -99,7 +99,11 @@ fn task_item(
     };
     Item {
         kind: "task",
-        id: format!("task:{}", task.line),
+        id: if task.id.is_empty() {
+            format!("task:{}", task.line)
+        } else {
+            format!("task:{}", task.id)
+        },
         title: task.title.clone(),
         list: task.list.clone(),
         owner,
@@ -163,8 +167,9 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
         .zip(threads::threads_json(ctx, &project, &rows))
         .map(|(t, json)| (t.id.clone(), (t, json)))
         .collect();
-    let list = tasks::parse(&tasks::read(&dir));
-    let problems = drift::problems(&project);
+    let tasks = tasks::load(ctx, &project, false);
+    let list = tasks.list();
+    let problems = drift::problems(&project, &tasks);
     let config = crate::profiles::load(&ctx.config_dir)?;
     let is_profile = |p: &str| config.get(p).is_some();
 
@@ -223,13 +228,16 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
         })
         .collect();
     let status = status_file::root_text(&project);
-    threads::print_json(&serde_json::json!({
+    let mut document = serde_json::json!({
         "schema_version": threads::JSON_SCHEMA_VERSION,
         "project": project.slug,
         "generated_at": crate::project::now(),
         "objective": objective(&status),
         "sources": {
-            "tasks_updated": modified(&dir.join("TASKS.md")),
+            "tasks_updated": match &tasks {
+                tasks::Tasks::File(_) => modified(&dir.join("TASKS.md")),
+                _ => crate::tracker::fetched_at(&project),
+            },
             "status_file": crate::records::shown(&project, &status_file::root(&project)),
             "status_updated": modified(&status_file::root(&project)),
             "status_chars": status.chars().count(),
@@ -240,7 +248,12 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
         "drift": drift,
         "problems": problems.iter().map(Problem::to_json).collect::<Vec<_>>(),
         "next": next,
-    }))
+    });
+    // Only with a tracker, so a TASKS.md project prints what it did before.
+    if !matches!(tasks, tasks::Tasks::File(_)) {
+        document["sources"]["tasks_source"] = tasks.source().into();
+    }
+    threads::print_json(&document)
 }
 
 #[cfg(test)]

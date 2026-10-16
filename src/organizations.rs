@@ -32,9 +32,12 @@ pub struct NodeRequest {
     pub rules: String,
     /// What the node's memory starts with, as a template carries it.
     pub memory: Memory,
-    /// The TASKS.md task it is delegated from (`--from-task`), its title as
-    /// written there: the new record keeps it and the task line gets the id.
+    /// The task it is delegated from (`--from-task`), its title as written
+    /// there: the new record keeps it and a TASKS.md line gets the id.
     pub from_task: Option<String>,
+    /// That task's tracker id, empty for TASKS.md: the record keeps it and
+    /// the tracker's `link` is told instead of TASKS.md.
+    pub task_id: String,
     /// The profile of the template it starts from, used when neither a flag
     /// nor the task's owner names one.
     pub template_profile: Option<String>,
@@ -50,6 +53,7 @@ impl Default for NodeRequest {
             rules: String::new(),
             memory: Memory::default(),
             from_task: None,
+            task_id: String::new(),
             template_profile: None,
         }
     }
@@ -537,6 +541,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.permission_profile = profile.permission_profile.clone();
         record.raw_agent_args = profile.raw_agent_args.clone();
         record.task = args.request.from_task.clone().unwrap_or_default();
+        record.task_id = args.request.task_id.clone();
         record.task_origin = if args.request.from_task.is_some() {
             "task"
         } else {
@@ -564,8 +569,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     // neither a record nor a line naming one.
     let written = crate::records::write(&records, &task_path, args.task.as_bytes()).and_then(
         |()| match &args.request.from_task {
-            Some(title) => link_task(project, title, &record.id),
-            None => Ok(()),
+            Some(title) if args.request.task_id.is_empty() => link_task(project, title, &record.id),
+            _ => Ok(()),
         },
     );
     if let Err(error) = written {

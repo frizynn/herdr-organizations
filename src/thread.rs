@@ -180,6 +180,8 @@ pub struct Thread {
     /// `task` when started with `--from-task`, `chat` when started without
     /// it, empty on a record from before task links or an adopted pane.
     pub task_origin: String,
+    /// The tracker's id of that task; empty for a TASKS.md task.
+    pub task_id: String,
     /// What its agent was last asked about its pull request, per request
     /// (`fix-ci`, `address-comments`, `resolve-conflicts`), so `thread
     /// pr-action`, auto-fix and `pr` routines do not repeat one another.

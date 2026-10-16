@@ -193,7 +193,7 @@ enum Command {
         #[command(subcommand)]
         command: ProjectCommand,
     },
-    /// TASKS.md, which only the coordinator writes
+    /// The tasks: TASKS.md, which only the coordinator writes, or the tracker config.toml names
     Task {
         #[command(subcommand)]
         command: TaskCommand,
@@ -453,7 +453,7 @@ enum ThreadCommand {
         /// The task; `-` reads standard input
         #[arg(long, value_name = "FILE")]
         task_file: String,
-        /// Delegating this TASKS.md task (its title as written there): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the thread's id
+        /// Delegating this task (its title as written in TASKS.md, or a tracker task's id or title): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the thread's id (a tracker's `link` is told instead)
         #[arg(long, value_name = "TITLE")]
         from_task: Option<String>,
     },
@@ -664,7 +664,7 @@ struct NodeStartArgs {
     /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB); they replace a template's
     #[arg(long, value_name = "FILE")]
     rules_file: Option<String>,
-    /// Delegating this TASKS.md task (its title as written there): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the node's id
+    /// Delegating this task (its title as written in TASKS.md, or a tracker task's id or title): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the node's id (a tracker's `link` is told instead)
     #[arg(long, value_name = "TITLE")]
     from_task: Option<String>,
 }
@@ -839,7 +839,7 @@ enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Where TASKS.md disagrees with the thread records; it changes nothing
+    /// Where the tasks disagree with the thread records; it changes nothing
     Lint {
         slug: String,
         /// Print the versioned JSON contract (docs/json.md)
@@ -1078,7 +1078,7 @@ pub fn run() -> Result<()> {
                     bail!("there is no profile `{name}`; `profile list` shows them");
                 }
             }
-            let project = project::create(&ctx.root, &name, &goal, repos)?;
+            let project = project::create_for(&ctx.config_dir, &ctx.root, &name, &goal, repos)?;
             crate::profiles::write_project_defaults(&project, &thread, &coordinator)?;
             let prefix = coordinator::current_prefix(&ctx.root)?;
             project::write_priming(&project, &prefix)?;
@@ -1496,6 +1496,7 @@ pub fn run() -> Result<()> {
                         rules,
                         memory: Default::default(),
                         from_task,
+                        task_id: String::new(),
                         template_profile: None,
                     },
                 };
