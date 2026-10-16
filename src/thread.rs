@@ -451,6 +451,8 @@ pub struct BriefInput<'a> {
     /// `<binary> --root <root>` for `report`; empty for a remote thread,
     /// whose machine has its own binary (or none).
     pub report_prefix: &'a str,
+    /// The project's `progress`: off, the brief has no progress section.
+    pub progress: bool,
     /// A spawning coordinator node's status file: it then gets the
     /// coordinator-node brief instead of the thread brief. `None` for every
     /// other node.
@@ -568,12 +570,14 @@ pub fn compose_brief(input: &BriefInput) -> String {
     brief.push_str(input.node_protocol.trim());
     brief.push('\n');
 
-    brief.push_str("\n# Progress\n\n");
-    if input.report_prefix.is_empty() {
-        brief.push_str("Report progress with `herdr-projects report --percent N --activity '...'` if that command exists on this machine (use `--activity 'Waiting for you'` before asking the user something, and `--percent 100` when done); otherwise skip it.\n");
-    } else {
-        brief.push_str(&crate::progress::guidance(input.report_prefix, None));
-        brief.push('\n');
+    if input.progress {
+        brief.push_str("\n# Progress\n\n");
+        if input.report_prefix.is_empty() {
+            brief.push_str("Report progress with `herdr-projects report --percent N --activity '...'` if that command exists on this machine (use `--activity 'Waiting for you'` before asking the user something, and `--percent 100` when done); otherwise skip it.\n");
+        } else {
+            brief.push_str(&crate::progress::guidance(input.report_prefix, None));
+            brief.push('\n');
+        }
     }
     brief.push_str("\n# Task\n\n");
     brief.push_str(input.task.trim());
@@ -618,6 +622,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
         report_path: &thread.report_path(),
         library_path: &thread.library_path(),
         report_prefix,
+        progress: settings.progress,
         status: status.as_ref(),
     }))
 }
@@ -1673,6 +1678,7 @@ mod tests {
             report_path: "/wt/.herdr-project/demo-t-0001/report.md",
             library_path: "/wt/.herdr-project/demo-t-0001/library",
             report_prefix: "/bin/hp --root /r",
+            progress: true,
             status: None,
         };
         let brief = compose_brief(&input);

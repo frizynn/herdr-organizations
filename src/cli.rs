@@ -1803,6 +1803,11 @@ pub fn run() -> Result<()> {
         Command::Skill => {
             print!("{}", include_str!("../skill/COORDINATOR.md"));
             // Every harness learns to report here; hooks only add reminders.
+            // A project with `progress` off gets neither.
+            let here = std::env::current_dir().unwrap_or_default();
+            if !crate::progress::taught_in(&ctx.root, &here) {
+                return Ok(());
+            }
             let pane = crate::progress::current(ctx.env, ctx.runner).map(|p| p.pane_id);
             println!(
                 "\n## Progress\n\n{}",

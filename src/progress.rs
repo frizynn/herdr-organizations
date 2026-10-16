@@ -359,8 +359,10 @@ pub fn note_human_prompt(seat: &Seat, event: &serde_json::Value, now: i64) -> Op
     }
 }
 
-/// The hook's whole answer in a project's pane: what [`respond`] gives, and
-/// a coordinator node's stale status line after a prompt the user typed.
+/// The hook's whole answer in a project's pane: what [`respond`] gives
+/// while the project has `progress` on, and a coordinator node's stale
+/// status line. After a prompt the user typed, nothing while it has
+/// `turn_reminder` off; the prompt's time is recorded either way.
 pub fn answer(
     seat: &Seat,
     settings: &crate::project::Settings,
@@ -369,15 +371,28 @@ pub fn answer(
     prefix: &str,
     now: i64,
 ) -> Option<String> {
-    let _ = settings;
-    let parts: Vec<String> = [
-        respond(record, event, seat.role(), prefix, now),
-        note_human_prompt(seat, event, now),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let progress = settings
+        .progress
+        .then(|| respond(record, event, seat.role(), prefix, now))
+        .flatten();
+    let stale = note_human_prompt(seat, event, now);
+    if event["hook_event_name"] == "UserPromptSubmit" && !settings.turn_reminder {
+        return None;
+    }
+    let parts: Vec<String> = [progress, stale].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// Whether `skill` run from `dir` should teach progress reporting: false
+/// only in the folder of a project with `progress` off.
+pub fn taught_in(root: &Path, dir: &Path) -> bool {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    crate::project::list_slugs(root)
+        .iter()
+        .filter_map(|slug| crate::project::Project::load(root, slug).ok())
+        .find(|project| project.canonical_dir() == dir)
+        .and_then(|project| project.read_project_md().ok())
+        .is_none_or(|(settings, _)| settings.progress)
 }
 
 /// `report --percent N|--unknown --activity "..."`, run by the agent in its
