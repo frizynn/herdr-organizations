@@ -144,6 +144,15 @@ pub struct Ask {
 }
 
 impl Ask {
+    /// `<ask> : <answer>`, or the ask alone.
+    pub fn said(&self) -> String {
+        if self.answer.is_empty() {
+            self.text.clone()
+        } else {
+            format!("{} : {}", self.text, self.answer)
+        }
+    }
+
     /// The order a list of asks is read in: what waits on the user, what
     /// does not close, what is in progress, what is done, then lines that
     /// do not follow the format.
@@ -815,6 +824,12 @@ mod tests {
             ("open", "(#14)", "a linked PR is closed"),
             ("working", "(task:3)", "a linked task is done"),
             ("working", "", "no thread, PR or task is linked"),
+            ("done", "(task:2)", "a linked task is still to do"),
+            ("answered", "(task:2)", "a linked task is still to do"),
+            ("done", "(t-0003, task:2)", "a linked task is still to do"),
+            ("done", "(t-0005)", "a linked thread failed"),
+            ("done", "(#14)", "a linked PR is closed"),
+            ("done", "(t-0006)", "a linked PR is closed"),
         ];
         for (state, links, reason) in cases {
             let ask = one(&format!("- [{state}] Something : next {links}"));
@@ -823,7 +838,9 @@ mod tests {
         let closes = [
             ("done", "(t-0003, #12)"),
             ("done", "(t-0002)"),
-            ("answered", "(task:2)"),
+            ("done", "(task:3)"),
+            ("answered", "(t-0005)"),
+            ("answered", "(#14)"),
             ("done", ""),
             ("open", ""),
             ("answered", "(https://example.com/x)"),
@@ -840,6 +857,67 @@ mod tests {
             assert_eq!(ask.mismatch, "", "[{state}] {links}");
         }
         assert_eq!(one("- [blocked] x : y").mismatch, "");
+    }
+
+    /// `#12` names a pull request only when every thread with that number
+    /// has the same one; with two repositories it is left unresolved.
+    #[test]
+    fn a_pr_number_two_repositories_share_resolves_to_nothing() {
+        let records = Records::new(
+            vec![
+                thread(
+                    "t-0001",
+                    Status::Open,
+                    Group::ReadyForReview,
+                    "https://github.com/acme/app/pull/12",
+                    "OPEN",
+                ),
+                thread(
+                    "t-0002",
+                    Status::Resolved,
+                    Group::Resolved,
+                    "https://github.com/acme/web/pull/12",
+                    "MERGED",
+                ),
+                thread(
+                    "t-0003",
+                    Status::Open,
+                    Group::Idle,
+                    "https://github.com/acme/app/pull/7",
+                    "OPEN",
+                ),
+                thread(
+                    "t-0004",
+                    Status::Resolved,
+                    Group::Resolved,
+                    "https://github.com/acme/app/pull/7",
+                    "OPEN",
+                ),
+            ],
+            Vec::new(),
+        );
+        let ask = |links: &str| {
+            read(
+                &format!("## Asked\n- [done] Ship : merged ({links})\n"),
+                &records,
+            )
+            .asks[0]
+                .clone()
+        };
+        let ambiguous = ask("#12");
+        assert_eq!(
+            (
+                ambiguous.links[0].target.as_str(),
+                ambiguous.links[0].state.as_str()
+            ),
+            ("", "")
+        );
+        assert_eq!(ambiguous.mismatch, "");
+        let full = ask("https://github.com/acme/app/pull/12");
+        assert_eq!(full.mismatch, "a linked PR is still open");
+        let shared = ask("#7");
+        assert_eq!(shared.links[0].target, "https://github.com/acme/app/pull/7");
+        assert_eq!(shared.mismatch, "a linked PR is still open");
     }
 
     #[test]

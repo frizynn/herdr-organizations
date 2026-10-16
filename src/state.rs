@@ -220,15 +220,24 @@ pub struct Card<'a> {
 }
 
 impl Card<'_> {
-    /// Decisions the coordinator waits on the user for: the lines under
-    /// `## Needs your decision` and the asks marked `needs-decision`.
+    /// What the coordinator waits on the user for: the lines under
+    /// `## Needs your decision`, then the asks marked `needs-decision`.
+    pub fn waiting(&self) -> Vec<String> {
+        self.status
+            .map(|s| s.needs_decision.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                self.asks
+                    .iter()
+                    .filter(|a| a.state == asks::State::NeedsDecision)
+                    .map(|a| a.said()),
+            )
+            .collect()
+    }
+
     pub fn decisions(&self) -> usize {
-        self.status.map_or(0, |s| s.needs_decision.len())
-            + self
-                .asks
-                .iter()
-                .filter(|a| a.state == asks::State::NeedsDecision)
-                .count()
+        self.waiting().len()
     }
 
     /// Asks that do not close with what their links confirm.
@@ -1001,11 +1010,23 @@ mod tests {
         assert_eq!((root.decisions(), root.mismatches()), (0, 0));
 
         thread::update(&project, "t-0001", |t| t.status = thread::Status::Resolved).unwrap();
+        node_record(
+            &project,
+            "t-0002",
+            "root",
+            NodeRole::Worker,
+            Group::ReadyForReview,
+        );
+        thread::update(&project, "t-0002", |t| {
+            t.pr = "https://github.com/o/r/pull/3".into();
+            t.pr_state = "OPEN".into();
+        })
+        .unwrap();
         let node_status = organizations::status_path(&project, "t-0001");
         std::fs::create_dir_all(node_status.parent().unwrap()).unwrap();
         std::fs::write(
             &node_status,
-            "## Asked\n- [done] Old : shipped\n- [open] Left : never answered\n",
+            "## Asked\n- [done] Old : shipped\n- [open] Left : never answered\n- [done] Card tokens : shipped (t-0002)\n- [needs-decision] Which bank : two options\n## Needs your decision\n- Old decision : a or b\n",
         )
         .unwrap();
         let snapshot = build(&world.ctx(), &[]);
@@ -1014,17 +1035,15 @@ mod tests {
             .iter()
             .map(|(_, a)| a.ask.text.as_str())
             .collect();
-        assert_eq!(listed, ["Left"]);
-        assert_eq!(
-            snapshot
-                .project("demo")
-                .unwrap()
-                .card("t-0001")
-                .unwrap()
-                .asks
-                .len(),
-            2
-        );
+        // What does not close stays, what it left open stays, and nothing
+        // in a resolved coordinator's file waits on the user any more.
+        assert_eq!(listed, ["Card tokens", "Left"]);
+        let view = snapshot.project("demo").unwrap();
+        let card = view.card("t-0001").unwrap();
+        let shown: Vec<&str> = card.asks.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(shown, listed, "the card shows what the list shows");
+        assert!(card.waiting().is_empty());
+        assert_eq!((card.decisions(), card.mismatches()), (0, 1));
     }
 
     /// A model a binary from before asks wrote reads, with no asks and no
