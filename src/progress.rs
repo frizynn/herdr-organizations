@@ -1028,18 +1028,10 @@ mod tests {
     }
 
     /// A coordinator node whose STATUS.md is older than the user's previous
-    /// message, in a project with the given settings.
-    fn stale_node(settings: &crate::project::Settings) -> (tempfile::TempDir, Seat) {
+    /// message.
+    fn stale_node() -> (tempfile::TempDir, Seat) {
         let home = tempfile::tempdir().unwrap();
         let project = crate::project::create(home.path(), "demo", "", vec![]).unwrap();
-        let mut text = std::fs::read_to_string(project.project_md()).unwrap();
-        for (key, on) in [
-            ("progress", settings.progress),
-            ("turn_reminder", settings.turn_reminder),
-        ] {
-            text = text.replacen("+++\n", &format!("+++\n{key} = {on}\n"), 1);
-        }
-        std::fs::write(project.project_md(), text).unwrap();
         let node = crate::thread::Thread {
             id: "t-0001".into(),
             role: crate::thread::NodeRole::Coordinator,
@@ -1063,7 +1055,7 @@ mod tests {
     #[test]
     fn with_both_switches_on_the_hook_says_what_it_always_said() {
         let on = settings(true, true);
-        let (_home, seat) = stale_node(&on);
+        let (_home, seat) = stale_node();
         let mut record = Record {
             pane_id: "w1:p1".into(),
             ..Record::default()
@@ -1099,7 +1091,7 @@ mod tests {
     #[test]
     fn progress_off_gives_no_progress_text_anywhere() {
         let off = settings(false, true);
-        let (_home, seat) = stale_node(&off);
+        let (_home, seat) = stale_node();
         let mut record = Record::default();
         assert_eq!(
             answer(&seat, &off, &mut record, &event("SessionStart"), "hp", 1000),
@@ -1133,7 +1125,7 @@ mod tests {
     #[test]
     fn turn_reminder_off_adds_nothing_after_a_typed_prompt_and_still_records_it() {
         let off = settings(true, false);
-        let (_home, seat) = stale_node(&off);
+        let (_home, seat) = stale_node();
         let mut record = Record {
             pane_id: "w1:p1".into(),
             ..Record::default()

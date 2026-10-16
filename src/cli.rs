@@ -288,7 +288,7 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Change one setting in PROJECT.md (name, goal, icon, tone, coordinator_profile, thread_profile, max_parallel_threads, auto_resolve_days, nudge, mute, repos.add, repos.remove)
+    /// Change one setting in PROJECT.md (name, goal, icon, tone, coordinator_profile, thread_profile, max_parallel_threads, auto_resolve_days, nudge, mute, progress, turn_reminder, records, repos.add, repos.remove)
     Set {
         slug: String,
         key: String,

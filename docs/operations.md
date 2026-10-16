@@ -342,7 +342,7 @@ The ticker as a whole stops for a paused project (`pause`, `resume`), and the in
 
 `records` holds each thread's report (`threads/<id>.md`), task file with its follow-ups (`threads/<id>.task.md`), the Next lines the coordinator added (`threads/<id>.next.md`) and library (`library/<id>/`), the root's `STATUS.md` and each coordinator node's `nodes/<id>/STATUS.md`. Settings, memory, `TASKS.md`, routines, node scopes, thread records (`threads/<id>.toml`), tab threads' folders, the inbox, `scratch/` and `.state/` stay in the project folder, so internal state never goes to a synced folder. `context` prints the effective folder (`records=` on its Settings line) and the root's status file in its `## Status` heading, `node show` prints a node's, and `project show` carries `records`.
 
-`set <project> records <folder>` takes an absolute path (`~/` is your home) without `..`, refuses a symbolic link, a file, a folder inside the projects root or inside a project, and the records folder of another project, and makes the folder when it is missing. Under the project's lock it copies every record there, keeping modification times, writes the setting, and only then removes the originals and the folders that left empty. A different file already at a destination moves nothing and names the file. Running it again with the same folder changes nothing, and `set <project> records ""` brings the records back by the same rule. Agents keep writing where they were told until their next `context`, brief or restart: a coordinator learns the new path on its next turn, a node on its next brief.
+`set <project> records <folder>` takes an absolute path (`~/` is your home) without `..`, refuses a symbolic link, a file, a folder inside the projects root or one that holds it, a folder inside a project, and the records folder of another project, and makes the folder when it is missing. Under the project's lock it copies every record there, keeping modification times, writes the setting, and only then removes the originals and the folders that left empty. A different file already at a destination moves nothing and names the file. Running it again with the same folder changes nothing, and `set <project> records ""` brings the records back by the same rule. Agents keep writing where they were told until their next `context`, brief or restart: a coordinator learns the new path on its next turn, a node on its next brief.
 
 ## Routines
 
@@ -359,7 +359,7 @@ A file `routines/<name>.md` with TOML front matter; the body is the prompt.
 - **Merged pull requests and auto-resolve** clean up the same way.
 - **Sweep** lists and removes worktrees on `hp/<project>/` branches with no open thread, branches of resolved threads whose pull request merged, tabs of resolved threads, working folders of tab threads resolved longer than `auto_resolve_days` ago, empty repository workspaces its threads' worktrees were grouped under, and handled inbox items older than 30 days. `doctor` shows the same list. Sweep covers local repositories.
 - **Archive** closes the project's workspace and its threads' workspaces and hides the project; nothing is deleted, and `unarchive` reopens it. Archive never closes a repository's primary workspace.
-- **Delete** moves the folder to `.trash/`.
+- **Delete** moves the folder to `.trash/`. A records folder elsewhere stays where it is.
 
 ## Threads on other machines
 

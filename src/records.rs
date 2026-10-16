@@ -113,8 +113,8 @@ pub fn set(ctx: &Ctx, project: &Project, value: &str) -> Result<String> {
 
 /// The folder `set` would store: `None` for the project folder. It must be
 /// absolute (`~/` expands to the caller's home), without `..`, not a
-/// symbolic link or a file, outside the projects root, and outside every
-/// project and every other project's records folder. It is made, with its
+/// symbolic link or a file, neither inside the projects root nor holding
+/// it, and outside every project and every other project's records folder. It is made, with its
 /// `threads/` and `library/`, when missing.
 fn folder(ctx: &Ctx, project: &Project, value: &str) -> Result<Option<PathBuf>> {
     let value = value.trim();
@@ -139,9 +139,9 @@ fn folder(ctx: &Ctx, project: &Project, value: &str) -> Result<Option<PathBuf>> 
     }
     let real = real_path(&path);
     let root = real_path(&ctx.root);
-    if real.starts_with(&root) {
+    if real.starts_with(&root) || root.starts_with(&real) {
         bail!(
-            "{} is inside the projects root {}; records go outside it",
+            "{} is inside the projects root {} or holds it; records go beside it",
             path.display(),
             ctx.root.display()
         );
@@ -690,6 +690,7 @@ mod tests {
         refused("vault/demo", "absolute");
         refused(&format!("{}/../x", setup.home.path().display()), "..");
         refused(&ctx.root.join("notes").to_string_lossy(), "projects root");
+        refused(&setup.home.path().to_string_lossy(), "projects root");
         let link = setup.home.path().join("link");
         std::fs::create_dir_all(setup.home.path().join("target")).unwrap();
         std::os::unix::fs::symlink(setup.home.path().join("target"), &link).unwrap();
