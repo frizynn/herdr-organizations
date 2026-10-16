@@ -482,6 +482,29 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     assert_eq!(shown["thread"]["summary"], Value::Null);
 }
 
+/// A coordinator node's report is only its verdict, its summary and where
+/// its status file is: no `## Report` and no `## Next`, so no Next list.
+#[test]
+fn a_coordinator_nodes_short_report_has_no_next_list() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "threads/t-0002.md",
+        "Status: done\n## Summary\nLogin and docs shipped.\nDetails: nodes/t-0002/STATUS.md\n",
+    );
+    let thread = &fixture.json(&["thread", "show", "demo", "t-0002", "--json"])["thread"];
+    assert_eq!(thread["verdict"], "done");
+    assert_eq!(
+        thread["summary"],
+        "Login and docs shipped.\nDetails: nodes/t-0002/STATUS.md"
+    );
+    assert_eq!(thread["next"], json!([]));
+    assert_eq!(
+        fixture.text(&["thread", "next", "demo", "t-0002"]),
+        "t-0002 has no Next list\n"
+    );
+}
+
 /// Projects from before the rename keep their HANDOFF.md as the root's
 /// status file until it is renamed; with neither file, `status_file` is null.
 #[test]

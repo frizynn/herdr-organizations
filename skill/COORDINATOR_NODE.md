@@ -29,12 +29,9 @@ Objective: <one line>
 
 ## Report
 
-When you finish, and whenever you stop to wait for the user, rewrite your report at the report path above. Files for the user go in the library folder.
+When you finish, and whenever you stop to wait for the user, rewrite your report at the report path above. Files for the user go in the library folder. Your status file holds the details, so the report is only:
 
 - Optional first line `PR: <url>`, the full `https://github.com/<owner>/<repo>/pull/<number>` URL.
 - `Status: done|needs-decision|blocked|failed`, before any section.
 - `## Summary`: up to three plain lines, clear without context.
-- `## Report`: what was done, what is left, what the user must decide.
-- Optional `## Captures`: `- <library path> - <caption>` per image.
-- `## Next`, required: one imperative action per line, at most 100 characters, including the cleanup once the work has landed. The user sends a line back and you get it done through a child. Empty means nothing to do.
-- Optional `## Remember`: short, durable lessons.
+- A last line: `Details: <your status file path>`.
