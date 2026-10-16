@@ -33,7 +33,7 @@ Objective: <one line>
 When you finish, and whenever you stop to wait for the user, rewrite your report at the report path above. Files for the user go in the library folder. Your status file holds the details, so the report is only:
 
 - Optional first line `PR: <url>`, the full `https://github.com/<owner>/<repo>/pull/<number>` URL.
-- `Status: done|needs-decision|blocked|failed`, before any section.
+- `Status: done|needs-decision|blocked|failed`, before any section. When your task asks for `PASS`, `ISSUES` or `FAIL` instead, write that: they read as done, issues (a review found problems to fix) and failed. Case does not matter.
 - `Details: <your status file path>`, before any section.
 - `## Summary`: up to three plain lines, clear without context.
 - Optional `## Remember`: short, durable lessons for the root to keep, one per line.
