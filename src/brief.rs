@@ -627,6 +627,37 @@ mod tests {
         assert_eq!(world.runner.calls.borrow().len(), before);
     }
 
+    /// A follow-up the root coordinator sends is typed and recorded signed:
+    /// a restarted thread re-reads who asked, not only what.
+    #[test]
+    fn a_signed_follow_up_is_typed_and_recorded_with_its_sender() {
+        let (world, project, _) = world("idle");
+        thread::update(&project, "t-0001", |t| t.prompt_pending = false).unwrap();
+        let socket = project.coordinator().unwrap().socket;
+        let env = crate::paths::Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w1:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let ctx = crate::paths::Ctx {
+            env: &env,
+            ..world.ctx()
+        };
+        let text = crate::organizations::signed(&ctx, "demo", "Also the docs.").unwrap();
+        crate::threads::prompt(&ctx, "demo", "t-0001", &text).unwrap();
+        let signed = "[from the root coordinator] Also the docs.";
+        let calls = world.runner.calls.borrow();
+        let typed = calls
+            .iter()
+            .find(|c| c.display().contains("agent prompt"))
+            .unwrap();
+        assert_eq!(prompt_text(typed), signed);
+        assert!(
+            std::fs::read_to_string(thread::task_path(&project, "t-0001"))
+                .unwrap()
+                .contains(&format!("\n{signed}\n"))
+        );
+    }
+
     #[test]
     fn an_unconfirmed_follow_up_is_reported_and_not_sent_again() {
         let (world, project, reply) = world("working");

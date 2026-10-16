@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::agent_profile::{AgentProfile, ProfileOverrides};
+use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::thread::{self, Kind, NodeRole, Status, Thread};
 
@@ -286,6 +287,36 @@ pub fn authorize_creator(
     Ok(())
 }
 
+/// A pane this project recorded: its root coordinator's, or a local node's.
+enum Caller {
+    Root,
+    Node(Box<Thread>),
+}
+
+/// Who runs a command, when its pane is one this project recorded on the
+/// coordinator's Herdr server (pane ids are only unique within one server).
+/// `None` is any other caller, such as the user's own terminal.
+fn recorded_caller(
+    project: &Project,
+    records: Vec<Thread>,
+    caller_pane: &str,
+    caller_socket: &str,
+) -> Option<Caller> {
+    if caller_pane.is_empty() || caller_socket.is_empty() {
+        return None;
+    }
+    let coordinator = project
+        .coordinator()
+        .filter(|record| record.socket == caller_socket)?;
+    if coordinator.pane_id == caller_pane {
+        return Some(Caller::Root);
+    }
+    records
+        .into_iter()
+        .find(|record| record.machine.is_empty() && record.pane_id == caller_pane)
+        .map(|record| Caller::Node(Box::new(record)))
+}
+
 /// Applies the shared pane hierarchy check and returns the parent a recognized
 /// coordinator is authorized to use. `None` means this is not a known project
 /// pane, preserving manually selected parents for terminal callers.
@@ -297,28 +328,14 @@ pub fn creator_parent(
     if caller_pane.is_empty() || caller_socket.is_empty() {
         return Ok(None);
     }
-    let coordinator = project.coordinator();
-    let is_root_coordinator = coordinator
-        .as_ref()
-        .is_some_and(|record| record.socket == caller_socket && record.pane_id == caller_pane);
     let records = thread::list(project);
     validate_tree(&records)?;
-    let known_node = coordinator
-        .as_ref()
-        .is_some_and(|coordinator| coordinator.socket == caller_socket)
-        .then(|| {
-            records
-                .into_iter()
-                .find(|record| record.machine.is_empty() && record.pane_id == caller_pane)
-        })
-        .flatten();
-    let (creator_id, role, can_spawn) = if is_root_coordinator {
-        (ROOT_ID.to_string(), NodeRole::Coordinator, true)
-    } else if let Some(record) = known_node {
-        (record.id, record.role, record.can_spawn)
-    } else {
-        return Ok(None);
-    };
+    let (creator_id, role, can_spawn) =
+        match recorded_caller(project, records, caller_pane, caller_socket) {
+            Some(Caller::Root) => (ROOT_ID.to_string(), NodeRole::Coordinator, true),
+            Some(Caller::Node(record)) => (record.id, record.role, record.can_spawn),
+            None => return Ok(None),
+        };
     if role != NodeRole::Coordinator {
         bail!("worker nodes cannot create children");
     }
@@ -326,6 +343,46 @@ pub fn creator_parent(
         bail!("node `{creator_id}` does not have permission to create children");
     }
     Ok(Some(creator_id))
+}
+
+/// The text `node prompt`, `thread prompt` and `coordinator prompt` send. Run
+/// from a pane this project recorded for a coordinator, it starts with a tag
+/// built from the records alone, so the receiver never takes another
+/// coordinator's words for the user's. The user's terminal sends it as typed.
+pub fn signed(ctx: &Ctx, slug: &str, text: &str) -> Result<String> {
+    let project = Project::load(&ctx.root, slug)?;
+    let caller = recorded_caller(
+        &project,
+        thread::list(&project),
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+    );
+    let sender = match caller {
+        None => return Ok(text.to_string()),
+        Some(Caller::Root) => "the root coordinator".to_string(),
+        Some(Caller::Node(record)) => format!("{} \"{}\"", record.id, tag_title(&record.title)),
+    };
+    Ok(format!("[from {sender}] {}", text.trim()))
+}
+
+/// A title as the tag carries it: one line of at most 60 characters, with no
+/// double quote to end the tag early.
+fn tag_title(title: &str) -> String {
+    let words: String = title
+        .chars()
+        .map(|c| match c {
+            '"' => '\'',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    words
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect()
 }
 
 /// Remote workers can use the existing remote Herdr and SSH flow. Their
@@ -1104,6 +1161,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Env;
     use crate::scenarios::World;
 
     fn node(id: &str, parent_id: &str, role: NodeRole, can_spawn: bool) -> Thread {
@@ -1122,6 +1180,72 @@ mod tests {
             role,
             ..NodeRequest::default()
         }
+    }
+
+    /// A message sent from a pane this project recorded for a coordinator
+    /// names its sender, so the receiver never takes it for the user's words.
+    /// The user's terminal and any pane the project did not record send the
+    /// text as typed.
+    #[test]
+    fn a_prompt_from_a_recorded_coordinator_pane_names_its_sender() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let socket = project.coordinator().unwrap().socket;
+        world.thread(&project, world.home.path(), |t| {
+            t.role = NodeRole::Coordinator;
+            t.title = "Mi Cúcula".into();
+        });
+        let from = |vars: &[(&str, &str)]| {
+            let env = Env::for_test(world.home.path(), vars);
+            let ctx = Ctx {
+                env: &env,
+                ..world.ctx()
+            };
+            signed(&ctx, "demo", "Check the login.\n").unwrap()
+        };
+        let pane = |id: &'static str| [("HERDR_PANE_ID", id), ("HERDR_SOCKET_PATH", &socket)];
+        assert_eq!(
+            from(&pane("w1:p1")),
+            "[from the root coordinator] Check the login."
+        );
+        assert_eq!(
+            from(&pane("w2:p1")),
+            "[from t-0001 \"Mi Cúcula\"] Check the login."
+        );
+        assert_eq!(from(&[]), "Check the login.\n");
+        assert_eq!(from(&pane("w9:p1")), "Check the login.\n");
+        // Pane ids are only unique within one Herdr server.
+        assert_eq!(
+            from(&[
+                ("HERDR_PANE_ID", "w1:p1"),
+                ("HERDR_SOCKET_PATH", "/other.sock")
+            ]),
+            "Check the login.\n"
+        );
+    }
+
+    /// The sender's title is one line of at most 60 characters with no
+    /// double quote, so it cannot end the tag early or reach the next line.
+    #[test]
+    fn a_senders_title_is_one_short_line() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let socket = project.coordinator().unwrap().socket;
+        world.thread(&project, world.home.path(), |t| {
+            t.title = format!("Say \"hi\"\n\t\u{1b}[2m{}", "é".repeat(80));
+        });
+        let env = Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w2:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let ctx = Ctx {
+            env: &env,
+            ..world.ctx()
+        };
+        let text = signed(&ctx, "demo", "Go.").unwrap();
+        let title = format!("Say 'hi' [2m{}", "é".repeat(48));
+        assert_eq!(text, format!("[from t-0001 \"{title}\"] Go."));
+        assert_eq!(title.chars().count(), 60);
     }
 
     /// The parent nudge is one line with no instructions, so the brief of a
