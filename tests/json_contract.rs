@@ -796,7 +796,9 @@ fn context_lists_the_asks_that_do_not_close() {
     let context = fixture.text(&["context", "demo", "--peek"]);
     let drift = context.split_once("## Drift").unwrap().1;
     assert!(
-        drift.contains("- [ask-mismatch] STATUS.md:4 is marked done, but a linked PR is still open\n"),
+        drift.contains(
+            "- [ask-mismatch] STATUS.md:4 is marked done, but a linked PR is still open\n"
+        ),
         "{drift}"
     );
     assert!(
