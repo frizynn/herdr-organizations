@@ -194,6 +194,18 @@ pub struct InboxItem {
     pub subject: String,
     pub created: String,
     pub summary: String,
+    /// Missing in a view written before the field: the coordinator's.
+    pub audience: inbox::Audience,
+}
+
+impl InboxItem {
+    /// The summary as the popup shows it: an item for the user says so.
+    pub fn shown_summary(&self) -> String {
+        match self.audience {
+            inbox::Audience::User => format!("for you · {}", self.summary),
+            inbox::Audience::Coordinator => self.summary.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -607,6 +619,7 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
             subject: item.subject,
             created: item.created,
             summary: item.summary,
+            audience: item.audience,
         })
         .collect();
 

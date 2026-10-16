@@ -25,9 +25,9 @@ ticker (one background process)
 | --- | --- |
 | Project | A folder, `~/.herdr-projects/<slug>/`. It holds the goal and settings (`PROJECT.md`), the task list (`TASKS.md`, unless the tasks live in a tracker you already use), memory, routines and a record for every thread. |
 | Coordinator | An ordinary agent started in the project folder. `AGENTS.md` tells it that it is the coordinator, and the bundled skill tells it how to work. It talks with you and starts threads. It does not edit code. |
-| Thread, or node | One agent with one task. A worker finishes its task and writes a report that opens with a `Status:` verdict and a short `## Summary` and ends with a `## Next` list. A coordinator node plans a larger piece and starts children under itself. A code thread works in its own git worktree on a branch named `hp/<project>/<id>-<title>`. |
+| Thread, or node | One agent with one task. A worker finishes its task and writes a report that opens with a `Status:` verdict and a `## Summary` of up to three lines and ends with a `## Next` list, and optionally a `## Remember` list of lessons for the coordinator to keep. A coordinator node plans a larger piece and starts children under itself. A code thread works in its own git worktree on a branch named `hp/<project>/<id>-<title>`. |
 | Memory | `PROJECT.md`, `MEMORY.md` and `memory/` at the root, and `nodes/<id>/` for each node. A node's brief includes the root's context and its ancestors' scopes, never its siblings' or its descendants'. `STATUS.md` is the coordinator's status file: what you asked and where each ask stands, what needs your decision and the decisions taken. What is in progress or done comes from the thread records, not from this file. You, the root or a sibling read it when you want instead of getting a report; a child coordinator keeps its own in `nodes/<id>/STATUS.md`, which its children never see. |
-| Ticker | The one background process. It wakes on Herdr events, reconciles at least once a minute, reads each open pull request with `gh` at most every two minutes, copies reports home and leaves inbox items for the coordinator. |
+| Ticker | The one background process. It wakes on Herdr events, reconciles at least once a minute, reads each open pull request with `gh` at most every two minutes, copies reports home and leaves inbox items: for the coordinator what it can act on, and for you the rest (a landing thread, review activity, what auto-merge did), which never wakes the coordinator. |
 | What needs you | Every thread is in exactly one group. In order they are waiting on you, ready for review, landing, working, idle and resolved. The popup, Herdr's sidebar, `overview` and `overview --json` show the same groups in that order. |
 | Profiles and templates | A profile is a named launch setup of harness, model, effort and extra flags. A template is a saved node (role, profile name, rules and memory) to start other nodes from. |
 
@@ -182,7 +182,7 @@ herdr-organizations overview --json
 | `new <name> --json` | The new project |
 | `overview [<slug>] --json` | Projects, each with its threads, groups and pull requests |
 | `thread list <slug> --json`, `thread show <slug> <id> --json`, `node list <slug> --json`, `node show <slug> <id> --json` | Threads or nodes |
-| `inbox list <slug> --json` | Inbox items, without marking them seen |
+| `inbox list <slug> --json` | Inbox items with who each is for, without marking them seen |
 | `thread merge <slug> <id> --json`, `thread set <slug> <id> --auto-merge on --json`, `thread pr-action <slug> <id> <action> --json`, `thread pr-create <slug> <id> --json` | The result of a pull request action |
 | `template list --json`, `template show <name> --json` | Templates |
 | `project show <slug> --json` | A project's settings, repos, instructions and memory |

@@ -1,4 +1,5 @@
-//! Inbox items: events the ticker leaves for the coordinator.
+//! Inbox items: events the ticker and the CLI leave for the coordinator, or
+//! for the user when the coordinator could not act on them.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -14,6 +15,50 @@ const MAX_CONSUME_CHARS: usize = 12_000;
 const MAX_INLINE_SUMMARY_CHARS: usize = 600;
 const MAX_INLINE_BODY_CHARS: usize = 2_000;
 
+/// Who an item is for. Every item is written and shown to the user (the
+/// popup, Nenu, `inbox list`); only the coordinator's wake the coordinator
+/// and reach it through `context` and `inbox consume`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Audience {
+    User,
+    /// Also an item written before this field, or with a value this version
+    /// does not know: nothing that once reached the coordinator is hidden.
+    #[default]
+    #[serde(other)]
+    Coordinator,
+}
+
+/// The items the coordinator cannot act on, by kind and event: the user
+/// merges, and these say what the binary already did or what the user alone
+/// decides next. Everything else is the coordinator's.
+pub(crate) const FOR_THE_USER: [(&str, &str); 13] = [
+    ("thread-state", "landing"),
+    // Idle again after its report was read; a thread that stops without a
+    // new report is `stopped without a new report`, the coordinator's.
+    ("thread-state", "idle"),
+    ("thread-state", "resolved"),
+    ("pr", "PR opened"),
+    ("pr", "PR created"),
+    ("pr", "PR review activity"),
+    ("pr", "auto-fix"),
+    ("pr", "fix CI already asked"),
+    ("pr", "address comments already asked"),
+    ("pr", "resolve conflicts already asked"),
+    ("pr", "auto-merged"),
+    ("pr", "auto-merge refused"),
+    ("pr", "merge gate refused"),
+];
+
+/// Who an item of this kind and event is for.
+pub fn audience(kind: &str, event: &str) -> Audience {
+    if FOR_THE_USER.contains(&(kind, event)) {
+        Audience::User
+    } else {
+        Audience::Coordinator
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct Item {
@@ -26,6 +71,8 @@ pub struct Item {
     /// a prompt"). The nudge line is built from subjects and events only, never
     /// from summaries, which may quote text from reports or GitHub.
     pub event: String,
+    /// Decided from `kind` and `event` when the item is written (`audience`).
+    pub audience: Audience,
     /// Empty except for `routine` items.
     #[serde(skip)]
     pub body: String,
@@ -68,8 +115,9 @@ pub fn safe_subject(subject: &str) -> String {
 
 /// Writes one item. The id is `<UTC timestamp>-<kind>-<subject>-<n>`, where
 /// `<n>` is a counter allocated under the project lock, so two events in one
-/// tick never share a name. `event` is a fixed phrase from this binary. `body`
-/// is empty except for `routine` items.
+/// tick never share a name. `event` is a fixed phrase from this binary, and
+/// with `kind` decides the item's audience. `body` is empty except for
+/// `routine` items.
 pub fn write(
     project: &Project,
     kind: &str,
@@ -97,6 +145,7 @@ pub fn write(
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect(),
         event: event.to_string(),
+        audience: audience(kind, event),
         body: String::new(),
     };
     let mut text = format!("+++\n{}+++\n", toml::to_string(&item)?);
@@ -143,6 +192,14 @@ pub fn unhandled(project: &Project) -> Vec<Item> {
         .filter_map(|text| parse(&text))
         .collect();
     items.sort_by(|a, b| a.id.cmp(&b.id));
+    items
+}
+
+/// Unhandled items for the coordinator, oldest first: what wakes it and what
+/// `context` and `inbox consume` deliver.
+pub fn for_coordinator(project: &Project) -> Vec<Item> {
+    let mut items = unhandled(project);
+    items.retain(|item| item.audience == Audience::Coordinator);
     items
 }
 
@@ -202,37 +259,39 @@ pub fn done(project: &Project, ids: &[String], all: bool) -> Result<usize> {
     Ok(moved)
 }
 
+/// The `inbox list --json` document.
+pub fn list_json(project: &Project) -> serde_json::Value {
+    let seen = seen(project);
+    let items: Vec<serde_json::Value> = unhandled(project)
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": item.id,
+                "kind": item.kind,
+                "subject": item.subject,
+                "created": item.created,
+                "summary": item.summary,
+                "body": item.body,
+                "seen": seen.contains(&item.id),
+                "audience": item.audience,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "items": items,
+    })
+}
+
 /// `inbox list`: unhandled items, oldest first. Reads only: nothing is marked
 /// seen or moved.
 pub fn print_list(project: &Project, json: bool) -> Result<()> {
-    let items = unhandled(project);
     if json {
-        let seen = seen(project);
-        let items: Vec<serde_json::Value> = items
-            .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "id": item.id,
-                    "kind": item.kind,
-                    "subject": item.subject,
-                    "created": item.created,
-                    "summary": item.summary,
-                    "body": item.body,
-                    "seen": seen.contains(&item.id),
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "schema_version": crate::threads::JSON_SCHEMA_VERSION,
-                "project": project.slug,
-                "items": items,
-            })
-        );
+        println!("{}", list_json(project));
         return Ok(());
     }
-    for item in items {
+    for item in unhandled(project) {
         println!(
             "{}\t{}\t{}\t{}",
             item.id, item.kind, item.subject, item.summary
@@ -269,11 +328,12 @@ fn render_item(item: &Item) -> String {
     rendered
 }
 
-/// Prints one bounded batch of new events and archives exactly that batch only
-/// after stdout has accepted and flushed the complete payload. A failed write
-/// therefore leaves every item available for a safe retry.
+/// Prints one bounded batch of the coordinator's new events and archives
+/// exactly that batch only after stdout has accepted and flushed the complete
+/// payload. A failed write therefore leaves every item available for a safe
+/// retry. Items for the user stay for the user.
 pub fn consume(project: &Project, out: &mut dyn Write) -> Result<usize> {
-    let all = unhandled(project);
+    let all = for_coordinator(project);
     if all.is_empty() {
         writeln!(out, "No new inbox events.")?;
         out.flush()?;
@@ -412,6 +472,95 @@ mod tests {
             .unwrap();
         assert!(routine.body.starts_with("Check the build."));
         assert!(routine.body.ends_with("```"));
+    }
+
+    #[test]
+    fn an_item_without_an_audience_or_with_an_unknown_one_is_the_coordinators() {
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        // Written by a version before `audience`.
+        write_item(&project, "20260917T000001Z-routine-r-1", "");
+        std::fs::write(
+            inbox_dir(&project).join("20260917T000002Z-pr-t-0001-2.md"),
+            "+++\nid = \"20260917T000002Z-pr-t-0001-2\"\nkind = \"pr\"\nsubject = \"t-0001\"\nevent = \"auto-fix\"\naudience = \"someone-new\"\n+++\n",
+        )
+        .unwrap();
+        let items = unhandled(&project);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(
+            items.iter().all(|i| i.audience == Audience::Coordinator),
+            "{items:?}"
+        );
+    }
+
+    /// An item this version writes still reads with the fields an older
+    /// binary knows, so it keeps working on the same inbox.
+    #[test]
+    fn an_older_binary_still_reads_an_item_with_an_audience() {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct OlderItem {
+            id: String,
+            kind: String,
+            subject: String,
+            summary: String,
+            event: String,
+        }
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let id = write(&project, "pr", "t-0001", "auto-fix", "asked", "").unwrap();
+        let text = std::fs::read_to_string(inbox_dir(&project).join(format!("{id}.md"))).unwrap();
+        assert!(text.contains("audience = \"user\""), "{text}");
+        let front = text
+            .strip_prefix("+++\n")
+            .and_then(|rest| rest.split_once("+++\n"))
+            .unwrap()
+            .0;
+        let older: OlderItem = toml::from_str(front).unwrap();
+        assert_eq!(
+            (
+                older.id,
+                older.kind,
+                older.subject,
+                older.summary,
+                older.event
+            ),
+            (
+                id,
+                "pr".to_string(),
+                "t-0001".to_string(),
+                "asked".to_string(),
+                "auto-fix".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn consume_delivers_only_the_coordinators_items_and_done_takes_any() {
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let for_user = write(&project, "pr", "t-0001", "auto-fix", "asked it", "").unwrap();
+        write(
+            &project,
+            "thread-state",
+            "t-0002",
+            "new report",
+            "read it",
+            "",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        assert_eq!(consume(&project, &mut out).unwrap(), 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("t-0002: read it"), "{text}");
+        assert!(!text.contains("asked it"), "{text}");
+        let left: Vec<String> = unhandled(&project).into_iter().map(|i| i.id).collect();
+        assert_eq!(left, std::slice::from_ref(&for_user));
+        let mut out = Vec::new();
+        assert_eq!(consume(&project, &mut out).unwrap(), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "No new inbox events.\n");
+        assert_eq!(done(&project, &[for_user], false).unwrap(), 1);
+        assert!(unhandled(&project).is_empty());
     }
 
     #[test]

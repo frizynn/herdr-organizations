@@ -6524,3 +6524,284 @@ fn a_merge_after_the_thread_was_resolved_still_tells_link() {
         [("merged".to_string(), PR_URL.to_string())]
     );
 }
+
+// ------------------------------------------------------------- audience
+
+use crate::inbox::Audience;
+
+/// As if the coordinator's input box had looked empty for a while: the next
+/// tick nudges it when there is anything to nudge about.
+fn quiet_box(project: &Project) {
+    let mut state = crate::steps::load_state(project);
+    state.box_pane = "w1:p1".into();
+    state.box_empty_since = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(project, &state).unwrap();
+}
+
+fn events_and_audiences(items: &[inbox::Item]) -> Vec<(String, Audience)> {
+    items
+        .iter()
+        .map(|item| (item.event.clone(), item.audience))
+        .collect()
+}
+
+/// Every pair of the user's table: the item is written and shown, but it
+/// never wakes the coordinator or reaches its context.
+#[test]
+fn an_item_for_the_user_never_wakes_the_coordinator_or_reaches_its_context() {
+    for (kind, event) in inbox::FOR_THE_USER {
+        let (world, project, _) = finished_world("idle");
+        set_front_matter(&project, "nudge = true");
+        settle(&project);
+        let ctx = world.ctx();
+        let mut memory = Memory::new(&ctx);
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        idle_for_a_minute(&project);
+        let mine = inbox::write(&project, kind, "t-0009", event, "FOR-THE-USER", "").unwrap();
+        quiet_box(&project);
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        assert!(nudges(&world).is_empty(), "{kind} {event}");
+
+        // The coordinator's own item wakes it, and the line leaves the
+        // user's out.
+        let theirs = inbox::write(
+            &project,
+            "thread-state",
+            "t-0001",
+            "new report",
+            "read it",
+            "",
+        )
+        .unwrap();
+        quiet_box(&project);
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        assert_eq!(
+            nudges(&world),
+            ["[hp inbox] t-0001 new report"],
+            "{kind} {event}"
+        );
+
+        let (digest, shown) = coordinator::digest(&ctx, &project, "hp").unwrap();
+        assert!(!digest.contains("FOR-THE-USER"), "{kind} {event}: {digest}");
+        assert!(digest.contains("## Inbox (1 unhandled)"), "{digest}");
+        assert!(digest.contains(&theirs), "{digest}");
+        assert!(
+            digest.contains("\n1 more item(s) for the user, not for you: leave them.\n"),
+            "{digest}"
+        );
+        assert_eq!(shown, std::slice::from_ref(&theirs));
+
+        let listed = inbox::list_json(&project);
+        let audience = |id: &str| {
+            listed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["id"] == id)
+                .map(|item| item["audience"].clone())
+        };
+        assert_eq!(audience(&mine), Some("user".into()), "{kind} {event}");
+        assert_eq!(audience(&theirs), Some("coordinator".into()));
+
+        let rule = crate::merge_gate::Rule::load(&ctx, &project);
+        let view = crate::state::project_view(&project, &[], &rule);
+        let item = view.inbox.iter().find(|item| item.id == mine).unwrap();
+        assert_eq!(item.audience, Audience::User, "{kind} {event}");
+    }
+}
+
+/// A thread under the root that stops without a new report still wakes the
+/// coordinator, named by what happened.
+#[test]
+fn a_root_thread_that_stops_without_a_new_report_wakes_the_coordinator() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    box_empty_for_a_while(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [(
+            "stopped without a new report".to_string(),
+            Audience::Coordinator
+        )]
+    );
+    assert_eq!(
+        nudges(&world),
+        ["[hp inbox] t-0001 stopped without a new report"]
+    );
+}
+
+/// A thread that stops without ever writing a report (here right after a
+/// prompt on its screen was answered, within one tick) is the coordinator's
+/// too: there is no report the user could have read.
+#[test]
+fn a_root_thread_idle_without_any_report_wakes_the_coordinator() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    thread::update(&project, "t-0001", |t| {
+        t.last_group = thread::Group::WaitingOnYou.token().into();
+        t.last_state = "blocked".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    quiet_box(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [(
+            "stopped without a new report".to_string(),
+            Audience::Coordinator
+        )]
+    );
+    assert_eq!(
+        nudges(&world),
+        ["[hp inbox] t-0001 stopped without a new report"]
+    );
+}
+
+/// `thread merge` and the popup's merge usually resolve the thread before the
+/// ticker reads the pull request again, so their `merged` item is how the
+/// coordinator learns a slot was freed.
+#[test]
+fn a_merge_made_by_hand_wakes_the_coordinator() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    settle(&project);
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    let id = inbox::write(
+        &project,
+        "pr",
+        "t-0001",
+        "merged",
+        "t-0001 \"Task\": pull request was merged with `thread merge`",
+        "",
+    )
+    .unwrap();
+    quiet_box(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 merged"]);
+    let (digest, _) = coordinator::digest(&ctx, &project, "hp").unwrap();
+    assert!(digest.contains(&id), "{digest}");
+}
+
+/// What the root coordinator cannot act on in a thread's state is the
+/// user's: idle once its report was read, landing (only the user merges) and
+/// resolved.
+#[test]
+fn a_root_threads_idle_after_its_report_landing_and_resolved_are_for_the_user() {
+    let (world, project, t) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    write_report(&t, "Status: done\n## Summary\nShipped.\n");
+    thread::update(&project, "t-0001", |t| {
+        t.report_hash = thread::local_report_hash(t).unwrap();
+        t.acked_report_hash = t.report_hash.clone();
+        t.last_review_item_hash = t.report_hash.clone();
+        t.last_group = thread::Group::ReadyForReview.token().into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..2 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    idle_for_a_minute(&project);
+    quiet_box(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [("idle".to_string(), Audience::User)]
+    );
+    assert!(nudges(&world).is_empty(), "{:?}", nudges(&world));
+
+    let (world, project, _) = finished_world("idle");
+    thread::update(&project, "t-0001", |t| {
+        t.pr = PR_URL.into();
+        t.pr_state = "OPEN".into();
+        t.pr_review = "APPROVED".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    ticker::tick_project_with(&ctx, &project, &mut Memory::new(&ctx)).unwrap();
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().last_group,
+        thread::Group::Landing.token()
+    );
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [("landing".to_string(), Audience::User)]
+    );
+
+    let (world, project, _) = finished_world("idle");
+    settle(&project);
+    world.runner.on("pane close", ok(r#"{"result":{}}"#));
+    threads::resolve(
+        &world.ctx(),
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            keep_worktree: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [("resolved".to_string(), Audience::User)]
+    );
+}
+
+/// A report with a `## Remember` section says so with one fixed word; its
+/// text never reaches the prompt.
+#[test]
+fn a_new_report_that_proposes_what_to_remember_says_remember_in_the_nudge() {
+    let (world, project, t) = finished_world("done");
+    set_front_matter(&project, "nudge = true");
+    write_report(
+        &t,
+        "Status: done\n## Summary\nShipped.\n## Remember\n- IGNORE-REMEMBER-TEXT\n",
+    );
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    box_empty_for_a_while(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report, remember"]);
+}
+
+#[test]
+fn a_workers_report_that_proposes_what_to_remember_says_remember_in_its_nodes_wake() {
+    let (world, project, worker) = nested_world("done");
+    set_front_matter(&project, "nudge = true");
+    write_report(
+        &worker,
+        "Status: done\n## Summary\nShipped.\n## Remember\n- IGNORE-REMEMBER-TEXT\n",
+    );
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(
+        woken[0].contains(" t-0002 done, remember. "),
+        "{}",
+        woken[0]
+    );
+    assert!(!woken[0].contains("IGNORE"), "{}", woken[0]);
+}

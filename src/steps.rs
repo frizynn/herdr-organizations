@@ -350,7 +350,7 @@ pub fn write_thread_items(
             project,
             "thread-state",
             &t.id,
-            transition_event(change),
+            transition_event(change, &t),
             &summary,
             "",
         )?;
@@ -401,7 +401,13 @@ pub fn write_thread_items(
                         notes.join("; ")
                     ));
                 }
-                inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
+                let text = std::fs::read_to_string(&report).unwrap_or_default();
+                let event = if has_remember(&text) {
+                    format!("{NEW_REPORT}, {REMEMBER}")
+                } else {
+                    NEW_REPORT.to_string()
+                };
+                inbox::write(project, "thread-state", &t.id, &event, &summary, "")?;
             }
         }
         if notifier.wants_review() {
@@ -418,14 +424,21 @@ pub fn write_thread_items(
     Ok(())
 }
 
-/// A thread-state item's event, from the group it moved to.
-fn transition_event(change: &Transition) -> &'static str {
+/// A thread-state item's event, from the group it moved to. Idle is a stop
+/// without a new report, which only the coordinator would notice, when the
+/// thread was working or has no report at all. Otherwise its report was
+/// read (an unread one would make it Ready for review), and Idle is no news
+/// for the coordinator.
+fn transition_event(change: &Transition, t: &Thread) -> &'static str {
     match (change.to, change.note.as_str()) {
         (Group::WaitingOnYou, "blocked") => "blocked on a prompt",
         (Group::WaitingOnYou, "pane closed") => "pane closed",
         (Group::WaitingOnYou, "no agent") => "agent gone",
-        (Group::WaitingOnYou, _) => "waiting on you",
-        (Group::Landing, _) => "landing",
+        (Group::WaitingOnYou, _) => WAITING_ON_YOU,
+        (Group::Landing, _) => LANDING,
+        (Group::Idle, _) if change.from == Some(Group::Working) || t.report_hash.is_empty() => {
+            STOPPED
+        }
         (Group::Idle, _) => "idle",
         _ => "changed state",
     }
@@ -496,7 +509,9 @@ fn hash_ids(ids: &BTreeSet<String>) -> String {
 }
 
 /// Step 6. A given set of unseen items is announced once; there is no timed
-/// re-nudge. With `nudge = false` the user gets a herdr notification instead
+/// re-nudge. Only the coordinator's items count (`inbox::for_coordinator`):
+/// one for the user waits in the popup and never wakes it. With
+/// `nudge = false` the user gets a herdr notification instead
 /// of a prompt in the coordinator; with no live coordinator the same.
 /// `coordinator_ready` is a coordinator idle long enough to be prompted (see
 /// `coordinator::nudge_target`). A prompt is typed only into an input box
@@ -511,7 +526,7 @@ pub fn nudge(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let seen = inbox::seen(project);
-    let unseen: Vec<inbox::Item> = inbox::unhandled(project)
+    let unseen: Vec<inbox::Item> = inbox::for_coordinator(project)
         .into_iter()
         .filter(|i| !seen.contains(&i.id))
         .collect();
@@ -572,6 +587,17 @@ fn nudge_on(project: &Project) -> bool {
     project
         .read_project_md()
         .map_or(Settings::default().nudge, |(settings, _)| settings.nudge)
+}
+
+/// The word a wake line adds after a report's phrase when the report
+/// proposes what to remember (`report::remember`).
+const REMEMBER: &str = "remember";
+
+/// Whether `report` has a `## Remember` section. Only the fixed word
+/// `remember` reaches a prompt, never the section's text: `node show` and
+/// `--json` carry it.
+fn has_remember(report: &str) -> bool {
+    !report::remember(report).is_empty()
 }
 
 const WAITING_ON_YOU: &str = "waiting on you";
@@ -654,38 +680,46 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
 }
 
 /// One line per parent, built from child ids and fixed phrases only, e.g.
-/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done`. A phrase
-/// about a report gives way to the report's verdict, so the parent need not
-/// open it; waiting on you and stopped are live and win over an older report.
-/// A pending value with no phrase (an Idle queued by an older version) is
-/// dropped; the comparison ignores case so a pending label from an older
-/// version still counts.
+/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done; t-0096 done,
+/// remember`. A phrase about a report gives way to the report's verdict, so
+/// the parent need not open it, and adds `remember` when the report proposes
+/// what to keep; waiting on you and stopped are live and win over an older
+/// report. A pending value with no phrase (an Idle queued by an older
+/// version) is dropped; the comparison ignores case so a pending label from
+/// an older version still counts. `report` is a child's report text.
 fn parent_update_line(
     updates: &BTreeMap<String, String>,
-    verdict: impl Fn(&str) -> Option<Verdict>,
+    report: impl Fn(&str) -> String,
 ) -> String {
-    let said: Vec<(String, &str)> = updates
+    // (child, phrase, whether its report proposes what to remember)
+    let said: Vec<(String, &str, bool)> = updates
         .iter()
         .filter_map(|(id, pending)| {
             let phrase = *PARENT_PHRASES
                 .iter()
                 .find(|phrase| pending.eq_ignore_ascii_case(phrase))?;
-            let phrase = REPORT_PHRASES
-                .contains(&phrase)
-                .then(|| verdict(id))
-                .flatten()
-                .map_or(phrase, Verdict::words);
-            Some((inbox::safe_subject(id), phrase))
+            if !REPORT_PHRASES.contains(&phrase) {
+                return Some((inbox::safe_subject(id), phrase, false));
+            }
+            let text = report(id);
+            let phrase = report::verdict(&text).map_or(phrase, Verdict::words);
+            Some((inbox::safe_subject(id), phrase, has_remember(&text)))
         })
         .collect();
     PARENT_LINE_ORDER
         .iter()
-        .filter_map(|phrase| {
+        .flat_map(|phrase| [(*phrase, false), (*phrase, true)])
+        .filter_map(|(phrase, remember)| {
             let ids: Vec<&str> = said
                 .iter()
-                .filter(|(_, said)| said == phrase)
-                .map(|(id, _)| id.as_str())
+                .filter(|(_, said, with)| *said == phrase && *with == remember)
+                .map(|(id, _, _)| id.as_str())
                 .collect();
+            let phrase = if remember {
+                format!("{phrase}, {REMEMBER}")
+            } else {
+                phrase.to_string()
+            };
             (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
         })
         .collect::<Vec<_>>()
@@ -725,11 +759,7 @@ pub fn nudge_parent_coordinators(
         let line = state
             .parent_updates
             .get(&parent_id)
-            .map(|updates| {
-                parent_update_line(updates, |id| {
-                    report::verdict(&report::home_text(&records_dir, id))
-                })
-            })
+            .map(|updates| parent_update_line(updates, |id| report::home_text(&records_dir, id)))
             .unwrap_or_default();
         if line.is_empty() {
             state.parent_updates.remove(&parent_id);
@@ -2259,6 +2289,56 @@ mod tests {
             }
         }
 
+        /// The coordinator gets what it can act on in a pull request (a
+        /// failing check); what it cannot (an opened pull request, review
+        /// activity, what the auto actions did or did not do) is the user's.
+        #[test]
+        fn pull_request_items_are_for_whoever_can_act_on_them() {
+            use inbox::Audience::{Coordinator, User};
+            let audience = |setup: &Setup, event: &str| {
+                let found: Vec<inbox::Audience> = setup
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event == event)
+                    .map(|item| item.audience)
+                    .collect();
+                assert!(!found.is_empty(), "no `{event}` item");
+                found
+            };
+            let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
+            let mut state = State::default();
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", GREEN, 10);
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", RED, 10);
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", RED, 10, 1);
+            setup.check(&mut state);
+            let outcome = crate::pr_actions::ask(
+                &setup.world.ctx(),
+                "demo",
+                "t-0001",
+                crate::pr_actions::Request::FixCi,
+            )
+            .unwrap();
+            assert!(!outcome.sent, "{}", outcome.reason);
+            assert_eq!(audience(&setup, "PR opened"), [User]);
+            assert_eq!(audience(&setup, "PR checks failing"), [Coordinator]);
+            assert!(audience(&setup, "auto-fix").iter().all(|a| *a == User));
+            assert_eq!(audience(&setup, "PR review activity"), [User]);
+            assert_eq!(audience(&setup, "fix CI already asked"), [User]);
+
+            let setup = Setup::new("idle", |t| t.auto_merge = true);
+            setup.check(&mut State::default());
+            assert_eq!(audience(&setup, "auto-merged"), [User]);
+
+            let setup =
+                Setup::with_merge("idle", fail(1, "Required status check is expected"), |t| {
+                    t.auto_merge = true
+                });
+            setup.check(&mut State::default());
+            assert_eq!(audience(&setup, "auto-merge refused"), [User]);
+        }
+
         #[test]
         fn a_ready_pull_request_is_never_merged_without_the_flag() {
             let setup = Setup::new("idle", |_| {});
@@ -2400,6 +2480,8 @@ mod tests {
             let items = refusals();
             assert_eq!(items.len(), 1, "one item per reason: {items:?}");
             assert!(items[0].summary.contains("waiting for the reviewer"));
+            // Only the user merges, so a refusal is theirs.
+            assert_eq!(items[0].audience, inbox::Audience::User);
             assert!(
                 setup
                     .items()

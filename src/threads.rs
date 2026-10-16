@@ -1861,8 +1861,12 @@ pub struct ThreadJson {
     pub library: String,
     /// The `Status:` line of its report, `null` without a valid one.
     pub verdict: Option<report::Verdict>,
-    /// Its report's `## Summary`, at most 600 characters. Agent-written.
+    /// Its report's `## Summary`, at most three lines and 600 characters.
+    /// Agent-written.
     pub summary: Option<String>,
+    /// The lines of its report's `## Remember`, at most 10 lines and 600
+    /// characters. Agent-written.
+    pub remember: Vec<String>,
     /// The library images its report lists under `## Captures`.
     pub captures: Vec<report::Capture>,
     /// The documents at the top of its library.
@@ -2041,6 +2045,7 @@ pub fn thread_json(
         library: library.to_string_lossy().into_owned(),
         verdict: report::verdict(&report_text),
         summary: report::summary(&report_text),
+        remember: report::remember(&report_text),
         captures: report::captures(&report_text, &library),
         deliverables: report::deliverables(&library),
         task: t.task.clone(),
@@ -2200,6 +2205,13 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
         if let Some(summary) = report::summary(&text) {
             println!("# summary:");
             for line in summary.lines() {
+                println!("#   {line}");
+            }
+        }
+        let remember = report::remember(&text);
+        if !remember.is_empty() {
+            println!("# remember:");
+            for line in &remember {
                 println!("#   {line}");
             }
         }

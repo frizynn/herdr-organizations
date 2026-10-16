@@ -217,6 +217,7 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "library": format!("{}/library/t-0001", fixture.dir()),
         "verdict": null,
         "summary": null,
+        "remember": [],
         "captures": [],
         "deliverables": [],
         "task": "Checkout",
@@ -278,6 +279,7 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "library": format!("{}/library/t-0002", fixture.dir()),
         "verdict": null,
         "summary": null,
+        "remember": [],
         "captures": [],
         "deliverables": [],
         "task": "",
@@ -393,7 +395,8 @@ fn inbox_list_json_reads_without_consuming() {
             "created": "2026-10-01T10:00:00Z",
             "summary": "t-0001 \"Checkout\": pull request state OPEN",
             "body": "",
-            "seen": false
+            "seen": false,
+            "audience": "coordinator"
         }]
     });
     assert_eq!(fixture.json(&["inbox", "list", "demo", "--json"]), expected);
@@ -402,6 +405,45 @@ fn inbox_list_json_reads_without_consuming() {
         !Path::new(&fixture.dir())
             .join(".state/inbox-seen.json")
             .exists()
+    );
+}
+
+/// Every item says who it is for. One written before `audience` is the
+/// coordinator's, as it always was.
+#[test]
+fn inbox_list_json_says_who_each_item_is_for() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "inbox/20261001T100001Z-pr-t-0001-2.md",
+        "+++\nid = \"20261001T100001Z-pr-t-0001-2\"\nkind = \"pr\"\nsubject = \"t-0001\"\ncreated = \"2026-10-01T10:00:01Z\"\nsummary = \"auto-fix asked it\"\nevent = \"auto-fix\"\naudience = \"user\"\n+++\n",
+    );
+    let listed = fixture.json(&["inbox", "list", "demo", "--json"]);
+    let audiences: Vec<(&str, &str)> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["id"].as_str().unwrap(),
+                item["audience"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        audiences,
+        [
+            ("20261001T100000Z-pr-t-0001-1", "coordinator"),
+            ("20261001T100001Z-pr-t-0001-2", "user")
+        ]
+    );
+    // `context` leaves the user's item out and says how many there are.
+    let context = fixture.text(&["context", "demo", "--peek"]);
+    assert!(!context.contains("auto-fix asked it"), "{context}");
+    assert!(context.contains("## Inbox (1 unhandled)"), "{context}");
+    assert!(
+        context.contains("\n1 more item(s) for the user, not for you: leave them.\n"),
+        "{context}"
     );
 }
 
@@ -432,7 +474,7 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     write(
         &fixture,
         "threads/t-0002.md",
-        "PR: https://github.com/owner/app/pull/9\nStatus: done\n## Summary\nSizes are in order at 390 px.\nCoupons are untouched.\n## Report\nLong text.\n## Captures\n- capturas/talles-390.png \u{2014} Orden de talles a 390 px\n- capturas/missing.png - Gone\n- ../t-0001/x.png - Escapes\n## Next\n- Merge the PR\n",
+        "PR: https://github.com/owner/app/pull/9\nStatus: done\n## Summary\nSizes are in order at 390 px.\nCoupons are untouched.\n## Report\nLong text.\n## Captures\n- capturas/talles-390.png \u{2014} Orden de talles a 390 px\n- capturas/missing.png - Gone\n- ../t-0001/x.png - Escapes\n## Next\n- Merge the PR\n## Remember\n- Sizes sort by the size table, not by name.\n",
     );
     for file in [
         "library/t-0002/capturas/talles-390.png",
@@ -450,6 +492,10 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
         "Sizes are in order at 390 px.\nCoupons are untouched."
     );
     assert_eq!(
+        thread["remember"],
+        json!(["Sizes sort by the size table, not by name."])
+    );
+    assert_eq!(
         thread["captures"],
         json!([{
             "path": format!("{library}/capturas/talles-390.png"),
@@ -463,14 +509,14 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     let overview = fixture.json(&["overview", "demo", "--json"]);
     let listed = &overview["projects"][0]["threads"][1];
     assert_eq!(listed["id"], "t-0002");
-    for field in ["verdict", "summary", "captures", "deliverables"] {
+    for field in ["verdict", "summary", "remember", "captures", "deliverables"] {
         assert_eq!(listed[field], thread[field], "{field}");
     }
     // `node show`, which a parent nudge names, prints the verdict and summary.
     let shown = fixture.text(&["node", "show", "demo", "t-0002"]);
     assert!(
         shown.contains(
-            "# verdict: done\n# summary:\n#   Sizes are in order at 390 px.\n#   Coupons are untouched.\n"
+            "# verdict: done\n# summary:\n#   Sizes are in order at 390 px.\n#   Coupons are untouched.\n# remember:\n#   Sizes sort by the size table, not by name.\n"
         ),
         "{shown}"
     );
@@ -484,6 +530,7 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     let shown = fixture.json(&["thread", "show", "demo", "t-0002", "--json"]);
     assert_eq!(shown["thread"]["verdict"], Value::Null);
     assert_eq!(shown["thread"]["summary"], Value::Null);
+    assert_eq!(shown["thread"]["remember"], json!([]));
 }
 
 /// A coordinator node's report is only its verdict, its summary and where
