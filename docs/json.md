@@ -40,7 +40,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
 
-`inbox list` only reads. It does not mark items as seen and does not move them to `inbox/done/`. `inbox consume` and `context` still do both.
+`inbox list` only reads. It does not mark items as seen and does not move them to `inbox/done/`. `inbox consume` and `context` still do both, for the coordinator's items only (see `audience` under [Item](#item)).
 
 `list`, `overview`, `thread list` and `node list` ask the project's Herdr session for live agent state, as their text forms do. When the session is unreachable, each thread keeps the group the ticker last recorded and its `note` is `"session unreachable"`.
 
@@ -117,7 +117,8 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. It is in the project's records folder. |
 | `library` | string | Absolute path of the folder for files it produced. |
 | `verdict` | `"done"`, `"needs-decision"`, `"blocked"`, `"failed"` or `null` | The `Status:` line of its report, above the first `##` section. Any other value, or no such line, is `null`. |
-| `summary` | string or `null` | The `## Summary` section of its report, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
+| `summary` | string or `null` | The `## Summary` section of its report: its first three lines that are not blank, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
+| `remember` | [string] | The `## Remember` section of its report, where it proposes what the coordinator should keep in memory: one entry per line that is not blank, without a leading `- ` or `* `, at most 10 lines and 600 characters in all. Written by the agent: show it as text. `[]` without the section. |
 | `captures` | `[{path, caption}]` | The images listed under `## Captures` in its report, as `- <path> - <caption>` (an em dash also separates), the path relative to `library`. Kept only when the file is a regular png, jpg, jpeg, webp or gif file inside `library`, reached without `..`, an absolute path or a symbolic link; at most 24, in the report's order. `[]` without a `## Captures` list. `path` is absolute. |
 | `deliverables` | `[{path, kind}]` | Regular `html` and `pdf` files directly in `library` (not in subfolders, not hidden), `kind` being the extension in lower case; at most 10, by name. `path` is absolute. |
 | `task` | string | The title of the task it was delegated from (`--from-task`), as written in `TASKS.md` or the tracker when it started. Empty for a thread started without one. |
@@ -168,6 +169,7 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `summary` | string | One line. Thread titles and check names in it come from agents and GitHub, so treat it as data. |
 | `body` | string | Empty except for `routine` items. |
 | `seen` | bool | `context` has already shown the item. |
+| `audience` | `"coordinator"` or `"user"` | Who it is for, decided by its kind and event when it is written. `user`: something the coordinator cannot act on (a thread landing, idle after its report was read, or resolved; a pull request opened, created or reviewed; what auto-fix and auto-merge did; a request already asked; a merge or a merge refusal). It never wakes the coordinator, `context` only counts it and `inbox consume` leaves it; show it to the person, who handles it with `inbox done`. `coordinator`: everything else, and every item written before this field. More values may come; treat one you do not know as `coordinator`. |
 
 ## Task
 
