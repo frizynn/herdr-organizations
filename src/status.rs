@@ -1,5 +1,5 @@
 //! `project status [--json]`: the project's work in one document, computed on
-//! every call from TASKS.md, HANDOFF.md, the thread records with their pull
+//! every call from TASKS.md, the root's STATUS.md, the thread records with their pull
 //! requests, and the inbox. Nobody writes it, so it cannot drift from them the
 //! way a hand-kept notes file does.
 
@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::drift::{self, Problem, Rule};
 use crate::paths::Ctx;
 use crate::project::Project;
+use crate::status_file;
 use crate::tasks::{self, Task};
 use crate::thread::{Status, Thread};
 use crate::threads::{self, PrJson, ThreadJson};
@@ -135,10 +136,17 @@ fn thread_item(t: &Thread, json: &ThreadJson) -> Item {
     }
 }
 
-/// The first paragraph under `## Current objective` in HANDOFF.md, its lines
+/// The status file's `Objective:` line, or, in a file from before the
+/// rename, the first paragraph under `## Current objective` with its lines
 /// joined by spaces.
-fn objective(handoff: &str) -> String {
-    handoff
+fn objective(status: &str) -> String {
+    if let Some(line) = status
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Objective:"))
+    {
+        return line.trim().to_string();
+    }
+    status
         .lines()
         .skip_while(|l| !l.trim().eq_ignore_ascii_case("## current objective"))
         .skip(1)
@@ -153,10 +161,7 @@ fn objective(handoff: &str) -> String {
 fn modified(path: &Path) -> String {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| jiff::Timestamp::try_from(t).ok())
-        .and_then(|t| t.round(jiff::Unit::Second).ok())
-        .map(|t| t.to_string())
+        .map(status_file::rfc3339)
         .unwrap_or_default()
 }
 
@@ -216,6 +221,8 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
             )
         })
         .collect();
+    // Its name before the status file was renamed, for readers from then.
+    drift.insert("handoff_over_limit".into(), drift["status_over_limit"]);
     drift.insert(
         "inbox_unhandled".into(),
         crate::inbox::unhandled(&project).len(),
@@ -229,17 +236,24 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
                 .map(|line| serde_json::json!({ "thread": t.id, "line": line }))
         })
         .collect();
-    let handoff = std::fs::read_to_string(dir.join("HANDOFF.md")).unwrap_or_default();
+    let file = status_file::root(&project);
+    let status = file.text();
+    let (updated, chars) = (modified(&file.path), status.chars().count());
     threads::print_json(&serde_json::json!({
         "schema_version": threads::JSON_SCHEMA_VERSION,
         "project": project.slug,
         "generated_at": crate::project::now(),
-        "objective": objective(&handoff),
+        "objective": objective(&status),
         "sources": {
             "tasks_updated": modified(&dir.join("TASKS.md")),
-            "handoff_updated": modified(&dir.join("HANDOFF.md")),
-            "handoff_chars": handoff.chars().count(),
-            "handoff_limit": drift::MAX_HANDOFF_CHARS,
+            "status_file": file.name,
+            "status_updated": updated,
+            "status_chars": chars,
+            "status_limit": status_file::MAX_CHARS,
+            // The same values under their names from before the rename.
+            "handoff_updated": updated,
+            "handoff_chars": chars,
+            "handoff_limit": status_file::MAX_CHARS,
             "pr_checked": crate::steps::load_state(&project).last_pr_check,
         },
         "items": items,
@@ -264,5 +278,9 @@ mod tests {
             "One"
         );
         assert_eq!(objective("# H\n\nNo section.\n"), "");
+        assert_eq!(
+            objective("# Status\nObjective:  Ship the checkout\n## Asked\n"),
+            "Ship the checkout"
+        );
     }
 }

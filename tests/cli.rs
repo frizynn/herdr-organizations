@@ -917,4 +917,98 @@ mod progress_hooks {
             assert!(!h.root.join(".progress").exists());
         }
     }
+
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    fn said(h: &Hooks, text: &str) -> String {
+        let out = h.run(
+            "/managed.sock",
+            json!({"hook_event_name":"UserPromptSubmit", "session_id":"main", "prompt":text}),
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    const STALE_DRIFT: &str = "- [status-stale] STATUS.md is older than the user's last message";
+
+    /// The root's STATUS.md is stale once it is older than the user's
+    /// previous message; the current one is still being handled. Only the
+    /// user's own prompts count, and only their time is kept.
+    #[test]
+    fn context_names_a_root_status_file_older_than_the_users_previous_message() {
+        let h = Hooks::new();
+        let root = h.root.to_str().unwrap().to_string();
+        let context = || {
+            let out = hp(
+                h.home.path(),
+                &["--root", &root, "context", "demo", "--peek"],
+            );
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let status = h.root.join("demo/STATUS.md");
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        set_mtime(&status, hour_ago);
+
+        said(&h, "FIRST-QUESTION is it in the skill?");
+        assert!(!context().contains("status-stale"), "{}", context());
+        said(&h, "[hp inbox] t-0001 new report");
+        said(&h, "<task-notification>\n<status>completed</status>");
+        assert!(
+            !context().contains("status-stale"),
+            "automated prompts are not the user's"
+        );
+        said(&h, "SECOND-QUESTION what would you do?");
+        assert!(context().contains(STALE_DRIFT), "{}", context());
+
+        // Updated after the previous message: no longer stale.
+        set_mtime(&status, std::time::SystemTime::now());
+        assert!(!context().contains("status-stale"), "{}", context());
+
+        let asked = std::fs::read_to_string(h.root.join("demo/.state/asked.json")).unwrap();
+        assert!(!asked.contains("QUESTION"), "{asked}");
+        assert!(!asked.contains("skill"), "{asked}");
+    }
+
+    /// A spawning coordinator node hears about its own stale STATUS.md on the
+    /// user's next prompt; a worker's prompts are never recorded.
+    #[test]
+    fn a_coordinator_nodes_prompt_names_its_stale_status_file_and_a_workers_records_nothing() {
+        let mut h = Hooks::new();
+        h.coordinator["pane_id"] = "w9:p1".into();
+        h.save_coordinator();
+        h.pane["cwd"] = "/separate/worktree".into();
+        h.pane["name"] = "hpt-demo-t-0001".into();
+        let asked = h.root.join("demo/.state/asked.json");
+
+        h.thread("");
+        said(&h, "Ship it");
+        said(&h, "Ship it again");
+        assert!(!asked.exists(), "a worker's prompts are not recorded");
+
+        h.node("", "coordinator");
+        let stale = "Your STATUS.md is older than the user's previous message";
+        let first = said(&h, "NODE-QUESTION one");
+        assert!(!first.is_empty() && !first.contains(stale), "{first}");
+        assert!(said(&h, "[hp ticker] t-0002 ready for review").is_empty());
+        let second = said(&h, "NODE-QUESTION two");
+        assert!(second.contains(stale), "{second}");
+        assert!(second.contains("report a fresh estimate"), "{second}");
+
+        let status = h.root.join("demo/nodes/t-0001/STATUS.md");
+        std::fs::create_dir_all(status.parent().unwrap()).unwrap();
+        std::fs::write(&status, "# Status\n").unwrap();
+        let third = said(&h, "NODE-QUESTION three");
+        assert!(!third.contains(stale), "{third}");
+
+        let kept = std::fs::read_to_string(&asked).unwrap();
+        assert!(kept.contains("t-0001") && !kept.contains("root"), "{kept}");
+        assert!(!kept.contains("NODE-QUESTION"), "{kept}");
+    }
 }

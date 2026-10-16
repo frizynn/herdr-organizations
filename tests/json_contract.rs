@@ -59,6 +59,13 @@ impl Fixture {
     }
 }
 
+/// What `new` writes to a project's STATUS.md.
+const NEW_STATUS: &str = "# Status\nObjective: (none)\n## Asked\n## Needs your decision\n## In progress\n## Done\n## Decisions\n## Next\n";
+const ROOT_STATUS: &str =
+    "# Status\nObjective: Ship it\n## Asked\n- [open] Is it in the skill? : checking (t-0001)\n";
+const NODE_STATUS: &str =
+    "# Status\nObjective: Checkout\n## In progress\n- t-0002 copy fix : merged\n";
+
 /// A project with a coordinator node that has a pull request and an unread
 /// report, and a resolved worker under it. The project was never opened, so
 /// every view falls back to the recorded group.
@@ -135,6 +142,11 @@ resolved_reason = "merged"
         .to_string(),
     )
     .unwrap();
+    std::fs::write(dir.join("STATUS.md"), ROOT_STATUS).unwrap();
+    touch(&dir.join("STATUS.md"), "2026-10-02T08:00:00Z");
+    std::fs::create_dir_all(dir.join("nodes/t-0001")).unwrap();
+    std::fs::write(dir.join("nodes/t-0001/STATUS.md"), NODE_STATUS).unwrap();
+    touch(&dir.join("nodes/t-0001/STATUS.md"), "2026-10-02T09:00:00Z");
     std::fs::write(
         dir.join("inbox/20261001T100000Z-pr-t-0001-1.md"),
         "+++\nid = \"20261001T100000Z-pr-t-0001-1\"\nkind = \"pr\"\nsubject = \"t-0001\"\ncreated = \"2026-10-01T10:00:00Z\"\nsummary = \"t-0001 \\\"Checkout\\\": pull request state OPEN\"\n+++\n",
@@ -203,7 +215,12 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "report": null,
         "library": format!("{}/library/t-0001", fixture.dir()),
         "task": "Checkout",
-        "task_origin": "task"
+        "task_origin": "task",
+        "status_file": {
+            "path": format!("{}/nodes/t-0001/STATUS.md", fixture.dir()),
+            "text": NODE_STATUS,
+            "updated": "2026-10-02T09:00:00Z"
+        }
     })
 }
 
@@ -254,7 +271,8 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "report": null,
         "library": format!("{}/library/t-0002", fixture.dir()),
         "task": "",
-        "task_origin": ""
+        "task_origin": "",
+        "status_file": null
     })
 }
 
@@ -267,7 +285,12 @@ fn project(fixture: &Fixture) -> Value {
         "dir": fixture.dir(),
         "counts": {"ready-for-review": 1, "resolved": 1},
         "icon": "",
-        "tone": ""
+        "tone": "",
+        "status_file": {
+            "path": format!("{}/STATUS.md", fixture.dir()),
+            "text": ROOT_STATUS,
+            "updated": "2026-10-02T08:00:00Z"
+        }
     })
 }
 
@@ -313,7 +336,13 @@ fn project_list_overview_and_new_share_the_project_shape() {
     // No slug and no Herdr workspace: every project, never a picker.
     assert_eq!(fixture.json(&["overview", "--json"]), expected);
 
-    let created = fixture.json(&["new", "Other", "--json"]);
+    let mut created = fixture.json(&["new", "Other", "--json"]);
+    // A new project starts with an empty STATUS.md, written just now.
+    let updated = created["project"]["status_file"]["updated"].take();
+    assert!(
+        updated.as_str().unwrap().parse::<jiff::Timestamp>().is_ok(),
+        "{updated}"
+    );
     assert_eq!(
         created,
         json!({
@@ -326,7 +355,12 @@ fn project_list_overview_and_new_share_the_project_shape() {
                 "dir": format!("{}/other", fixture.root),
                 "counts": {},
                 "icon": "",
-                "tone": ""
+                "tone": "",
+                "status_file": {
+                    "path": format!("{}/other/STATUS.md", fixture.root),
+                    "text": NEW_STATUS,
+                    "updated": null
+                }
             },
             "next": format!("{BIN} --root {} open other", fixture.root)
         })
@@ -359,22 +393,56 @@ fn inbox_list_json_reads_without_consuming() {
 }
 
 #[test]
-fn node_show_names_a_coordinator_nodes_handoff() {
+fn node_show_names_a_coordinator_nodes_status_file() {
     let fixture = fixture();
-    let handoff = format!("{}/nodes/t-0001/HANDOFF.md", fixture.dir());
+    let status = format!("{}/nodes/t-0001/STATUS.md", fixture.dir());
+    std::fs::remove_file(&status).unwrap();
     let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
     assert!(
-        shown.contains(&format!("# handoff: {handoff} (not written yet)\n")),
+        shown.contains(&format!("# status: {status} (not written yet)\n")),
         "{shown}"
     );
-    write(&fixture, "nodes/t-0001/HANDOFF.md", "# Handoff\n");
+    write(&fixture, "nodes/t-0001/STATUS.md", "# Status\n");
     let shown = fixture.text(&["node", "show", "demo", "t-0001"]);
-    assert!(
-        shown.contains(&format!("# handoff: {handoff}\n")),
-        "{shown}"
-    );
+    assert!(shown.contains(&format!("# status: {status}\n")), "{shown}");
     let worker = fixture.text(&["node", "show", "demo", "t-0002"]);
-    assert!(!worker.contains("handoff"), "{worker}");
+    assert!(!worker.contains("# status"), "{worker}");
+}
+
+/// Projects from before the rename keep their HANDOFF.md as the root's
+/// status file until it is renamed; with neither file, `status_file` is null.
+#[test]
+fn the_root_status_file_falls_back_to_handoff_md_and_is_null_without_one() {
+    let fixture = fixture();
+    let dir = Path::new(&fixture.dir()).to_path_buf();
+    std::fs::remove_file(dir.join("STATUS.md")).unwrap();
+    std::fs::write(dir.join("HANDOFF.md"), "# Handoff\n").unwrap();
+    touch(&dir.join("HANDOFF.md"), "2026-10-02T07:00:00Z");
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(
+        listed["projects"][0]["status_file"],
+        json!({
+            "path": format!("{}/HANDOFF.md", fixture.dir()),
+            "text": "# Handoff\n",
+            "updated": "2026-10-02T07:00:00Z"
+        })
+    );
+    std::fs::remove_file(dir.join("HANDOFF.md")).unwrap();
+    let listed = fixture.json(&["list", "--json"]);
+    assert_eq!(listed["projects"][0]["status_file"], Value::Null);
+
+    // A status file is shown up to 8,000 characters, never through a link.
+    std::fs::write(dir.join("STATUS.md"), "x".repeat(9_000)).unwrap();
+    let shown = fixture.json(&["list", "--json"]);
+    let text = shown["projects"][0]["status_file"]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(text.chars().count(), 8_000);
+    let node = dir.join("nodes/t-0001/STATUS.md");
+    std::fs::remove_file(&node).unwrap();
+    std::os::unix::fs::symlink(dir.join("STATUS.md"), &node).unwrap();
+    let threads = fixture.json(&["thread", "list", "demo", "--json"]);
+    assert_eq!(threads["threads"][0]["status_file"], Value::Null);
 }
 
 #[test]
@@ -769,11 +837,8 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
         "TASKS.md",
         "# Tasks\n\n## Backlog\n- [ ] Checkout (codex) · t-0001\n- [ ] Copy fix · t-0002\n- [ ] Write the docs (me)\n- [x] Old work\n",
     );
-    write(
-        &fixture,
-        "HANDOFF.md",
-        "# Handoff\n\n## Current objective\nShip the checkout\nbefore Friday.\n\nMore detail.\n\n## Active work\n- t-0001\n",
-    );
+    let status_text = "# Status\nObjective: Ship the checkout before Friday.\n## Asked\n- [working] Ship it : t-0001\n";
+    write(&fixture, "STATUS.md", status_text);
     write(
         &fixture,
         "threads/t-0003.toml",
@@ -782,7 +847,7 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
     write(&fixture, "threads/t-0003.next.md", "- Pick a library\n");
     let dir = Path::new(&fixture.dir()).to_path_buf();
     touch(&dir.join("TASKS.md"), "2026-10-03T08:00:00Z");
-    touch(&dir.join("HANDOFF.md"), "2026-10-03T09:00:00Z");
+    touch(&dir.join("STATUS.md"), "2026-10-03T09:00:00Z");
 
     let mut status = fixture.json(&["project", "status", "demo", "--json"]);
     let generated = status["generated_at"].take();
@@ -805,8 +870,12 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
             "objective": "Ship the checkout before Friday.",
             "sources": {
                 "tasks_updated": "2026-10-03T08:00:00Z",
+                "status_file": "STATUS.md",
+                "status_updated": "2026-10-03T09:00:00Z",
+                "status_chars": status_text.chars().count(),
+                "status_limit": 8000,
                 "handoff_updated": "2026-10-03T09:00:00Z",
-                "handoff_chars": 104,
+                "handoff_chars": status_text.chars().count(),
                 "handoff_limit": 8000,
                 "pr_checked": ""
             },
@@ -845,6 +914,7 @@ fn project_status_json_is_computed_from_tasks_threads_and_the_inbox() {
                 }
             ],
             "drift": {
+                "status_over_limit": 0, "status_rename": 0, "status_stale": 0,
                 "handoff_over_limit": 0, "thread_resolved": 1, "thread_missing": 0,
                 "done_not_deleted": 1, "status_in_owner": 0, "duplicate_title": 0,
                 "inbox_unhandled": 1

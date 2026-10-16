@@ -1922,6 +1922,14 @@ mod tests {
                 slug: "acme".into(),
                 profile: "codex".into(),
             },
+            Jump::File {
+                path: "/r/acme/nodes/t-0001/STATUS.md".into(),
+                workspace: Some("w2".into()),
+            },
+            Jump::File {
+                path: "/r/acme/STATUS.md".into(),
+                workspace: None,
+            },
         ] {
             let args = [vec!["herdr-organizations"], jump.args()].concat();
             match Cli::try_parse_from(args).unwrap().command {

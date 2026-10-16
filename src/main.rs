@@ -41,6 +41,7 @@ mod sidebar_config;
 mod spaces;
 mod state;
 mod status;
+mod status_file;
 mod steps;
 mod sweep;
 mod tasks;

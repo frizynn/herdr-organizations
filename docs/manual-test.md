@@ -32,7 +32,7 @@ Use a scratch Git repository for worktree checks. Do not point these checks at a
 
 In the disposable project, add unique sentinel text to the project root, an ancestor node, a sibling node and a descendant node. Create a child under the ancestor. Confirm its brief contains the root, ancestor and its own sentinels in that order. Confirm the sibling and descendant sentinels are absent. Repeat for `MEMORY.md` and sorted `memory/*.md` files.
 
-Write a sentinel into the ancestor coordinator's `nodes/<id>/HANDOFF.md` and restart it with `node restart`. Confirm its brief has the coordinator node brief in place of the thread brief and shows the sentinel under `# Your handoff`, and that the child's brief has neither.
+Write a sentinel into the ancestor coordinator's `nodes/<id>/STATUS.md` and restart it with `node restart`. Confirm its brief has the coordinator node brief in place of the thread brief and shows the sentinel under `# Your status`, and that the child's brief has neither. Open the ancestor's details in the popup: a `STATUS` section shows the file's first lines and Enter opens it in a new tab.
 
 ## Agent profiles
 
@@ -81,9 +81,10 @@ In a disposable root, with a project whose `TASKS.md` has a task:
 1. `thread start demo --title T --task-file - --from-task "<title>"`: the task's line ends with ` · t-000N` and no other byte of `TASKS.md` changed; `thread show demo t-000N --json` has `"task": "<title>"` and `"task_origin": "task"`. Repeat with `node start demo --parent root ... --from-task`.
 2. Give a second task the same title: `--from-task` is refused and no thread record is created.
 3. `thread resolve` the thread while its task is open: `inbox list demo --json` has one `task` item for it.
-4. Write a `HANDOFF.md` over 8,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `handoff-over-limit`, and `doctor` warns.
-5. `task lint demo` lists what `## Drift` lists, without its cap, and `doctor` warns `tasks demo`. `project status demo --json` has one item per task and per open thread no task names, and its `drift` counts match `task lint`.
-6. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: within an hour of the ticker running (at once on a ticker's first pass), `thread show --json` reports `MERGED`.
+4. Write a `STATUS.md` over 8,000 characters: `context demo --peek` names it above `## Project instructions`, `## Drift` lists `status-over-limit`, and `doctor` warns. Remove `STATUS.md` and write a `HANDOFF.md`: `context` prints it under `## Status (HANDOFF.md)` and `## Drift` lists `status-rename`.
+5. Type two messages to the root coordinator without it touching `STATUS.md`, then run `context demo --peek`: `## Drift` lists `status-stale`, and `.state/asked.json` holds two times and no text.
+6. `task lint demo` lists what `## Drift` lists, without its cap, and `doctor` warns `tasks demo`. `project status demo --json` has one item per task and per open thread no task names, and its `drift` counts match `task lint`.
+7. Give a resolved thread's record `pr_state = "OPEN"` for a pull request that is merged: within an hour of the ticker running (at once on a ticker's first pass), `thread show --json` reports `MERGED`.
 
 ## Pull request actions
 

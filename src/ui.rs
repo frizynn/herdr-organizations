@@ -535,6 +535,20 @@ fn counts_header(counts: &Counts) -> Line {
 }
 
 /// A node as the screens name it: the root is "Coordinator".
+/// The STATUS.md a coordinator keeps: the project's for `root` (HANDOFF.md
+/// before the rename), its own for a coordinator node; `None` for a worker.
+fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf> {
+    let dir = std::path::Path::new(&project.dir);
+    if node.id == ROOT_ID {
+        return Some(crate::status_file::root_in(dir).path);
+    }
+    (node.role == NodeRole::Coordinator.as_str()).then(|| {
+        dir.join("nodes")
+            .join(&node.id)
+            .join(crate::status_file::NAME)
+    })
+}
+
 fn node_name(project: &ProjectView, id: &str) -> String {
     match project.node(id) {
         Some(n) if n.id == ROOT_ID => "Coordinator".into(),
@@ -1622,6 +1636,36 @@ impl<'a> App<'a> {
             .iter()
             .filter(|i| i.subject == node.id)
             .collect();
+        let status = status_path(&project, &node).and_then(|p| crate::status_file::read(&p));
+        if let Some(status) = &status {
+            frame.put(1, y, "STATUS", HEAD);
+            // A time rounded up to the next second is not in the past yet.
+            let age = Some(state::age(&status.updated))
+                .filter(|age| !age.is_empty())
+                .unwrap_or_else(|| "now".into());
+            frame.put_right(frame.width - 1, y, &format!("updated {age}"), DIM);
+            // Leave room for the inbox and the key hints, and for the last
+            // output while at least three lines of the file still fit.
+            let inbox_rows = if items.is_empty() { 0 } else { 5 };
+            let output_rows = if output.is_empty() { 0 } else { 3 };
+            let most = frame.height.saturating_sub(y + 3 + inbox_rows);
+            let room = most.saturating_sub(output_rows).max(most.min(3));
+            let lines: Vec<&str> = status
+                .text
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with("# "))
+                .take(room)
+                .collect();
+            for (i, line) in lines.iter().enumerate() {
+                frame.put(
+                    3,
+                    y + 1 + i,
+                    &term::fit(line, frame.width.saturating_sub(4)),
+                    Style::PLAIN,
+                );
+            }
+            y += 2 + lines.len();
+        }
         let mut lines = Vec::new();
         if !items.is_empty() {
             frame.put(1, y, "INBOX", HEAD);
@@ -1661,6 +1705,9 @@ impl<'a> App<'a> {
         let mut pairs = Vec::new();
         if node.status == Status::Need && self.config.view.answer && !output.is_empty() {
             pairs.push(("1-9".to_string(), "answer"));
+        }
+        if status.is_some() {
+            pairs.extend(self.hint(&[(Action::Open, "open status")]));
         }
         if node.status != Status::Done {
             pairs.extend(self.hint(&[(Action::Reply, "reply"), (Action::GoToPane, "go to agent")]));
@@ -2873,6 +2920,27 @@ impl<'a> App<'a> {
         });
     }
 
+    /// Opens a coordinator's STATUS.md in a new tab of its workspace, after
+    /// the popup has closed (`open-file` moves focus).
+    fn open_status(&mut self, slug: &str, id: &str) {
+        let Some(project) = self.project(slug) else {
+            return;
+        };
+        let Some(node) = project.node(id) else {
+            return;
+        };
+        let Some(path) = status_path(project, node).filter(|p| p.is_file()) else {
+            return;
+        };
+        let jump = ui_ops::Jump::File {
+            path: path.to_string_lossy().into_owned(),
+            workspace: Some(node.workspace_id.clone()).filter(|w| !w.is_empty()),
+        };
+        if let Err(error) = self.jump(jump) {
+            self.message = format!("{error:#}");
+        }
+    }
+
     fn go(&mut self, slug: &str, id: &str) {
         let jump = ui_ops::Jump::Node {
             slug: slug.into(),
@@ -3426,7 +3494,10 @@ impl<'a> App<'a> {
                     self.open_detail(&slug, &id);
                 }
             }
-            (Action::Open, View::Detail { .. }) => {}
+            (Action::Open, View::Detail { slug, id, .. }) => {
+                let (slug, id) = (slug.clone(), id.clone());
+                self.open_status(&slug, &id);
+            }
             (Action::Open, _) => self.activate(),
             (Action::NewProject, _) => self.new_form(Kind::Project, "", ""),
             (Action::NewThread, View::Dock { .. }) => {
@@ -4462,6 +4533,69 @@ mod tests {
             .collect();
         assert!(calls.is_empty(), "the popup ran {calls:?} before closing");
         assert_eq!(app.after_close, Some(expected));
+    }
+
+    /// A coordinator's details show the top of its STATUS.md, and Enter opens
+    /// the file the way `open-file` does, after the popup has closed.
+    #[test]
+    fn a_coordinators_detail_shows_its_status_file_and_enter_opens_it() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("nodes/t-0001")).unwrap();
+        let node_status = dir.join("nodes/t-0001/STATUS.md");
+        std::fs::write(
+            &node_status,
+            "# Status\nObjective: NODE-OBJECTIVE\n## Asked\n- [open] is it in the skill? : checking\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("STATUS.md"),
+            "# Status\nObjective: ROOT-OBJECTIVE\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].coordinators[1].workspace_id = "w2".into();
+        app.stack = vec![View::Launcher { sel: 0 }];
+
+        app.open_detail("acme", "t-0001");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("STATUS"), "{text}");
+        assert!(text.contains("Objective: NODE-OBJECTIVE"), "{text}");
+        assert!(
+            text.contains("- [open] is it in the skill? : checking"),
+            "{text}"
+        );
+        assert!(text.contains("↵ open status"), "{text}");
+        world.runner.calls.borrow_mut().clear();
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(app.close, "{}", app.message);
+        assert!(world.runner.calls.borrow().is_empty());
+        let args = app.after_close.as_ref().map(|j| j.args().join(" "));
+        assert_eq!(
+            args,
+            Some(format!(
+                "jump file {} --workspace w2",
+                node_status.display()
+            ))
+        );
+
+        app.close = false;
+        app.after_close = None;
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "root");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: ROOT-OBJECTIVE"), "{text}");
+
+        // A worker keeps no status file, and Enter still does nothing there.
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0003");
+        let text = app.render(84, 30).text();
+        assert!(!text.contains("STATUS"), "{text}");
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        assert!(!app.close);
     }
 
     #[test]

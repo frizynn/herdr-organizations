@@ -766,9 +766,9 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
     })
 }
 
-/// A spawning coordinator node's own state file, as its brief inlines it.
+/// A spawning coordinator node's own status file, as its brief inlines it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeHandoff {
+pub struct NodeStatus {
     pub path: PathBuf,
     /// Empty when the node has not written it yet or it was left out.
     pub text: String,
@@ -776,33 +776,47 @@ pub struct NodeHandoff {
     pub omitted: Option<String>,
 }
 
-pub fn handoff_path(project: &Project, id: &str) -> PathBuf {
-    node_scope_dir(project, id).join("HANDOFF.md")
+pub fn status_path(project: &Project, id: &str) -> PathBuf {
+    node_scope_dir(project, id).join(crate::status_file::NAME)
 }
 
-/// The handoff of a spawning coordinator node, read like a scoped memory file
-/// (a regular file, never through a symbolic link, at most 8 KiB). Only the
-/// node's own brief reads it: unlike its memory, descendants never inherit it.
-pub fn node_handoff(project: &Project, record: &Thread) -> Result<Option<NodeHandoff>> {
+/// The status file of a spawning coordinator node, read like a scoped memory
+/// file (a regular file, never through a symbolic link, at most 8 KiB). Only
+/// the node's own brief reads it: unlike its memory, descendants never
+/// inherit it.
+pub fn node_status(project: &Project, record: &Thread) -> Result<Option<NodeStatus>> {
     if !record.is_spawning_coordinator() {
         return Ok(None);
     }
-    let path = handoff_path(project, &record.id);
+    let path = status_path(project, &record.id);
     let mut budget = ScopedMemoryBudget::new();
     let text = match existing_node_scope(project, &record.id)? {
         Some(_) => read_scoped_memory_file(
             &path,
-            &format!("nodes/{}/HANDOFF.md", record.id),
+            &format!("nodes/{}/{}", record.id, crate::status_file::NAME),
             &mut budget,
         )?
         .unwrap_or_default(),
         None => String::new(),
     };
-    Ok(Some(NodeHandoff {
+    Ok(Some(NodeStatus {
         path,
         text,
         omitted: budget.omissions.into_iter().next(),
     }))
+}
+
+/// A spawning coordinator node's status file in the `--json` contract;
+/// `None` for every other node, and while the file is missing or unsafe.
+pub fn node_status_json(
+    project: &Project,
+    record: &Thread,
+) -> Option<crate::status_file::StatusJson> {
+    if !record.is_spawning_coordinator() {
+        return None;
+    }
+    existing_node_scope(project, &record.id).ok()??;
+    crate::status_file::read(&status_path(project, &record.id))
 }
 
 fn optional_real_directory(path: &Path) -> Result<bool> {
@@ -833,7 +847,7 @@ fn read_regular_file(path: &Path) -> Result<String> {
     Ok(contents)
 }
 
-fn open_regular_file_no_follow(path: &Path) -> Result<File> {
+pub fn open_regular_file_no_follow(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1980,10 +1994,10 @@ mod tests {
     const THREAD_BRIEF: &str = include_str!("../skill/THREAD.md");
 
     /// A coordinator node that may spawn is told it coordinates and gets its
-    /// own handoff back; its worker inherits its memory but neither of those,
+    /// own status file back; its worker inherits its memory but neither of those,
     /// and workers and leaf coordinators keep the thread brief.
     #[test]
-    fn only_a_spawning_coordinator_gets_the_node_brief_and_its_handoff() {
+    fn only_a_spawning_coordinator_gets_the_node_brief_and_its_status() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
@@ -1995,8 +2009,8 @@ mod tests {
         std::fs::write(scope.join("MEMORY.md"), "COORDINATOR-MEMORY").unwrap();
         for node in [&coordinator, &child, &leaf, &worker] {
             std::fs::write(
-                node_scope_dir(&project, &node.id).join("HANDOFF.md"),
-                format!("HANDOFF-SENTINEL-{}", node.id),
+                node_scope_dir(&project, &node.id).join("STATUS.md"),
+                format!("STATUS-SENTINEL-{}", node.id),
             )
             .unwrap();
         }
@@ -2004,12 +2018,13 @@ mod tests {
         let own = brief(&project, &coordinator);
         assert!(own.contains(NODE_BRIEF.trim_end()), "{own}");
         assert!(!own.contains(THREAD_BRIEF.trim_end()));
-        let handoff = scope.join("HANDOFF.md").display().to_string();
-        assert!(own.contains(&format!("`{handoff}`")), "{own}");
+        let status = scope.join("STATUS.md").display().to_string();
+        assert!(own.contains(&format!("`{status}`")), "{own}");
+        assert!(!own.contains("HANDOFF"), "{own}");
         let position = |needle: &str| own.find(needle).unwrap();
-        assert!(position("COORDINATOR-MEMORY") < position("# Your handoff"));
+        assert!(position("COORDINATOR-MEMORY") < position("# Your status"));
         assert!(
-            position(&format!("HANDOFF-SENTINEL-{}", coordinator.id))
+            position(&format!("STATUS-SENTINEL-{}", coordinator.id))
                 < position("# Organization node")
         );
 
@@ -2018,41 +2033,41 @@ mod tests {
             assert!(text.contains(THREAD_BRIEF.trim_end()), "{text}");
             assert!(!text.contains(NODE_BRIEF.trim_end()));
             assert!(
-                !text.contains("HANDOFF"),
-                "{} got a handoff: {text}",
+                !text.contains("STATUS"),
+                "{} got a status file: {text}",
                 other.id
             );
         }
         assert!(brief(&project, &child).contains("COORDINATOR-MEMORY"));
         assert_eq!(brief(&project, &worker), worker_before);
 
-        // A restart composes the same brief, handoff included.
+        // A restart composes the same brief, status file included.
         let restarted = thread::brief_for(&project, &coordinator, "task", true).unwrap();
-        assert!(restarted.contains(&format!("HANDOFF-SENTINEL-{}", coordinator.id)));
+        assert!(restarted.contains(&format!("STATUS-SENTINEL-{}", coordinator.id)));
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_handoff_is_read_with_the_scoped_memory_rules() {
+    fn a_status_file_is_read_with_the_scoped_memory_rules() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
-        let handoff = node_scope_dir(&project, &coordinator.id).join("HANDOFF.md");
-        let label = format!("nodes/{}/HANDOFF.md", coordinator.id);
+        let status = node_scope_dir(&project, &coordinator.id).join("STATUS.md");
+        let label = format!("nodes/{}/STATUS.md", coordinator.id);
 
         let missing = brief(&project, &coordinator);
-        assert!(missing.contains("# Your handoff"), "{missing}");
+        assert!(missing.contains("# Your status"), "{missing}");
 
         let secret = project.dir().join("secret.md");
         std::fs::write(&secret, "LINKED-SECRET").unwrap();
-        std::os::unix::fs::symlink(&secret, &handoff).unwrap();
+        std::os::unix::fs::symlink(&secret, &status).unwrap();
         let linked = brief(&project, &coordinator);
         assert!(!linked.contains("LINKED-SECRET"), "{linked}");
         assert!(linked.contains(&format!("{label}: refused non-regular file")));
 
-        std::fs::remove_file(&handoff).unwrap();
+        std::fs::remove_file(&status).unwrap();
         std::fs::write(
-            &handoff,
+            &status,
             format!(
                 "OVERSIZED-SENTINEL{}",
                 "x".repeat(MAX_SCOPED_MEMORY_FILE_BYTES)
@@ -2069,7 +2084,7 @@ mod tests {
             "AT-LIMIT{}",
             "x".repeat(MAX_SCOPED_MEMORY_FILE_BYTES - "AT-LIMIT".len())
         );
-        std::fs::write(&handoff, &at_limit).unwrap();
+        std::fs::write(&status, &at_limit).unwrap();
         assert!(brief(&project, &coordinator).contains(&at_limit));
     }
 

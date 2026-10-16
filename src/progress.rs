@@ -202,7 +202,26 @@ pub fn current_within(
     })
 }
 
-/// The calling pane's role when it is one of a project's coordinators or an
+/// Whose pane the hooks speak in: a project's root coordinator, or an open
+/// local thread on the same server (a worker or a coordinator node).
+pub enum Seat {
+    Root(crate::project::Project),
+    Node(crate::project::Project, Box<crate::thread::Thread>),
+}
+
+impl Seat {
+    pub fn role(&self) -> PaneRole {
+        match self {
+            Seat::Root(_) => PaneRole::Coordinator,
+            Seat::Node(_, t) if t.role == crate::thread::NodeRole::Coordinator => {
+                PaneRole::Coordinator
+            }
+            Seat::Node(..) => PaneRole::Worker,
+        }
+    }
+}
+
+/// The calling pane's seat when it is one of a project's coordinators or an
 /// open local thread on the same server: the only panes the hooks speak in.
 /// A coordinator node is a thread record, so its pane counts as a thread's,
 /// with the role of its record.
@@ -211,7 +230,7 @@ pub fn current_within(
 /// read first and Herdr is asked only when the pane could be a project's (its
 /// directory is a project home, or an open thread records its pane id). Fails
 /// closed: when Herdr cannot list the agents, the hook stays silent.
-fn managed(ctx: &Ctx, current: &Current) -> Option<PaneRole> {
+fn managed(ctx: &Ctx, current: &Current) -> Option<Seat> {
     use crate::{coordinator, project, thread};
     let pane = &current.pane;
     // Ids are only unique within one server: a project whose coordinator was
@@ -254,12 +273,12 @@ fn managed(ctx: &Ctx, current: &Current) -> Option<PaneRole> {
     if candidates.is_empty() {
         return None;
     }
-    if candidates.iter().any(|(_, record)| {
+    if let Some((project, _)) = candidates.iter().find(|(_, record)| {
         record
             .as_ref()
             .is_some_and(|r| coordinator::pane_matches(r, pane))
     }) {
-        return Some(PaneRole::Coordinator);
+        return Some(Seat::Root(project.clone()));
     }
     let herdr = Herdr::new(ctx.env.herdr_bin(), &current.socket, ctx.runner);
     let agents = herdr
@@ -296,16 +315,38 @@ fn managed(ctx: &Ctx, current: &Current) -> Option<PaneRole> {
         if coordinator::found(project, &current.socket, "", &agents)
             .is_some_and(|r| coordinator::pane_matches(&r, pane))
         {
-            return Some(PaneRole::Coordinator);
+            return Some(Seat::Root(project.clone()));
         }
         threads(project, record)
-            .iter()
+            .into_iter()
             .find(|t| agents.iter().any(|a| thread::agent_matches(t, a)))
-            .map(|t| match t.role {
-                thread::NodeRole::Coordinator => PaneRole::Coordinator,
-                thread::NodeRole::Worker => PaneRole::Worker,
-            })
+            .map(|t| Seat::Node(project.clone(), Box::new(t)))
     })
+}
+
+/// A prompt the user typed to a coordinator that keeps a status file (the
+/// root, or a coordinator node that may spawn): records its time, never its
+/// text. A node whose STATUS.md is older than the user's previous message
+/// gets one line saying so; the root's `context` lists it as drift instead.
+pub fn note_human_prompt(seat: &Seat, event: &serde_json::Value, now: i64) -> Option<String> {
+    if event["hook_event_name"] != "UserPromptSubmit"
+        || automated(event["prompt"].as_str().unwrap_or(""))
+    {
+        return None;
+    }
+    use crate::status_file;
+    match seat {
+        Seat::Root(project) => {
+            let _ = status_file::record_ask(project, status_file::ROOT_KEY, now);
+            None
+        }
+        Seat::Node(project, t) if t.is_spawning_coordinator() => {
+            let previous = status_file::record_ask(project, &t.id, now).ok()?;
+            let path = crate::organizations::status_path(project, &t.id);
+            status_file::stale(&path, previous).then(|| status_file::NODE_STALE.to_string())
+        }
+        Seat::Node(..) => None,
+    }
 }
 
 /// `report --percent N|--unknown --activity "..."`, run by the agent in its
@@ -569,7 +610,7 @@ pub fn hook(ctx: &Ctx, agent: &str) -> Result<()> {
     if !pane.agent.is_empty() && pane.agent != agent {
         return Ok(()); // another harness's hook fired in a pane that is not its own
     }
-    let Some(role) = managed(ctx, &pane) else {
+    let Some(seat) = managed(ctx, &pane) else {
         return Ok(());
     };
     let mut record = load(&ctx.root, &pane.socket, &pane.pane_id).unwrap_or_default();
@@ -586,7 +627,14 @@ pub fn hook(ctx: &Ctx, agent: &str) -> Result<()> {
     };
     let prefix = crate::coordinator::current_prefix(&ctx.root)?;
     let before = record.clone();
-    let text = respond(&mut record, &event, role, &prefix, now());
+    let now = now();
+    let mut text = respond(&mut record, &event, seat.role(), &prefix, now);
+    if let Some(line) = note_human_prompt(&seat, &event, now) {
+        text = Some(match text {
+            Some(text) => format!("{text}\n\n{line}"),
+            None => line,
+        });
+    }
     if kind == "SessionStart" {
         record.session_id = event["session_id"].as_str().unwrap_or("").to_string();
     }
@@ -681,9 +729,12 @@ mod tests {
                 crate::thread::NodeRole::Coordinator => PaneRole::Coordinator,
                 crate::thread::NodeRole::Worker => PaneRole::Worker,
             };
-            assert_eq!(managed(&ctx, &current("/managed.sock")), Some(expected));
+            assert_eq!(
+                managed(&ctx, &current("/managed.sock")).map(|s| s.role()),
+                Some(expected)
+            );
             // The same pane id on another server is not the thread's.
-            assert_eq!(managed(&ctx, &current("/other.sock")), None, "{role:?}");
+            assert!(managed(&ctx, &current("/other.sock")).is_none(), "{role:?}");
         }
     }
 
@@ -726,7 +777,7 @@ mod tests {
             agent: "claude".into(),
             pane,
         };
-        assert_eq!(managed(&ctx, &current), Some(PaneRole::Coordinator));
+        assert!(matches!(managed(&ctx, &current), Some(Seat::Root(_))));
     }
 
     #[test]

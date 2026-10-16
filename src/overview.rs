@@ -183,6 +183,9 @@ pub struct ProjectJson {
     pub counts: std::collections::BTreeMap<&'static str, usize>,
     pub icon: String,
     pub tone: String,
+    /// The root coordinator's STATUS.md (or HANDOFF.md before the rename),
+    /// `null` while neither exists.
+    pub status_file: Option<crate::status_file::StatusJson>,
 }
 
 pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
@@ -202,6 +205,7 @@ pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
             .collect(),
         icon: settings.icon,
         tone: settings.tone,
+        status_file: crate::status_file::read(&crate::status_file::root(project).path),
     }
 }
 

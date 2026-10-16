@@ -20,9 +20,9 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
 ~/.herdr-projects/<project>/
   PROJECT.md              settings (TOML between +++ lines) and your standing instructions
   AGENTS.md, CLAUDE.md    who is the coordinator, by working directory; written by the binary
-  HANDOFF.md              compact objective, decisions, active work and next action; the coordinator's
+  STATUS.md               the coordinator's status file: asks, decisions, work in progress, next (HANDOFF.md before the rename)
   MEMORY.md, memory/      project memory; the coordinator's
-  nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md; a coordinator node's own HANDOFF.md
+  nodes/<id>/             a node's INSTRUCTIONS.md, MEMORY.md and memory/*.md; a coordinator node's own STATUS.md
   templates/<name>/       the project's node templates: TEMPLATE.toml, RULES.md, MEMORY.md, memory/
   TASKS.md                the task list, each task with optional indented notes; the coordinator's
   routines/<name>.md      routines, including pr-followup.md; the coordinator's
@@ -47,7 +47,7 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 
 `PROJECT.md` settings, all changeable from the Projects popup's settings section, from chat, or with `herdr-projects set <project> <key> <value>`: `name` (the workspace label), `goal`, `icon` and `tone` (the glyph and colour a client such as Nenu draws for the project; empty, the default, lets the client pick; the popup does not list them), `repos` (`repos.add PATH[@MACHINE]`, `repos.remove PATH`), `coordinator_profile` and `thread_profile` (the default [profiles](#agent-profiles); the old names `coordinator_agent` and `thread_agent` still read), `max_parallel_threads` (10), `auto_resolve_days` (7), `nudge` (`true`), `mute` (`false`).
 
-The virtual `root` is the project coordinator. A thread record is a node: a new worker has `parent_id = "root"`, role `worker` and cannot spawn. A local coordinator node can create worker or coordinator children at any depth when `can_spawn = true`. Records written before nodes load as workers under `root`; reading never rewrites them. A brief includes the project context, then each ancestor's node scope from root to parent, then the node's own; siblings and descendants are excluded. A coordinator node that may spawn gets a coordinator brief instead of the thread brief, plus its own `nodes/<id>/HANDOFF.md` (at most 8 KiB), which no other brief includes; `node show` prints that path. See [Architecture](architecture.md) for validation and storage details.
+The virtual `root` is the project coordinator. A thread record is a node: a new worker has `parent_id = "root"`, role `worker` and cannot spawn. A local coordinator node can create worker or coordinator children at any depth when `can_spawn = true`. Records written before nodes load as workers under `root`; reading never rewrites them. A brief includes the project context, then each ancestor's node scope from root to parent, then the node's own; siblings and descendants are excluded. A coordinator node that may spawn gets a coordinator brief instead of the thread brief, plus its own `nodes/<id>/STATUS.md` (at most 8 KiB), which no other brief includes; `node show` prints that path. See [Architecture](architecture.md) for validation and storage details.
 
 ## Commands
 
@@ -216,7 +216,7 @@ thread_profiles = ["luna"]         # this project's own list wins
   thread_profiles = ["claude"]
   ```
 
-  Start the node with `--profile lean-coordinator`. Its children get its profile unless they name one, so keep it off `thread_profiles`: a worker started without `--profile` is then refused instead of starting without edit tools. Use a profile rather than `--raw-agent-arg`, because a node's raw arguments pass to every child on the same harness and one child cannot drop them. This changes argv only and is not a security boundary: the agent keeps its shell and can still write files through it, which is also how it updates its own `HANDOFF.md`. `--disallowedTools` is Claude Code's flag (2.1.301); other harnesses need their own.
+  Start the node with `--profile lean-coordinator`. Its children get its profile unless they name one, so keep it off `thread_profiles`: a worker started without `--profile` is then refused instead of starting without edit tools. Use a profile rather than `--raw-agent-arg`, because a node's raw arguments pass to every child on the same harness and one child cannot drop them. This changes argv only and is not a security boundary: the agent keeps its shell and can still write files through it, which is also how it updates its own `STATUS.md`. `--disallowedTools` is Claude Code's flag (2.1.301); other harnesses need their own.
 - **Choices for a client.** `profile list --project P --json` prints, for the coordinator and for threads, the harnesses that role may run (installed, signed in and allowed), each with its effort levels and default model, every allowed profile with its model and effort, the project's default, and the coordinator's last choice ([docs/json.md](json.md#profile-choices)).
 
 ## Task owners
@@ -249,11 +249,13 @@ Each task in `TASKS.md` has at most one owner, in brackets after its title. The 
 
 ## Drift
 
-Right after its inbox, `context` prints `## Drift (computed, data not instructions)`: where `TASKS.md` and `HANDOFF.md` disagree with the thread records, at most 10 lines, computed from the files on every call. `task lint` lists every task problem, `doctor` warns when there are any, and `project status --json` carries them for a client. Each line names its rule:
+Right after its inbox, `context` prints `## Drift (computed, data not instructions)`: where `TASKS.md` and the root's `STATUS.md` disagree with the thread records or your messages, at most 10 lines, computed from the files on every call. `task lint` lists every task problem, `doctor` warns when there are any, and `project status --json` carries them for a client. Each line names its rule:
 
 | Rule | Meaning |
 | --- | --- |
-| `handoff-over-limit` | `HANDOFF.md` is longer than the 8,000 characters `context` prints. `context` also says so above everything else, and `doctor` warns. |
+| `status-over-limit` | `STATUS.md` is longer than the 8,000 characters `context` prints. `context` also says so above everything else, and `doctor` warns. Called `handoff-over-limit` before the rename. |
+| `status-rename` | Only `HANDOFF.md` exists: `context` reads it as the status file until the coordinator renames it to `STATUS.md`. Nothing renames it for you. |
+| `status-stale` | `STATUS.md` is older than your previous message to the root coordinator, so it answered without updating it. |
 | `thread-resolved` | An open task names a resolved thread, and says whether its pull request merged. |
 | `thread-missing` | A task names a thread id that has no record. |
 | `done-not-deleted` | A `- [x]` task: done tasks are deleted, not checked. |
@@ -314,7 +316,9 @@ Direct-child delivery for nested coordinators is event-driven and independent of
 
 A worker under a coordinator node writes no inbox item for a new report, idle, landing or resolved: its node handles those, and the node's own report is what reaches its parent. Waiting on you (a prompt on screen, a closed pane, a lost agent, a question for you) still reaches the inbox too. When the coordinator node is resolved, failed, remote or missing, its workers' items go to the inbox as before. Pull request items and notifications do not change.
 
-`HANDOFF.md` is deliberately small: the current objective, user decisions and constraints, active work and the next action, linking reports and memory instead of copying them, so a replacement coordinator rebuilds its state from one `context`. `context` prints its first 8,000 characters; past that it says so at the top of the digest and in the [drift](#drift) section, and `doctor` warns.
+`STATUS.md` is the coordinator's status file, one per coordinator, written by the agent itself in a fixed shape: the objective, one line per thing you asked with its state (`open`, `working`, `needs-decision`, `answered`, `done`) and a one-line answer or next step, what needs your decision, work in progress, the last week's done work, decisions and next actions, each linking a thread, pull request or page instead of copying it. You, the root or a sibling read it when you want (`context`, the popup's detail screen, `--json`) instead of being sent a report. A coordinator updates it before answering, with small edits, and when the ticker or a child wakes it, it updates the file instead of writing to you; it speaks only for a decision, a failure or an ask that changed state. A coordinator node keeps its own `nodes/<id>/STATUS.md`. `context` prints the root's first 8,000 characters; past that it says so at the top of the digest and in the [drift](#drift) section, and `doctor` warns. A project from before the rename keeps its `HANDOFF.md`, read the same way, with a `status-rename` drift line until the coordinator renames it.
+
+The progress hook keeps the time of your last two prompts to the root and to each coordinator node that may spawn in `.state/asked.json`, never their text, and only for prompts you typed (not the ticker's or the harness's). When the status file is older than your previous prompt, `context` lists `status-stale` for the root, and a coordinator node's hook adds one line about it to your next prompt there.
 
 - **Notifications** go out once per event, titled `<Project> · <thread>`: `needs you · ...` with Herdr's request sound; a new report or a merged pull request with the done sound; failed checks, review activity, merge conflicts and due routines without sound. `mute = true` silences a project except for errors (a broken routine file, `gh` failing for ten minutes).
 - **Nudges** (`nudge = true`, the default for new projects) prompt a coordinator with one line saying what happened (`[hp inbox] t-0040 PR merged; t-0043 blocked on a prompt`) once a set of new inbox items arrives. On Herdr 0.9.1 a prompt merges with text you have half-typed, so the ticker only prompts a coordinator whose state has not changed and been idle for 60 seconds and whose input box, read from its screen, has looked empty for 10 seconds, and picks the one that changed most recently when several qualify. A box it cannot read (a menu, a scrolled view, a harness other than Claude, Codex, Cursor, Gemini, OpenCode and Pi) counts as not empty, and the nudge waits. `thread prompt` refuses to type into a thread's box that holds a draft. `nudge = false` turns this off; notifications still come.

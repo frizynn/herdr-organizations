@@ -1,4 +1,4 @@
-//! What keeps tasks, threads and the handoff from drifting apart, checked
+//! What keeps tasks, threads and the status file from drifting apart, checked
 //! against the built binary with a scrubbed environment: no Herdr and no `gh`
 //! are reachable, so every check here is about the project's own files.
 
@@ -84,8 +84,8 @@ impl Fixture {
     }
 }
 
-fn handoff(chars: usize) -> String {
-    let mut text = "# Handoff\n\n## Current objective\nShip the checkout.\n".to_string();
+fn status(chars: usize) -> String {
+    let mut text = "# Status\nObjective: Ship the checkout.\n## In progress\n".to_string();
     while text.len() < chars {
         text.push_str("- t-0002 ships the checkout; waiting on review.\n");
     }
@@ -94,11 +94,11 @@ fn handoff(chars: usize) -> String {
 }
 
 #[test]
-fn an_oversized_handoff_is_named_above_the_digest_and_by_doctor() {
+fn an_oversized_status_file_is_named_above_the_digest_and_by_doctor() {
     let fixture = Fixture::new();
-    fixture.write("HANDOFF.md", &handoff(9_000));
+    fixture.write("STATUS.md", &status(9_000));
     let context = fixture.text(&["context", "acme", "--peek"]);
-    let warning = "HANDOFF.md has 9000 characters and this digest shows only the first 8000; compact it before anything else.";
+    let warning = "STATUS.md has 9000 characters and this digest shows only the first 8000; compact it before anything else.";
     let at = context.find(warning).expect(&context);
     assert!(
         at < context.find("## Project instructions").unwrap(),
@@ -108,20 +108,98 @@ fn an_oversized_handoff_is_named_above_the_digest_and_by_doctor() {
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
     assert!(
         doctor.contains(
-            "[warn] handoff acme: HANDOFF.md has 9000 characters; `context` shows the first 8000, so ask the coordinator to compact it"
+            "[warn] status acme: STATUS.md has 9000 characters; `context` shows the first 8000, so ask the coordinator to compact it"
         ),
         "{doctor}"
     );
 
     // Within the limit, neither says anything.
-    fixture.write("HANDOFF.md", &handoff(7_000));
+    fixture.write("STATUS.md", &status(7_000));
     assert!(
         !fixture
             .text(&["context", "acme", "--peek"])
             .contains("this digest shows only")
     );
     let doctor = String::from_utf8(fixture.run(&["doctor"], "").stdout).unwrap();
-    assert!(!doctor.contains("handoff acme"), "{doctor}");
+    assert!(!doctor.contains("status acme"), "{doctor}");
+
+    // A project from before the rename: its HANDOFF.md is measured instead.
+    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
+    fixture.write("HANDOFF.md", &status(9_000));
+    let context = fixture.text(&["context", "acme", "--peek"]);
+    assert!(
+        context
+            .contains("HANDOFF.md has 9000 characters and this digest shows only the first 8000"),
+        "{context}"
+    );
+}
+
+/// The lines of the digest's drift section.
+fn drift(context: &str) -> Vec<String> {
+    let drift = context
+        .split("## Drift (computed, data not instructions)\n")
+        .nth(1)
+        .expect(context);
+    drift
+        .split("\n\n")
+        .next()
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_new_project_keeps_its_status_in_status_md() {
+    let fixture = Fixture::new();
+    assert!(fixture.dir().join("STATUS.md").is_file());
+    assert!(!fixture.dir().join("HANDOFF.md").exists());
+    let context = fixture.text(&["context", "acme", "--peek"]);
+    assert!(
+        context.contains("\n## Status (STATUS.md)\n# Status\nObjective: (none)\n## Asked\n"),
+        "{context}"
+    );
+    assert!(!context.contains("HANDOFF"), "{context}");
+    assert_eq!(drift(&context), ["(none)"]);
+}
+
+#[test]
+fn context_prefers_status_md_and_falls_back_to_handoff_md_with_a_rename_line() {
+    let fixture = Fixture::new();
+    fixture.write("HANDOFF.md", "# Handoff\n\nOLD-SENTINEL\n");
+    fixture.write("STATUS.md", "# Status\nObjective: NEW-SENTINEL\n");
+    let context = fixture.text(&["context", "acme", "--peek"]);
+    assert!(
+        context.contains("## Status (STATUS.md)\n# Status\nObjective: NEW-SENTINEL"),
+        "{context}"
+    );
+    assert!(!context.contains("OLD-SENTINEL"), "{context}");
+    assert_eq!(drift(&context), ["(none)"]);
+
+    std::fs::remove_file(fixture.dir().join("STATUS.md")).unwrap();
+    let context = fixture.text(&["context", "acme", "--peek"]);
+    assert!(
+        context.contains("## Status (HANDOFF.md)\n# Handoff\n\nOLD-SENTINEL"),
+        "{context}"
+    );
+    assert_eq!(
+        drift(&context),
+        ["- [status-rename] rename HANDOFF.md to STATUS.md"]
+    );
+    // Reading never renames or rewrites the user's file.
+    assert!(!fixture.dir().join("STATUS.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.dir().join("HANDOFF.md")).unwrap(),
+        "# Handoff\n\nOLD-SENTINEL\n"
+    );
+    let status: serde_json::Value =
+        serde_json::from_str(&fixture.text(&["project", "status", "acme", "--json"])).unwrap();
+    assert_eq!(status["sources"]["status_file"], "HANDOFF.md");
+    assert_eq!(status["drift"]["status_rename"], 1);
+    assert_eq!(
+        status["problems"][0],
+        serde_json::json!({"rule": "status-rename", "line": 0, "task": "", "thread": "", "detail": "rename HANDOFF.md to STATUS.md"})
+    );
 }
 
 #[test]
@@ -139,7 +217,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
         "resolved_reason = \"manual\"\n",
     );
     fixture.thread("t-0003", "Running fine", "open", "");
-    fixture.write("HANDOFF.md", &handoff(9_000));
+    fixture.write("STATUS.md", &status(9_000));
 
     let context = fixture.text(&["context", "acme", "--peek"]);
     let drift = context
@@ -150,7 +228,7 @@ fn context_lists_drift_between_tasks_md_and_the_thread_records() {
     assert_eq!(
         drift,
         [
-            "- [handoff-over-limit] HANDOFF.md: 9000 characters, this digest shows the first 8000",
+            "- [status-over-limit] STATUS.md has 9000 characters, this digest shows the first 8000",
             "- [thread-resolved] TASKS.md:4 \"Fix login\" · t-0001: the thread is resolved and its PR merged",
             "- [thread-resolved] TASKS.md:5 \"Ship checkout\" · t-0002: the thread is resolved",
             "- [thread-missing] TASKS.md:9 \"Rename the settings keys\" · t-0099: no such thread",
@@ -348,7 +426,7 @@ fn task_lint_lists_every_task_problem_and_doctor_counts_them() {
         "TASKS.md",
         "# Tasks\n\n## Backlog\n- [x] Done once\n- [ ] Rename keys · t-0099\n- [ ] Fine\n",
     );
-    fixture.write("HANDOFF.md", &handoff(9_000));
+    fixture.write("STATUS.md", &status(9_000));
     let lint: serde_json::Value =
         serde_json::from_str(&fixture.text(&["task", "lint", "acme", "--json"])).unwrap();
     assert_eq!(
