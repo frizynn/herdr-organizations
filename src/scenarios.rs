@@ -5971,3 +5971,207 @@ fn coordinator_prompt_reaches_its_own_project_s_coordinator_not_one_whose_shell_
         ]
     );
 }
+
+// ------------------------------------------------------- nested coordinators
+
+/// root (pane w1:p1) -> coordinator node t-0001 (pane w2:p1) -> worker t-0002
+/// (pane w3:p1), every agent idle except the worker, whose agent is
+/// `worker_state` after it was seen working.
+fn nested_world(worker_state: &str) -> (World, Project, Thread) {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let node = world.thread(&project, world.home.path(), |t| {
+        t.title = "Area coordinator".into();
+        t.role = thread::NodeRole::Coordinator;
+        t.can_spawn = true;
+        t.last_group = "idle".into();
+        t.last_state = "idle".into();
+    });
+    let cwd = world.home.path().join("worker");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let cwd = cwd.to_string_lossy().into_owned();
+    thread::allocate(&project, |t| {
+        t.title = "Worker".into();
+        t.parent_id = node.id.clone();
+        t.kind = Kind::Worktree;
+        t.status = Status::Open;
+        t.agent = "claude".into();
+        t.agent_name = thread::agent_name(&project.slug, "t-0002");
+        t.workspace_id = "w3".into();
+        t.tab_id = "w3:t1".into();
+        t.pane_id = "w3:p1".into();
+        t.cwd = cwd.clone();
+        t.worktree_path = cwd.clone();
+        t.repo = "/repo".into();
+        t.thread_dir = thread::thread_dir(&cwd, &project.slug, "t-0002");
+        t.last_group = "working".into();
+        t.last_state = "working".into();
+        t.last_state_change = "2026-01-01T00:00:00Z".into();
+    })
+    .unwrap();
+    let home = world.home.path().to_string_lossy().into_owned();
+    *world.agents.borrow_mut() = format!(
+        "[{},{},{}]",
+        agent_json(
+            "w1",
+            "w1:t1",
+            "w1:p1",
+            &project.canonical_dir().to_string_lossy(),
+            "hp-demo-coordinator",
+            "idle"
+        ),
+        agent_json("w2", "w2:t1", "w2:p1", &home, "hp-demo-t-0001", "idle"),
+        agent_json("w3", "w3:t1", "w3:p1", &cwd, "hp-demo-t-0002", worker_state)
+    );
+    world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    world
+        .runner
+        .on("notification show", ok(r#"{"result":{"shown":true}}"#));
+    let worker = thread::load(&project, "t-0002").unwrap();
+    (world, project, worker)
+}
+
+fn write_report(t: &Thread, text: &str) {
+    std::fs::create_dir_all(&t.thread_dir).unwrap();
+    std::fs::write(Path::new(&t.thread_dir).join("report.md"), text).unwrap();
+}
+
+/// The texts typed into `pane` with `agent prompt`.
+fn prompts_to(world: &World, pane: &str) -> Vec<String> {
+    world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.display().contains("agent prompt") && c.args.iter().any(|a| a == pane))
+        .map(|c| prompt_text(c).to_string())
+        .collect()
+}
+
+fn items_about(project: &Project, id: &str) -> Vec<inbox::Item> {
+    inbox::unhandled(project)
+        .into_iter()
+        .filter(|i| i.subject == id)
+        .collect()
+}
+
+#[test]
+fn a_workers_report_wakes_its_coordinator_node_and_only_the_nodes_own_report_reaches_root() {
+    let (world, project, worker) = nested_world("done");
+    set_front_matter(&project, "nudge = true");
+    write_report(&worker, "## Report\ndone\n");
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+
+    // The coordinator node is woken once, in one short line with no report text.
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("t-0002 ready for review"), "{}", woken[0]);
+    assert!(!woken[0].contains('\n'));
+    // Nothing about the grandchild reaches the root: no item, no nudge. The
+    // user still gets the review toast.
+    assert!(items_about(&project, "t-0002").is_empty());
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert!(nudges(&world).is_empty(), "{:?}", nudges(&world));
+    assert_eq!(world.runner.count("notification show Demo · t-0002"), 1);
+
+    // The coordinator node finishing is a direct child of root: one item and
+    // one nudge, naming the node only.
+    let node = thread::load(&project, "t-0001").unwrap();
+    write_report(&node, "## Report\narea done\n");
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    box_empty_for_a_while(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    let items = items_about(&project, "t-0001");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].event, "new report");
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report"]);
+}
+
+#[test]
+fn a_worker_blocked_on_a_prompt_still_reaches_the_root_inbox_and_its_coordinator_node() {
+    let (world, project, _) = nested_world("blocked");
+    thread::update(&project, "t-0002", |t| {
+        t.last_state = "blocked".into();
+        t.last_state_change = "2026-01-01T00:00:00Z".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    let items = items_about(&project, "t-0002");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].event, "blocked on a prompt");
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("t-0002 waiting on you"), "{}", woken[0]);
+}
+
+#[test]
+fn a_workers_report_falls_back_to_the_root_inbox_without_an_open_coordinator_node() {
+    for status in [Status::Resolved, Status::Failed] {
+        let (world, project, worker) = nested_world("done");
+        thread::update(&project, "t-0001", |t| t.status = status).unwrap();
+        write_report(&worker, "## Report\ndone\n");
+        let ctx = world.ctx();
+        let mut memory = Memory::new(&ctx);
+        for _ in 0..3 {
+            ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        }
+        let events: Vec<String> = items_about(&project, "t-0002")
+            .into_iter()
+            .map(|i| i.event)
+            .collect();
+        assert_eq!(events, ["new report"], "{status:?}");
+        assert!(prompts_to(&world, "w2:p1").is_empty(), "{status:?}");
+    }
+}
+
+#[test]
+fn a_worker_resolved_by_its_coordinator_node_leaves_no_root_item() {
+    let (world, project, _) = nested_world("idle");
+    world.runner.on("pane close", ok(r#"{"result":{}}"#));
+    let ctx = world.ctx();
+    threads::resolve(
+        &ctx,
+        "demo",
+        "t-0002",
+        &ResolveArgs {
+            keep_worktree: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        thread::load(&project, "t-0002").unwrap().status,
+        Status::Resolved
+    );
+    assert!(items_about(&project, "t-0002").is_empty());
+    // A direct child of root still leaves its item.
+    threads::resolve(
+        &ctx,
+        "demo",
+        "t-0001",
+        &ResolveArgs {
+            keep_worktree: true,
+            skip_copy: true,
+            ..ResolveArgs::default()
+        },
+    )
+    .unwrap();
+    let events: Vec<String> = items_about(&project, "t-0001")
+        .into_iter()
+        .map(|i| i.event)
+        .collect();
+    assert_eq!(events, ["resolved"]);
+}

@@ -1674,7 +1674,7 @@ mod tests {
         queue_parent_updates(&project, &mut state, std::slice::from_ref(&ready));
         assert_eq!(
             state.parent_updates[&parent.id][&child.id],
-            "Ready for review"
+            "ready for review"
         );
 
         let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
@@ -1718,9 +1718,12 @@ mod tests {
             .find(|call| call.display().contains("agent prompt"))
             .and_then(|call| call.args.last())
             .unwrap();
-        assert!(prompt.contains(PARENT_NUDGE_PREFIX));
-        assert!(prompt.contains(&format!("{}=Ready for review", child.id)));
-        assert!(prompt.contains("Do not poll"));
+        assert!(prompt.starts_with(PARENT_NUDGE_PREFIX));
+        assert!(prompt.contains(&format!(" {} ready for review.", child.id)));
+        assert!(prompt.contains(&format!("node show {} {}", project.slug, child.id)));
+        assert!(!prompt.contains('\n'));
+        // The node brief says how to watch children; the nudge does not repeat it.
+        assert!(!prompt.contains("Do not poll"));
         assert!(!prompt.contains("herdr agent read"));
         drop(calls);
 
@@ -1733,6 +1736,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(world.runner.count("agent prompt"), 1);
+    }
+
+    #[test]
+    fn an_idle_child_does_not_wake_its_parent_and_several_children_share_one_line() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let parent = world.thread(&project, world.home.path(), |thread| {
+            thread.role = thread::NodeRole::Coordinator;
+            thread.can_spawn = true;
+        });
+        let child = |title: &str| {
+            thread::allocate(&project, |thread| {
+                thread.parent_id = parent.id.clone();
+                thread.title = title.into();
+                thread.status = Status::Open;
+            })
+            .unwrap()
+        };
+        let (a, b, c) = (child("A"), child("B"), child("C"));
+        let to = |id: &str, group: Group| Transition {
+            id: id.into(),
+            to: group,
+            note: String::new(),
+        };
+        let mut state = State::default();
+
+        queue_parent_updates(&project, &mut state, &[to(&a.id, Group::Idle)]);
+        assert!(
+            state.parent_updates.is_empty(),
+            "{:?}",
+            state.parent_updates
+        );
+
+        queue_parent_updates(
+            &project,
+            &mut state,
+            &[
+                to(&a.id, Group::ReadyForReview),
+                to(&b.id, Group::WaitingOnYou),
+                to(&c.id, Group::ReadyForReview),
+            ],
+        );
+        let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
+        world
+            .runner
+            .on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let agent = Agent {
+            pane_id: parent.pane_id.clone(),
+            tab_id: parent.tab_id.clone(),
+            workspace_id: parent.workspace_id.clone(),
+            name: parent.agent_name.clone(),
+            agent_status: "idle".into(),
+            cwd: parent.cwd.clone(),
+            ..Agent::default()
+        };
+        nudge_parent_coordinators(&world.ctx(), &project, &mut state, &herdr, &[agent]).unwrap();
+        let calls = world.runner.calls.borrow();
+        let prompt = calls
+            .iter()
+            .find(|call| call.display().contains("agent prompt"))
+            .and_then(|call| call.args.last())
+            .unwrap();
+        let prefix = crate::coordinator::current_prefix(&world.ctx().root).unwrap();
+        assert_eq!(
+            *prompt,
+            format!(
+                "{PARENT_NUDGE_PREFIX} {} waiting on you; {}, {} ready for review. Inspect with `{prefix} node show demo <id>`.",
+                b.id, a.id, c.id
+            )
+        );
     }
 
     #[test]
