@@ -303,6 +303,10 @@ enum View {
     Dock {
         sel: usize,
     },
+    /// Every coordinator's asks, grouped as the user reads them.
+    Asks {
+        sel: usize,
+    },
 }
 
 impl View {
@@ -316,6 +320,7 @@ impl View {
             View::Form(_) | View::Reply { .. } => Screen::Form,
             View::Confirm { .. } | View::Close { .. } => Screen::Confirm,
             View::Help | View::Dock { .. } => Screen::Dock,
+            View::Asks { .. } => Screen::Asks,
         }
     }
 
@@ -618,6 +623,87 @@ fn without_done(counts: &Counts) -> Counts {
     }
 }
 
+/// The groups of the asks list, in `asks::Ask::rank` order.
+const ASK_GROUPS: [(&str, &str, Style); 5] = [
+    ("WAIT ON YOU", "?", YELLOW),
+    ("DOES NOT CLOSE", "✗", RED),
+    ("IN PROGRESS", "●", BLUE),
+    ("DONE", "✓", GREEN),
+    ("OTHER LINES", "·", DIM),
+];
+
+/// `<ask> : <answer>`, or the ask alone.
+fn said(ask: &crate::asks::Ask) -> String {
+    if ask.answer.is_empty() {
+        ask.text.clone()
+    } else {
+        format!("{} : {}", ask.text, ask.answer)
+    }
+}
+
+/// What a row says after the ask: why it does not close, else its answer
+/// and what each link confirms.
+fn ask_detail(ask: &crate::asks::Ask) -> String {
+    if !ask.mismatch.is_empty() {
+        return format!("{} · {}", ask.state.word(), ask.mismatch);
+    }
+    std::iter::once(ask.answer.clone())
+        .chain(ask.links.iter().map(crate::asks::Link::words))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// One NEEDS YOU row: what it is about, the line it shows and since when.
+struct NeedsYou<'a> {
+    project: &'a ProjectView,
+    node: &'a Node,
+    text: String,
+    since: String,
+}
+
+impl<'a> NeedsYou<'a> {
+    /// A node waiting on the user, or a coordinator whose status file waits
+    /// on them; the root only for its file, as its agent's state shows on
+    /// its own row.
+    fn of(project: &'a ProjectView, node: &'a Node) -> Option<NeedsYou<'a>> {
+        if node.status == Status::Need && node.id != ROOT_ID {
+            return Some(NeedsYou {
+                project,
+                node,
+                text: node.text.clone(),
+                since: node.since.clone(),
+            });
+        }
+        let card = project.card(&node.id).filter(|_| !node.resolved)?;
+        let text = waits_text(&card);
+        (!text.is_empty()).then(|| NeedsYou {
+            project,
+            node,
+            text,
+            since: card.status.map(|s| s.updated.clone()).unwrap_or_default(),
+        })
+    }
+}
+
+/// `1 decision`, `2 decisions`.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// `2 decisions · 1 does not close`; empty when the card waits on nothing.
+fn waits_text(card: &state::Card) -> String {
+    [
+        (card.decisions(), "decision", "decisions"),
+        (card.mismatches(), "does not close", "do not close"),
+    ]
+    .into_iter()
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, one, many)| counted(n, one, many))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 /// How soon a node wants a look: the order open nodes are listed in.
 fn urgency(status: Status) -> u8 {
     match status {
@@ -719,21 +805,23 @@ impl<'a> App<'a> {
 
     // -------------------------------------------------------------- launcher
 
-    fn needs_you(&self) -> Vec<(&ProjectView, &Node)> {
-        let mut items: Vec<(&ProjectView, &Node)> = self
+    /// What waits on the user, oldest first: every node waiting on them,
+    /// and every coordinator, the root included, whose status file has a
+    /// decision for them or an ask that does not close.
+    fn needs_you(&self) -> Vec<NeedsYou<'_>> {
+        let mut items: Vec<NeedsYou> = self
             .snap
             .projects
             .iter()
             .flat_map(|p| {
                 p.threads
                     .iter()
-                    .chain(p.coordinators.iter().skip(1))
-                    .map(move |t| (p, t))
+                    .chain(&p.coordinators)
+                    .filter_map(move |node| NeedsYou::of(p, node))
             })
-            .filter(|(_, t)| t.status == Status::Need)
-            .filter(|(p, t)| self.matches(p, t))
+            .filter(|item| self.matches(item.project, item.node))
             .collect();
-        items.sort_by(|a, b| a.1.since.cmp(&b.1.since));
+        items.sort_by(|a, b| a.since.cmp(&b.since));
         items
     }
 
@@ -846,14 +934,21 @@ impl<'a> App<'a> {
                     .at(1, "NEEDS YOU", HEAD)
                     .at(-2, "oldest first", DIM),
             );
-            for (p, t) in needs.iter().take(6) {
+            for item in needs.iter().take(6) {
+                let (p, t) = (item.project, item.node);
+                // The root's row names its project, a node's its coordinator.
+                let owner = if t.id == ROOT_ID {
+                    p.name.clone()
+                } else {
+                    node_name(p, &t.coordinator)
+                };
                 lines.push(
                     Line::new()
                         .at(3, "●", RED)
                         .at(5, term::fit(&t.title, 13), Style::PLAIN)
-                        .at(19, term::fit(&node_name(p, &t.coordinator), 17), DIM)
-                        .at(37, term::fit(&t.text, 38), Style::PLAIN)
-                        .at(-2, state::age(&t.since), DIM)
+                        .at(19, term::fit(&owner, 17), DIM)
+                        .at(37, term::fit(&item.text, 38), Style::PLAIN)
+                        .at(-2, state::age(&item.since), DIM)
                         .target(Target::NeedsYou(p.slug.clone(), t.id.clone())),
                 );
             }
@@ -1003,6 +1098,7 @@ impl<'a> App<'a> {
             (Action::Open, "open"),
             (Action::Close, "close node"),
             (Action::Search, "search"),
+            (Action::Asks, "your asks"),
             (Action::Adopt, "adopt workspace"),
             (Action::Back, "close"),
         ]);
@@ -1689,8 +1785,22 @@ impl<'a> App<'a> {
             .iter()
             .filter(|i| i.subject == node.id)
             .collect();
-        let status = status_path(&project, &node).and_then(|p| crate::status_file::read(&p));
-        if let Some(status) = &status {
+        // A model written before cards has no status file on its nodes: the
+        // file itself is shown then, as before.
+        let card = project.card(&node.id).filter(|c| c.status.is_some());
+        let status = match &card {
+            Some(_) => None,
+            None => status_path(&project, &node).and_then(|p| crate::status_file::read(&p)),
+        };
+        if let Some(card) = &card {
+            let inbox_rows = if items.is_empty() { 0 } else { 5 };
+            let room = frame.height.saturating_sub(y + 3 + inbox_rows);
+            let lines = self.card_lines(card, frame.width);
+            for (i, line) in lines.iter().take(room).enumerate() {
+                draw_line(frame, y + i, line, false);
+            }
+            y += 1 + lines.len().min(room);
+        } else if let Some(status) = &status {
             frame.put(1, y, "STATUS", HEAD);
             // A time rounded up to the next second is not in the past yet.
             let age = Some(state::age(&status.updated))
@@ -1759,7 +1869,7 @@ impl<'a> App<'a> {
         if node.status == Status::Need && self.config.view.answer && !output.is_empty() {
             pairs.push(("1-9".to_string(), "answer"));
         }
-        if status.is_some() {
+        if status.is_some() || card.is_some() {
             pairs.extend(self.hint(&[(Action::Open, "open status")]));
         }
         if node.status != Status::Done {
@@ -1781,6 +1891,255 @@ impl<'a> App<'a> {
         }
         pairs.extend(self.hint(&[(Action::Back, "back")]));
         frame.hint(frame.height - 1, &pairs);
+    }
+
+    // -------------------------------------------------------------- asks
+
+    /// Your asks: every coordinator's, in the groups of `asks::Ask::rank`,
+    /// each a row with its text over a dim row saying whose it is and what
+    /// its links confirm. Coordinators' decisions join what waits on you.
+    fn asks_lines(&self, width: usize) -> Vec<Line> {
+        let asks = self.snap.asks();
+        let decisions: Vec<(&ProjectView, &Node, &String)> = self
+            .snap
+            .projects
+            .iter()
+            .flat_map(|p| {
+                p.coordinators
+                    .iter()
+                    .filter(|c| !c.resolved)
+                    .flat_map(move |c| {
+                        c.status_file
+                            .iter()
+                            .flat_map(move |s| s.needs_decision.iter().map(move |d| (p, c, d)))
+                    })
+            })
+            .collect();
+        let fit = |text: &str| term::fit(text, width.saturating_sub(7));
+        let row = |p: &ProjectView,
+                   coordinator: &str,
+                   glyph: &'static str,
+                   style: Style,
+                   text: &str,
+                   detail: &str| {
+            let mut whose = format!("{} · {}", p.name, node_name(p, coordinator));
+            if !detail.is_empty() {
+                whose = format!("{whose} · {detail}");
+            }
+            [
+                Line::new()
+                    .at(3, glyph, style)
+                    .at(5, fit(text), Style::PLAIN)
+                    .target(Target::Node(p.slug.clone(), coordinator.to_string())),
+                Line::new().at(5, fit(&whose), DIM),
+            ]
+        };
+        let mut lines = Vec::new();
+        for (rank, (head, glyph, style)) in ASK_GROUPS.into_iter().enumerate() {
+            let group: Vec<_> = asks
+                .iter()
+                .filter(|(_, a)| usize::from(a.ask.rank()) == rank)
+                .collect();
+            let extra: &[_] = if rank == 0 { &decisions } else { &[] };
+            if group.is_empty() && extra.is_empty() {
+                continue;
+            }
+            if !lines.is_empty() {
+                lines.push(Line::new());
+            }
+            lines.push(Line::new().at(1, head, HEAD).at(
+                head.len() as isize + 3,
+                (group.len() + extra.len()).to_string(),
+                DIM,
+            ));
+            for (p, a) in group {
+                lines.extend(row(
+                    p,
+                    &a.coordinator,
+                    glyph,
+                    style,
+                    &a.ask.text,
+                    &ask_detail(&a.ask),
+                ));
+            }
+            for (p, c, decision) in extra {
+                lines.extend(row(p, &c.id, glyph, style, decision, "decision"));
+            }
+        }
+        lines
+    }
+
+    fn draw_asks(&mut self, frame: &mut Frame, sel: usize) {
+        let lines = self.asks_lines(frame.width);
+        if lines.is_empty() {
+            frame.put(1, 0, "Nothing asked yet.", BOLD);
+            frame.put(
+                1,
+                1,
+                "A coordinator lists what you ask it under ## Asked in its status file.",
+                DIM,
+            );
+            self.rows.clear();
+        } else {
+            let asks = self.snap.asks();
+            let count = |rank: u8| asks.iter().filter(|(_, a)| a.ask.rank() == rank).count();
+            let waiting = count(0)
+                + self
+                    .snap
+                    .projects
+                    .iter()
+                    .flat_map(|p| &p.coordinators)
+                    .filter(|c| !c.resolved)
+                    .filter_map(|c| c.status_file.as_ref())
+                    .map(|s| s.needs_decision.len())
+                    .sum::<usize>();
+            let summary = [
+                "all coordinators".to_string(),
+                counted(waiting, "waits on you", "wait on you"),
+                counted(count(1), "does not close", "do not close"),
+                format!("{} in progress", count(2)),
+                format!("{} done", count(3)),
+            ]
+            .join(" · ");
+            frame.put(1, 0, &term::fit(&summary, frame.width - 2), DIM);
+            let height = frame.height.saturating_sub(4);
+            self.rows = draw_list(frame, 2, height, &lines, sel);
+        }
+        let pairs = self.hint(&[(Action::Open, "open coordinator"), (Action::Back, "back")]);
+        frame.hint(frame.height - 1, &pairs);
+    }
+
+    /// A coordinator's card in its details: the objective, what waits on
+    /// you, its asks, its open children with their verdicts, and their PRs.
+    fn card_lines(&self, card: &state::Card, width: usize) -> Vec<Line> {
+        const MOST: usize = 5;
+        let fit = |text: &str, used: usize| term::fit(text, width.saturating_sub(used));
+        let more = |lines: &mut Vec<Line>, n: usize| {
+            if n > MOST {
+                lines.push(Line::new().at(3, format!("+{} more", n - MOST), DIM));
+            }
+        };
+        let mut lines = Vec::new();
+        if let Some(status) = card.status {
+            let objective = if status.objective.is_empty() {
+                "(none)"
+            } else {
+                status.objective.as_str()
+            };
+            // A time rounded up to the next second is not in the past yet.
+            let age = Some(state::age(&status.updated))
+                .filter(|age| !age.is_empty())
+                .unwrap_or_else(|| "now".into());
+            lines.push(
+                Line::new()
+                    .at(1, "OBJECTIVE", HEAD)
+                    .at(12, fit(objective, 34), Style::PLAIN)
+                    .at(-2, format!("status updated {age}"), DIM),
+            );
+        }
+        let waiting: Vec<String> = card
+            .status
+            .map(|s| s.needs_decision.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .chain(
+                card.asks
+                    .iter()
+                    .filter(|a| a.state == crate::asks::State::NeedsDecision)
+                    .map(|a| said(a)),
+            )
+            .collect();
+        if !waiting.is_empty() {
+            lines.push(Line::new());
+            lines.push(Line::new().at(1, "WAITS ON YOU", HEAD).at(
+                14,
+                waiting.len().to_string(),
+                DIM,
+            ));
+            for text in waiting.iter().take(MOST) {
+                lines.push(
+                    Line::new()
+                        .at(3, "?", YELLOW)
+                        .at(5, fit(text, 7), Style::PLAIN),
+                );
+            }
+            more(&mut lines, waiting.len());
+        }
+        let asks: Vec<&crate::asks::Ask> = card
+            .asks
+            .iter()
+            .copied()
+            .filter(|a| a.state != crate::asks::State::NeedsDecision)
+            .collect();
+        if !asks.is_empty() {
+            lines.push(Line::new());
+            lines.push(
+                Line::new()
+                    .at(1, "ASKS", HEAD)
+                    .at(6, asks.len().to_string(), DIM),
+            );
+            for ask in asks.iter().take(MOST) {
+                let (_, glyph, style) = ASK_GROUPS[usize::from(ask.rank())];
+                lines.push(
+                    Line::new()
+                        .at(3, glyph, style)
+                        .at(5, term::fit(&ask.text, 28), Style::PLAIN)
+                        .at(35, fit(&ask_detail(ask), 37), DIM),
+                );
+            }
+            more(&mut lines, asks.len());
+        }
+        if !card.children.is_empty() {
+            lines.push(Line::new());
+            lines.push(Line::new().at(1, "CHILDREN", HEAD).at(
+                10,
+                card.children.len().to_string(),
+                DIM,
+            ));
+            for child in card.children.iter().take(MOST) {
+                let (glyph, style) = dot(child.status);
+                let mut line = Line::new()
+                    .at(3, glyph, style)
+                    .at(5, term::fit(&child.title, 28), Style::PLAIN)
+                    .at(35, child.status.word(), status_style(child.status));
+                if let Some(verdict) = child.verdict {
+                    line = line.at(47, verdict.words(), verdict_style(verdict));
+                }
+                lines.push(line);
+            }
+            more(&mut lines, card.children.len());
+        }
+        if !card.prs.is_empty() {
+            lines.push(Line::new());
+            lines.push(Line::new().at(1, "PULL REQUESTS", HEAD).at(
+                15,
+                card.prs.len().to_string(),
+                DIM,
+            ));
+            for (child, pr) in card.prs.iter().take(MOST) {
+                let word = if pr.merged() {
+                    "merged"
+                } else if pr.draft {
+                    "draft"
+                } else if pr.approved() {
+                    "approved"
+                } else {
+                    "open"
+                };
+                let mut facts = vec![word.to_string()];
+                if pr.checks() > 0 {
+                    facts.push(format!("checks {}/{}", pr.passed, pr.checks()));
+                }
+                lines.push(
+                    Line::new()
+                        .at(3, format!("#{}", pr.number), BOLD)
+                        .at(11, term::fit(&child.title, 22), Style::PLAIN)
+                        .at(35, facts.join(" · "), DIM),
+                );
+            }
+            more(&mut lines, card.prs.len());
+        }
+        lines
     }
 
     // -------------------------------------------------------------- settings
@@ -2773,6 +3132,7 @@ impl<'a> App<'a> {
                 View::Tree { slug, .. } => self.project(slug).map(|p| p.name.clone()),
                 View::Detail { slug, id, .. } => self.project(slug).map(|p| node_name(p, id)),
                 View::Form(form) => Some(form.title().to_string()),
+                View::Asks { .. } => Some("Your asks".to_string()),
                 _ => None,
             };
             if let Some(name) = name {
@@ -2812,6 +3172,7 @@ impl<'a> App<'a> {
             View::Settings { sel, capture } => self.draw_settings(&mut frame, *sel, *capture),
             View::Form(form) => self.draw_form(&mut frame, form),
             View::Dock { sel } => self.draw_dock(&mut frame, *sel),
+            View::Asks { sel } => self.draw_asks(&mut frame, *sel),
             View::Search { .. }
             | View::Confirm { .. }
             | View::Close { .. }
@@ -2886,6 +3247,7 @@ impl<'a> App<'a> {
                     .cloned()
             }
             View::Settings { sel, .. } => targets(&self.settings_lines()).get(*sel).cloned(),
+            View::Asks { sel } => targets(&self.asks_lines(width)).get(*sel).cloned(),
             View::Dock { sel } => {
                 let (project, coordinator) = self.dock_coordinator()?;
                 targets(&self.dock_lines(&project, &coordinator, width))
@@ -2916,6 +3278,7 @@ impl<'a> App<'a> {
                 .map(|p| targets(&self.tree_lines(p, folded)).len())
                 .unwrap_or(0),
             Some(View::Settings { .. }) => targets(&self.settings_lines()).len(),
+            Some(View::Asks { .. }) => targets(&self.asks_lines(92)).len(),
             Some(View::Dock { .. }) => self
                 .dock_coordinator()
                 .map(|(p, c)| targets(&self.dock_lines(&p, &c, 92)).len())
@@ -2935,6 +3298,7 @@ impl<'a> App<'a> {
             | View::Tree { sel, .. }
             | View::Settings { sel, .. }
             | View::Dock { sel }
+            | View::Asks { sel }
             | View::Detail { sel, .. } => sel,
             _ => return,
         };
@@ -2950,6 +3314,7 @@ impl<'a> App<'a> {
         | View::Tree { sel, .. }
         | View::Settings { sel, .. }
         | View::Dock { sel }
+        | View::Asks { sel }
         | View::Detail { sel, .. } = self.top()
         {
             *sel = index;
@@ -3648,6 +4013,7 @@ impl<'a> App<'a> {
             }
             (Action::Doctor, View::Settings { .. }) => self.run_doctor(),
             (Action::Help, _) => self.stack.push(View::Help),
+            (Action::Asks, _) => self.stack.push(View::Asks { sel: 0 }),
             _ => {}
         }
     }
@@ -4643,6 +5009,178 @@ mod tests {
             .collect();
         assert!(calls.is_empty(), "the popup ran {calls:?} before closing");
         assert_eq!(app.after_close, Some(expected));
+    }
+
+    /// The snapshot with what its coordinators' status files say: the root
+    /// waits on a decision and has an ask that does not close; the node
+    /// has one in progress and one done.
+    fn with_asks(snap: &mut Snapshot) {
+        use crate::asks::{Ask, Link, LinkKind, State as AskState};
+        let project = &mut snap.projects[0];
+        project.coordinators[0].status_file = Some(state::StatusCard {
+            path: "/x/STATUS.md".into(),
+            updated: crate::project::now(),
+            objective: "Ship the billing suite".into(),
+            needs_decision: vec!["Pilot : yes or no".into()],
+        });
+        project.coordinators[1].status_file = Some(state::StatusCard {
+            objective: "Mobile".into(),
+            ..state::StatusCard::default()
+        });
+        project.coordinators[1].parent = "root".into();
+        for thread in &mut project.threads {
+            thread.parent = "t-0001".into();
+        }
+        project.threads[2].verdict = Some(Verdict::Done);
+        let ask = |coordinator: &str, state: AskState, text: &str, answer: &str, mismatch: &str| {
+            state::AskView {
+                coordinator: coordinator.into(),
+                ask: Ask {
+                    state,
+                    text: text.into(),
+                    answer: answer.into(),
+                    mismatch: mismatch.into(),
+                    links: vec![Link {
+                        kind: LinkKind::Thread,
+                        text: "t-0003".into(),
+                        state: "working".into(),
+                        ..Link::default()
+                    }],
+                    ..Ask::default()
+                },
+            }
+        };
+        project.asks = vec![
+            ask(
+                "root",
+                AskState::Done,
+                "Ship billing",
+                "merged",
+                "a linked PR is still open",
+            ),
+            ask(
+                "root",
+                AskState::NeedsDecision,
+                "Which bank",
+                "two options",
+                "",
+            ),
+            ask("t-0001", AskState::Working, "Landing copy", "writing", ""),
+            ask("t-0001", AskState::Answered, "Is it fast", "yes", ""),
+        ];
+    }
+
+    #[test]
+    fn your_asks_lists_every_coordinators_asks_grouped_and_opens_the_coordinator() {
+        with_app(|app| {
+            with_asks(&mut app.snap);
+            let text = app.render(84, 24).text();
+            assert!(text.contains("y your asks"), "{text}");
+            press(app, crossterm::event::KeyCode::Char('y'));
+            assert!(matches!(app.stack.last(), Some(View::Asks { .. })));
+            let text = app.render(84, 30).text();
+            let at = |needle: &str| {
+                text.find(needle)
+                    .unwrap_or_else(|| panic!("{needle} missing: {text}"))
+            };
+            assert!(text.contains("›  Your asks "), "{text}");
+            assert!(
+                text.contains(
+                    "all coordinators · 2 wait on you · 1 does not close · 1 in progress · 1 done"
+                ),
+                "{text}"
+            );
+            assert!(at("WAIT ON YOU") < at("Which bank"));
+            assert!(at("Which bank") < at("Pilot"), "asks, then decisions");
+            assert!(at("Pilot") < at("DOES NOT CLOSE"));
+            assert!(at("DOES NOT CLOSE") < at("Ship billing"));
+            assert!(text.contains("a linked PR is still open"), "{text}");
+            assert!(at("Ship billing") < at("IN PROGRESS"));
+            assert!(at("IN PROGRESS") < at("Landing copy"));
+            assert!(text.contains("t-0003 working"), "{text}");
+            assert!(at("Landing copy") < at("DONE"));
+            assert!(at("DONE") < at("Is it fast"));
+            assert!(
+                text.contains("Acme Billing Suite · mobile redesign"),
+                "{text}"
+            );
+
+            // The first row is the root's decision ask: Enter opens its card.
+            press(app, crossterm::event::KeyCode::Enter);
+            assert!(
+                matches!(app.stack.last(), Some(View::Detail { id, .. }) if id == "root"),
+                "{:?}",
+                app.stack.last()
+            );
+        });
+    }
+
+    #[test]
+    fn the_root_needs_you_with_a_decision_or_an_ask_that_does_not_close() {
+        with_app(|app| {
+            with_asks(&mut app.snap);
+            let text = app.render(84, 24).text();
+            let lines: Vec<&str> = text.lines().collect();
+            assert!(lines[4].contains("NEEDS YOU"), "{text}");
+            let root = lines
+                .iter()
+                .find(|l| l.contains("2 decisions · 1 does not close"))
+                .unwrap_or_else(|| panic!("{text}"));
+            assert!(root.contains("Coordinator"), "{root}");
+
+            // Only an ask that does not close is enough.
+            let project = &mut app.snap.projects[0];
+            project.coordinators[0]
+                .status_file
+                .as_mut()
+                .unwrap()
+                .needs_decision
+                .clear();
+            project
+                .asks
+                .retain(|a| a.ask.state != crate::asks::State::NeedsDecision);
+            let text = app.render(84, 24).text();
+            assert!(text.contains("1 does not close"), "{text}");
+
+            // Neither: the root stays out of NEEDS YOU, as before.
+            app.snap.projects[0].asks.clear();
+            let text = app.render(84, 24).text();
+            assert!(!text.contains("does not close"), "{text}");
+            assert_eq!(app.needs_you().len(), 1, "{text}");
+        });
+    }
+
+    #[test]
+    fn a_coordinators_card_shows_objective_decisions_asks_children_and_their_prs() {
+        with_app(|app| {
+            with_asks(&mut app.snap);
+            app.open_detail("acme", "root");
+            let text = app.render(84, 40).text();
+            let at = |needle: &str| {
+                text.find(needle)
+                    .unwrap_or_else(|| panic!("{needle} missing: {text}"))
+            };
+            assert!(at("OBJECTIVE") < at("Ship the billing suite"));
+            assert!(at("WAITS ON YOU") < at("Pilot : yes or no"));
+            assert!(at("Pilot : yes or no") < at("Which bank"));
+            assert!(at("ASKS") < at("Ship billing"));
+            assert!(text.contains("done · a linked PR is still open"), "{text}");
+            assert!(at("CHILDREN") < at("mobile redesign"));
+            assert!(!text.contains("Landing copy"), "another coordinator's ask");
+            assert!(text.contains("↵ open status"), "{text}");
+
+            app.open_detail("acme", "t-0001");
+            let text = app.render(84, 40).text();
+            assert!(text.contains("Mobile"), "{text}");
+            assert!(text.contains("Landing copy"), "{text}");
+            let child = text
+                .lines()
+                .find(|l| l.contains("billing api"))
+                .unwrap_or_else(|| panic!("{text}"));
+            assert!(child.contains("done"), "the verdict: {child}");
+            assert!(text.contains("PULL REQUESTS"), "{text}");
+            assert!(text.contains("#1342"), "{text}");
+        });
     }
 
     /// A coordinator's details show the top of its STATUS.md, and Enter opens

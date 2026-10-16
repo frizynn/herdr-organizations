@@ -211,7 +211,6 @@ pub struct AskView {
 /// A coordinator's card: what its status file says, its asks, and its
 /// direct children that are still open, with their pull requests.
 pub struct Card<'a> {
-    pub node: &'a Node,
     pub status: Option<&'a StatusCard>,
     /// Most pressing first (`asks::Ask::rank`).
     pub asks: Vec<&'a asks::Ask>,
@@ -307,7 +306,6 @@ impl ProjectView {
             .filter_map(|n| n.pr.as_ref().map(|pr| (*n, pr)))
             .collect();
         Some(Card {
-            node,
             status: node.status_file.as_ref(),
             asks,
             children,

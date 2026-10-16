@@ -106,6 +106,7 @@ pub enum Action {
     Help,
     NextTab,
     PrevTab,
+    Asks,
 }
 
 /// Where a command is read. Two commands may share a key only when they never
@@ -120,6 +121,8 @@ pub enum Screen {
     Confirm,
     Settings,
     Dock,
+    /// Your asks: every coordinator's, in one list.
+    Asks,
 }
 
 /// The popup screens that show the tab row and read its keys.
@@ -129,6 +132,7 @@ const TABBED: &[Screen] = &[
     Screen::Board,
     Screen::Detail,
     Screen::Settings,
+    Screen::Asks,
 ];
 
 const ALL_SCREENS: &[Screen] = &[
@@ -140,10 +144,11 @@ const ALL_SCREENS: &[Screen] = &[
     Screen::Confirm,
     Screen::Settings,
     Screen::Dock,
+    Screen::Asks,
 ];
 
 impl Action {
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -172,6 +177,7 @@ impl Action {
         Action::Help,
         Action::NextTab,
         Action::PrevTab,
+        Action::Asks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -204,6 +210,7 @@ impl Action {
             Action::Help => "keys",
             Action::NextTab => "next tab",
             Action::PrevTab => "previous tab",
+            Action::Asks => "your asks",
         }
     }
 
@@ -237,6 +244,7 @@ impl Action {
             Action::Help => &["?"],
             Action::NextTab => &["tab"],
             Action::PrevTab => &["shift+tab"],
+            Action::Asks => &["y"],
         }
     }
 
@@ -246,7 +254,9 @@ impl Action {
         use Screen::*;
         match self {
             Action::Back | Action::Open => ALL_SCREENS,
-            Action::Up | Action::Down => &[Launcher, Form, Tree, Board, Detail, Settings, Dock],
+            Action::Up | Action::Down => {
+                &[Launcher, Form, Tree, Board, Detail, Settings, Dock, Asks]
+            }
             Action::Left | Action::Right => &[Form, Board, Settings],
             Action::NewProject => &[Launcher, Tree, Board],
             Action::NewCoordinator => &[Launcher, Tree],
@@ -266,6 +276,7 @@ impl Action {
             Action::Doctor => &[Settings],
             Action::NextField | Action::PrevField => &[Form],
             Action::Help => &[Dock],
+            Action::Asks => &[Launcher],
         }
     }
 
