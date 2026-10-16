@@ -4598,6 +4598,48 @@ mod tests {
         assert!(!app.close);
     }
 
+    /// A thread's details name its report's verdict and the first line of its
+    /// summary; its tree row starts with the verdict.
+    #[test]
+    fn a_threads_verdict_and_summary_show_in_its_detail_and_tree_row() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("threads")).unwrap();
+        std::fs::write(
+            dir.join("threads/t-0004.md"),
+            "Status: needs-decision\n## Summary\n\nPick the coupon rule.\nSECOND-LINE\n## Report\nx\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].threads[2].verdict = Some(crate::report::Verdict::NeedsDecision);
+        app.stack = vec![View::Launcher { sel: 0 }];
+
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("REPORT"), "{text}");
+        assert!(
+            text.contains("needs decision · Pick the coupon rule."),
+            "{text}"
+        );
+        assert!(!text.contains("SECOND-LINE"), "{text}");
+
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0002");
+        let text = app.render(84, 30).text();
+        assert!(!text.contains("REPORT"), "a thread without a report: {text}");
+
+        app.open_tree("acme", None);
+        let text = app.render(100, 20).text();
+        let row = text.lines().find(|l| l.contains("billing api")).unwrap();
+        assert!(row.contains("needs decision · billing api text"), "{row}");
+        let row = text.lines().find(|l| l.contains("billing ui")).unwrap();
+        assert!(row.contains("billing ui text"), "{row}");
+        assert!(!row.contains("· billing ui text"), "no verdict, no prefix: {row}");
+    }
+
     #[test]
     fn go_to_agent_closes_the_popup_before_any_herdr_call() {
         let jump = ui_ops::Jump::Node {

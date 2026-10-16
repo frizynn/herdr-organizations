@@ -171,6 +171,8 @@ pub struct Node {
     pub machine: String,
     pub resolved: bool,
     pub pr: Option<Pr>,
+    /// The `Status:` line of its report, `None` without one.
+    pub verdict: Option<crate::report::Verdict>,
     /// Subtree counts; only filled for coordinators.
     pub counts: Counts,
 }
@@ -712,6 +714,26 @@ mod tests {
         assert_eq!(root.counts.total(), 3);
         assert_eq!(view.counts.total(), 3);
         assert_eq!(view.counts.need, 1);
+    }
+
+    #[test]
+    fn a_node_carries_the_verdict_of_its_report() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        for id in ["t-0001", "t-0002", "t-0003"] {
+            node_record(&project, id, "root", NodeRole::Worker, Group::Idle);
+        }
+        let report = |id: &str, text: &str| {
+            std::fs::write(thread::home_report_path(&project, id), text).unwrap()
+        };
+        report("t-0001", "Status: blocked\n## Summary\nWaiting on the API key.\n");
+        report("t-0002", "Status: blocked, kind of\n");
+        let view = project_view(&project, &[]);
+        let verdict = |id: &str| view.node(id).unwrap().verdict;
+        assert_eq!(verdict("t-0001"), Some(crate::report::Verdict::Blocked));
+        assert_eq!(verdict("t-0002"), None);
+        assert_eq!(verdict("t-0003"), None);
+        assert_eq!(view.node("root").unwrap().verdict, None);
     }
 
     #[test]

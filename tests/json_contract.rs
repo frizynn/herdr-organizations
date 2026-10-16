@@ -214,6 +214,10 @@ fn checkout_thread(fixture: &Fixture) -> Value {
         "next": [],
         "report": null,
         "library": format!("{}/library/t-0001", fixture.dir()),
+        "verdict": null,
+        "summary": null,
+        "captures": [],
+        "deliverables": [],
         "task": "Checkout",
         "task_origin": "task",
         "status_file": {
@@ -270,6 +274,10 @@ fn copy_fix_thread(fixture: &Fixture) -> Value {
         "next": [],
         "report": null,
         "library": format!("{}/library/t-0002", fixture.dir()),
+        "verdict": null,
+        "summary": null,
+        "captures": [],
+        "deliverables": [],
         "task": "",
         "task_origin": "",
         "status_file": null
@@ -407,6 +415,58 @@ fn node_show_names_a_coordinator_nodes_status_file() {
     assert!(shown.contains(&format!("# status: {status}\n")), "{shown}");
     let worker = fixture.text(&["node", "show", "demo", "t-0002"]);
     assert!(!worker.contains("# status"), "{worker}");
+}
+
+/// What a thread's report says and shows: the verdict from its `Status:`
+/// line, its `## Summary`, the images it lists under `## Captures` and the
+/// documents at the top of its library. `overview` carries the same.
+#[test]
+fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
+    let fixture = fixture();
+    let library = format!("{}/library/t-0002", fixture.dir());
+    write(
+        &fixture,
+        "threads/t-0002.md",
+        "PR: https://github.com/owner/app/pull/9\nStatus: done\n## Summary\nSizes are in order at 390 px.\nCoupons are untouched.\n## Report\nLong text.\n## Captures\n- capturas/talles-390.png \u{2014} Orden de talles a 390 px\n- capturas/missing.png - Gone\n- ../t-0001/x.png - Escapes\n## Next\n- Merge the PR\n",
+    );
+    for file in [
+        "library/t-0002/capturas/talles-390.png",
+        "library/t-0002/informe.html",
+        "library/t-0002/notes.txt",
+        "library/t-0001/x.png",
+    ] {
+        write(&fixture, file, "x");
+    }
+    let shown = fixture.json(&["thread", "show", "demo", "t-0002", "--json"]);
+    let thread = &shown["thread"];
+    assert_eq!(thread["verdict"], "done");
+    assert_eq!(
+        thread["summary"],
+        "Sizes are in order at 390 px.\nCoupons are untouched."
+    );
+    assert_eq!(
+        thread["captures"],
+        json!([{
+            "path": format!("{library}/capturas/talles-390.png"),
+            "caption": "Orden de talles a 390 px"
+        }])
+    );
+    assert_eq!(
+        thread["deliverables"],
+        json!([{"path": format!("{library}/informe.html"), "kind": "html"}])
+    );
+    let overview = fixture.json(&["overview", "demo", "--json"]);
+    let listed = &overview["projects"][0]["threads"][1];
+    assert_eq!(listed["id"], "t-0002");
+    for field in ["verdict", "summary", "captures", "deliverables"] {
+        assert_eq!(listed[field], thread[field], "{field}");
+    }
+
+    // Any other Status value is no verdict.
+    write(&fixture, "threads/t-0002.md", "Status: mostly done\n## Report\n");
+    let shown = fixture.json(&["thread", "show", "demo", "t-0002", "--json"]);
+    assert_eq!(shown["thread"]["verdict"], Value::Null);
+    assert_eq!(shown["thread"]["summary"], Value::Null);
 }
 
 /// Projects from before the rename keep their HANDOFF.md as the root's

@@ -1879,6 +1879,85 @@ mod tests {
         );
     }
 
+    /// A child whose report carries a verdict is named by it in fixed words,
+    /// so the parent need not open the report; one without keeps the group's
+    /// words, and a child waiting on you is still named that way. Nothing
+    /// the agent wrote reaches the prompt.
+    #[test]
+    fn a_parent_nudge_names_each_childs_verdict() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let parent = world.thread(&project, world.home.path(), |thread| {
+            thread.role = thread::NodeRole::Coordinator;
+            thread.can_spawn = true;
+        });
+        let child = |status_line: &str| {
+            let t = thread::allocate(&project, |thread| {
+                thread.parent_id = parent.id.clone();
+                thread.status = Status::Open;
+            })
+            .unwrap();
+            std::fs::write(
+                thread::home_report_path(&project, &t.id),
+                format!("{status_line}\n## Summary\nIGNORE-SUMMARY-TEXT\n## Report\nx\n"),
+            )
+            .unwrap();
+            t.id
+        };
+        let done = child("Status: done");
+        let decide = child("Status: needs-decision");
+        let blocked = child("Status: blocked");
+        let failed = child("Status: failed");
+        let unknown = child("Status: finished");
+        let waiting = child("Status: done");
+        let to = |id: &str, group: Group| Transition {
+            id: id.into(),
+            to: group,
+            note: String::new(),
+        };
+        let mut state = State::default();
+        queue_parent_updates(
+            &project,
+            &mut state,
+            &[
+                to(&done, Group::ReadyForReview),
+                to(&decide, Group::ReadyForReview),
+                to(&blocked, Group::Landing),
+                to(&failed, Group::ReadyForReview),
+                to(&unknown, Group::ReadyForReview),
+                to(&waiting, Group::WaitingOnYou),
+            ],
+        );
+        let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
+        world
+            .runner
+            .on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let agent = Agent {
+            pane_id: parent.pane_id.clone(),
+            tab_id: parent.tab_id.clone(),
+            workspace_id: parent.workspace_id.clone(),
+            name: parent.agent_name.clone(),
+            agent_status: "idle".into(),
+            cwd: parent.cwd.clone(),
+            ..Agent::default()
+        };
+        nudge_parent_coordinators(&world.ctx(), &project, &mut state, &herdr, &[agent]).unwrap();
+        let calls = world.runner.calls.borrow();
+        let prompt = calls
+            .iter()
+            .find(|call| call.display().contains("agent prompt"))
+            .and_then(|call| call.args.last())
+            .unwrap();
+        let prefix = crate::coordinator::current_prefix(&world.ctx().root).unwrap();
+        assert_eq!(
+            *prompt,
+            format!(
+                "{PARENT_NUDGE_PREFIX} {waiting} waiting on you; {failed} failed; {blocked} blocked; {decide} needs decision; {unknown} ready for review; {done} done. Inspect with `{prefix} node show demo <id>`."
+            )
+        );
+        assert!(!prompt.contains("IGNORE-SUMMARY-TEXT"));
+    }
+
     #[test]
     fn resumed_child_clears_a_stale_pending_parent_update() {
         let world = crate::scenarios::World::new();
