@@ -545,11 +545,7 @@ fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a T
         return None;
     }
     records.iter().find(|record| {
-        record.id == parent_id
-            && record.status == Status::Open
-            && record.role == thread::NodeRole::Coordinator
-            && record.can_spawn
-            && !record.is_remote()
+        record.id == parent_id && record.status == Status::Open && record.is_spawning_coordinator()
     })
 }
 

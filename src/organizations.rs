@@ -766,6 +766,45 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
     })
 }
 
+/// A spawning coordinator node's own state file, as its brief inlines it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeHandoff {
+    pub path: PathBuf,
+    /// Empty when the node has not written it yet or it was left out.
+    pub text: String,
+    /// Why it was left out, worded as the memory index words an omission.
+    pub omitted: Option<String>,
+}
+
+pub fn handoff_path(project: &Project, id: &str) -> PathBuf {
+    node_scope_dir(project, id).join("HANDOFF.md")
+}
+
+/// The handoff of a spawning coordinator node, read like a scoped memory file
+/// (a regular file, never through a symbolic link, at most 8 KiB). Only the
+/// node's own brief reads it: unlike its memory, descendants never inherit it.
+pub fn node_handoff(project: &Project, record: &Thread) -> Result<Option<NodeHandoff>> {
+    if !record.is_spawning_coordinator() {
+        return Ok(None);
+    }
+    let path = handoff_path(project, &record.id);
+    let mut budget = ScopedMemoryBudget::new();
+    let text = match existing_node_scope(project, &record.id)? {
+        Some(_) => read_scoped_memory_file(
+            &path,
+            &format!("nodes/{}/HANDOFF.md", record.id),
+            &mut budget,
+        )?
+        .unwrap_or_default(),
+        None => String::new(),
+    };
+    Ok(Some(NodeHandoff {
+        path,
+        text,
+        omitted: budget.omissions.into_iter().next(),
+    }))
+}
+
 fn optional_real_directory(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
@@ -1035,7 +1074,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
     );
     if record.role == NodeRole::Coordinator && record.can_spawn && record.is_remote() {
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
-    } else if record.role == NodeRole::Coordinator && record.can_spawn {
+    } else if record.is_spawning_coordinator() {
         text.push_str(&format!(
             "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. `--profile <name>` picks one of the profiles the project allows; without it the child gets your profile. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags; omitted ones inherit yours at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you with one line when a direct child is waiting on you, ready for review, has a new report or is landing; an idle child does not wake you. Inspect each id it names once with `{command_prefix} node show {slug} <id>`, read `threads/<id>.md` when it has a report, then return idle again. Your children's routine results reach only you, not the root coordinator.\n",
             record.id, record.id
@@ -1912,6 +1951,126 @@ mod tests {
                 .contains("memory/linked.md: refused non-regular file")
         );
         assert!(!scoped.memory_index.contains("root:x"));
+    }
+
+    fn start(project: &Project, parent: &str, role: NodeRole, can_spawn: Option<bool>) -> Thread {
+        create_node(
+            project,
+            &CreateNode {
+                request: NodeRequest {
+                    can_spawn,
+                    ..request(parent, role)
+                },
+                title: "Node".into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn brief(project: &Project, node: &Thread) -> String {
+        thread::brief_for(project, node, "task", false).unwrap()
+    }
+
+    const NODE_BRIEF: &str = include_str!("../skill/COORDINATOR_NODE.md");
+    const THREAD_BRIEF: &str = include_str!("../skill/THREAD.md");
+
+    /// A coordinator node that may spawn is told it coordinates and gets its
+    /// own handoff back; its worker inherits its memory but neither of those,
+    /// and workers and leaf coordinators keep the thread brief.
+    #[test]
+    fn only_a_spawning_coordinator_gets_the_node_brief_and_its_handoff() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        let child = start(&project, &coordinator.id, NodeRole::Worker, None);
+        let leaf = start(&project, ROOT_ID, NodeRole::Coordinator, Some(false));
+        let worker = start(&project, ROOT_ID, NodeRole::Worker, None);
+        let worker_before = brief(&project, &worker);
+        let scope = node_scope_dir(&project, &coordinator.id);
+        std::fs::write(scope.join("MEMORY.md"), "COORDINATOR-MEMORY").unwrap();
+        for node in [&coordinator, &child, &leaf, &worker] {
+            std::fs::write(
+                node_scope_dir(&project, &node.id).join("HANDOFF.md"),
+                format!("HANDOFF-SENTINEL-{}", node.id),
+            )
+            .unwrap();
+        }
+
+        let own = brief(&project, &coordinator);
+        assert!(own.contains(NODE_BRIEF.trim_end()), "{own}");
+        assert!(!own.contains(THREAD_BRIEF.trim_end()));
+        let handoff = scope.join("HANDOFF.md").display().to_string();
+        assert!(own.contains(&format!("`{handoff}`")), "{own}");
+        let position = |needle: &str| own.find(needle).unwrap();
+        assert!(position("COORDINATOR-MEMORY") < position("# Your handoff"));
+        assert!(
+            position(&format!("HANDOFF-SENTINEL-{}", coordinator.id))
+                < position("# Organization node")
+        );
+
+        for other in [&child, &leaf, &worker] {
+            let text = brief(&project, other);
+            assert!(text.contains(THREAD_BRIEF.trim_end()), "{text}");
+            assert!(!text.contains(NODE_BRIEF.trim_end()));
+            assert!(
+                !text.contains("HANDOFF"),
+                "{} got a handoff: {text}",
+                other.id
+            );
+        }
+        assert!(brief(&project, &child).contains("COORDINATOR-MEMORY"));
+        assert_eq!(brief(&project, &worker), worker_before);
+
+        // A restart composes the same brief, handoff included.
+        let restarted = thread::brief_for(&project, &coordinator, "task", true).unwrap();
+        assert!(restarted.contains(&format!("HANDOFF-SENTINEL-{}", coordinator.id)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_is_read_with_the_scoped_memory_rules() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        let handoff = node_scope_dir(&project, &coordinator.id).join("HANDOFF.md");
+        let label = format!("nodes/{}/HANDOFF.md", coordinator.id);
+
+        let missing = brief(&project, &coordinator);
+        assert!(missing.contains("# Your handoff"), "{missing}");
+
+        let secret = project.dir().join("secret.md");
+        std::fs::write(&secret, "LINKED-SECRET").unwrap();
+        std::os::unix::fs::symlink(&secret, &handoff).unwrap();
+        let linked = brief(&project, &coordinator);
+        assert!(!linked.contains("LINKED-SECRET"), "{linked}");
+        assert!(linked.contains(&format!("{label}: refused non-regular file")));
+
+        std::fs::remove_file(&handoff).unwrap();
+        std::fs::write(
+            &handoff,
+            format!(
+                "OVERSIZED-SENTINEL{}",
+                "x".repeat(MAX_SCOPED_MEMORY_FILE_BYTES)
+            ),
+        )
+        .unwrap();
+        let oversized = brief(&project, &coordinator);
+        assert!(!oversized.contains("OVERSIZED-SENTINEL"), "{oversized}");
+        assert!(oversized.contains(&format!(
+            "{label}: exceeds the {MAX_SCOPED_MEMORY_FILE_BYTES}-byte per-file limit"
+        )));
+
+        let at_limit = format!(
+            "AT-LIMIT{}",
+            "x".repeat(MAX_SCOPED_MEMORY_FILE_BYTES - "AT-LIMIT".len())
+        );
+        std::fs::write(&handoff, &at_limit).unwrap();
+        assert!(brief(&project, &coordinator).contains(&at_limit));
     }
 
     fn write_scope_sentinel(project: &Project, id: &str, instruction: &str, memory: &str) {

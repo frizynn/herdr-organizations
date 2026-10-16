@@ -2119,6 +2119,12 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
     if report.is_file() {
         println!("# home copy of the report: {}", report.display());
     }
+    if record.is_spawning_coordinator() {
+        let handoff = organizations::handoff_path(&project, id);
+        let written = std::fs::symlink_metadata(&handoff).is_ok_and(|m| m.is_file());
+        let note = if written { "" } else { " (not written yet)" };
+        println!("# handoff: {}{note}", handoff.display());
+    }
     let next = thread::all_next(&project, id);
     if !next.is_empty() {
         println!("# next:");
