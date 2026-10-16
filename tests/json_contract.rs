@@ -601,6 +601,12 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
             "updated": "2026-10-02T08:00:00Z"
         })
     );
+    let status = fixture.json(&["project", "status", "demo", "--json"]);
+    assert_eq!(
+        status["sources"]["status_file"],
+        format!("{v}/STATUS.md"),
+        "where the root's status file is"
+    );
     let context = fixture.text(&["context", "demo", "--peek"]);
     assert!(
         context.contains(&format!(
