@@ -486,7 +486,8 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         if project.status() == project::Status::Archived {
             continue;
         }
-        let view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
+        let mut view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
+        add_status_files(&mut view, &project, &asks::Records::load(ctx, &project));
         for node in view.coordinators.iter().chain(&view.threads) {
             if !node.workspace_id.is_empty() && node.machine.is_empty() {
                 owners.insert(
@@ -728,6 +729,30 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
         pending,
         recheck_in,
         asks: Vec::new(),
+    }
+}
+
+/// Each coordinator's status file: its card, and its asks confirmed
+/// against `records`.
+fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::Records) {
+    for sheet in asks::sheets(project, records) {
+        let status = sheet.status;
+        if let Some(node) = view
+            .coordinators
+            .iter_mut()
+            .find(|c| c.id == sheet.coordinator)
+        {
+            node.status_file = Some(StatusCard {
+                path: status.path,
+                updated: status.updated,
+                objective: status.objective,
+                needs_decision: status.needs_decision,
+            });
+        }
+        view.asks.extend(status.asks.into_iter().map(|ask| AskView {
+            coordinator: sheet.coordinator.clone(),
+            ask,
+        }));
     }
 }
 
