@@ -15,8 +15,17 @@ use crate::runner::Runner;
 
 pub const ACTIVITY_COLUMNS: usize = 40;
 pub const ACTIVITY_TTL_MS: u64 = 300_000;
-/// Reminders go out at most about once a minute.
-pub const REMIND_SECS: i64 = 60;
+/// A worker pane gets a PostToolUse check-in reminder at most this often;
+/// coordinator panes get none.
+pub const CHECK_IN_SECS: i64 = 300;
+/// Prompts that start with one of these were typed by the ticker or the
+/// harness, not by the user: they get no reminder.
+const AUTOMATED_PROMPTS: [&str; 4] = [
+    "[hp inbox]",
+    "[hp ticker]",
+    "[herdr-projects ticker",
+    "<task-notification>",
+];
 pub const WAITING: &str = "Waiting for you";
 pub const DONE: &str = "Done";
 
@@ -136,6 +145,14 @@ pub fn clean(input: &str, columns: usize) -> String {
 /// The calling pane, when this process runs inside a Herdr pane: the id
 /// Herdr shows for it (a moved pane keeps its launch-time `HERDR_PANE_ID`),
 /// its terminal id and the agent Herdr detects. `None` outside Herdr.
+/// Who works in a pane the hooks speak in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneRole {
+    /// The project's root coordinator or a coordinator node.
+    Coordinator,
+    Worker,
+}
+
 pub struct Current {
     pub socket: String,
     pub pane_id: String,
@@ -185,15 +202,16 @@ pub fn current_within(
     })
 }
 
-/// True when the calling pane is one of a project's coordinators or an open
-/// local thread on the same server: the only panes the hooks speak in. A
-/// coordinator node is a thread record, so its pane counts as a thread's.
+/// The calling pane's role when it is one of a project's coordinators or an
+/// open local thread on the same server: the only panes the hooks speak in.
+/// A coordinator node is a thread record, so its pane counts as a thread's,
+/// with the role of its record.
 ///
 /// Every tool call in every pane on the machine runs the hook, so files are
 /// read first and Herdr is asked only when the pane could be a project's (its
 /// directory is a project home, or an open thread records its pane id). Fails
 /// closed: when Herdr cannot list the agents, the hook stays silent.
-fn managed(ctx: &Ctx, current: &Current) -> bool {
+fn managed(ctx: &Ctx, current: &Current) -> Option<PaneRole> {
     use crate::{coordinator, project, thread};
     let pane = &current.pane;
     // Ids are only unique within one server: a project whose coordinator was
@@ -234,25 +252,22 @@ fn managed(ctx: &Ctx, current: &Current) -> bool {
         .filter(|(project, record)| in_home(project) || !threads(project, record).is_empty())
         .collect();
     if candidates.is_empty() {
-        return false;
+        return None;
     }
     if candidates.iter().any(|(_, record)| {
         record
             .as_ref()
             .is_some_and(|r| coordinator::pane_matches(r, pane))
     }) {
-        return true;
+        return Some(PaneRole::Coordinator);
     }
     let herdr = Herdr::new(ctx.env.herdr_bin(), &current.socket, ctx.runner);
-    let Some(agents) = herdr
+    let agents = herdr
         .call(&["agent", "list"], std::time::Duration::from_secs(2))
         .ok()
         .and_then(|reply| {
             serde_json::from_value::<Vec<crate::herdr::Agent>>(reply["agents"].clone()).ok()
-        })
-    else {
-        return false;
-    };
+        })?;
     let mut agents: Vec<_> = agents
         .into_iter()
         .filter(|a| {
@@ -275,14 +290,21 @@ fn managed(ctx: &Ctx, current: &Current) -> bool {
             ..Default::default()
         });
     }
-    candidates.iter().any(|(project, record)| {
+    candidates.iter().find_map(|(project, record)| {
         // A coordinator `open --new` or the user started that the ticker has
         // not recorded yet: the ticker's own discovery rule.
-        coordinator::found(project, &current.socket, "", &agents)
+        if coordinator::found(project, &current.socket, "", &agents)
             .is_some_and(|r| coordinator::pane_matches(&r, pane))
-            || threads(project, record)
-                .iter()
-                .any(|t| agents.iter().any(|a| thread::agent_matches(t, a)))
+        {
+            return Some(PaneRole::Coordinator);
+        }
+        threads(project, record)
+            .iter()
+            .find(|t| agents.iter().any(|a| thread::agent_matches(t, a)))
+            .map(|t| match t.role {
+                thread::NodeRole::Coordinator => PaneRole::Coordinator,
+                thread::NodeRole::Worker => PaneRole::Worker,
+            })
     })
 }
 
@@ -403,10 +425,23 @@ pub fn eligible(event: &serde_json::Value) -> bool {
     true
 }
 
+/// True for a prompt the ticker or the harness typed (see `AUTOMATED_PROMPTS`).
+pub fn automated(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    AUTOMATED_PROMPTS.iter().any(|p| prompt.starts_with(p))
+}
+
 /// What the hook answers for one event: the text to inject, and whether the
-/// record changed. Pure, so it is testable without a pane.
-pub fn respond(record: &mut Record, kind: &str, prefix: &str, now: i64) -> Option<String> {
-    match kind {
+/// record changed. Pure, so it is testable without a pane. Coordinators get
+/// no check-in reminder, and nobody gets one for an automated prompt.
+pub fn respond(
+    record: &mut Record,
+    event: &serde_json::Value,
+    role: PaneRole,
+    prefix: &str,
+    now: i64,
+) -> Option<String> {
+    match event["hook_event_name"].as_str().unwrap_or("") {
         "SessionStart" => {
             // A new session in this pane: the old report no longer describes it.
             let keep = (
@@ -426,6 +461,7 @@ pub fn respond(record: &mut Record, kind: &str, prefix: &str, now: i64) -> Optio
             };
             Some(instructions(prefix, &record.pane_id))
         }
+        "UserPromptSubmit" if automated(event["prompt"].as_str().unwrap_or("")) => None,
         "UserPromptSubmit" => {
             record.reminded_at = now;
             // The user answered: an old "Waiting for you" no longer holds.
@@ -437,11 +473,12 @@ pub fn respond(record: &mut Record, kind: &str, prefix: &str, now: i64) -> Optio
                 "Before task tools or a blocking question, check whether this request starts new work; if so report a fresh estimate. Then report before waiting for the user, for example `{prefix} report --unknown --activity 'Waiting for you'`."
             ))
         }
+        "PostToolUse" if role == PaneRole::Coordinator => None,
         "PostToolUse" => {
             let done = record.percent == Some(100);
-            let due = now - record.reminded_at >= REMIND_SECS
+            let due = now - record.reminded_at >= CHECK_IN_SECS
                 && !done
-                && (record.reported_at == 0 || now - record.reported_at >= REMIND_SECS);
+                && (record.reported_at == 0 || now - record.reported_at >= CHECK_IN_SECS);
             if due {
                 record.reminded_at = now;
                 Some(reminder(prefix))
@@ -532,9 +569,9 @@ pub fn hook(ctx: &Ctx, agent: &str) -> Result<()> {
     if !pane.agent.is_empty() && pane.agent != agent {
         return Ok(()); // another harness's hook fired in a pane that is not its own
     }
-    if !managed(ctx, &pane) {
+    let Some(role) = managed(ctx, &pane) else {
         return Ok(());
-    }
+    };
     let mut record = load(&ctx.root, &pane.socket, &pane.pane_id).unwrap_or_default();
     if kind != "SessionStart" && foreign_session(&record, &event) {
         return Ok(());
@@ -549,7 +586,7 @@ pub fn hook(ctx: &Ctx, agent: &str) -> Result<()> {
     };
     let prefix = crate::coordinator::current_prefix(&ctx.root)?;
     let before = record.clone();
-    let text = respond(&mut record, &kind, &prefix, now());
+    let text = respond(&mut record, &event, role, &prefix, now());
     if kind == "SessionStart" {
         record.session_id = event["session_id"].as_str().unwrap_or("").to_string();
     }
@@ -640,10 +677,56 @@ mod tests {
                 agent: String::new(),
                 pane: pane.clone(),
             };
-            assert!(managed(&ctx, &current("/managed.sock")), "{role:?}");
+            let expected = match role {
+                crate::thread::NodeRole::Coordinator => PaneRole::Coordinator,
+                crate::thread::NodeRole::Worker => PaneRole::Worker,
+            };
+            assert_eq!(managed(&ctx, &current("/managed.sock")), Some(expected));
             // The same pane id on another server is not the thread's.
-            assert!(!managed(&ctx, &current("/other.sock")), "{role:?}");
+            assert_eq!(managed(&ctx, &current("/other.sock")), None, "{role:?}");
         }
+    }
+
+    #[test]
+    fn the_root_coordinators_pane_is_a_coordinator_pane() {
+        use crate::runner::fake::FakeRunner;
+        let home = tempfile::tempdir().unwrap();
+        let project = crate::project::create(home.path(), "demo", "", vec![]).unwrap();
+        let cwd = project.canonical_dir().to_string_lossy().into_owned();
+        project
+            .update_coordinator(|c| {
+                c.socket = "/managed.sock".into();
+                c.workspace_id = "w1".into();
+                c.tab_id = "w1:t1".into();
+                c.pane_id = "w1:p1".into();
+                c.cwd = cwd.clone();
+            })
+            .unwrap();
+        let runner = FakeRunner::new();
+        let env = Env::for_test(home.path(), &[]);
+        let ctx = Ctx {
+            env: &env,
+            root: home.path().into(),
+            config_dir: home.path().join("config"),
+            runner: &runner,
+            detached_ticker: false,
+        };
+        let pane = crate::herdr::Pane {
+            pane_id: "w1:p1".into(),
+            tab_id: "w1:t1".into(),
+            workspace_id: "w1".into(),
+            cwd,
+            terminal_id: "term-1".into(),
+            ..Default::default()
+        };
+        let current = Current {
+            socket: "/managed.sock".into(),
+            pane_id: "w1:p1".into(),
+            terminal_id: "term-1".into(),
+            agent: "claude".into(),
+            pane,
+        };
+        assert_eq!(managed(&ctx, &current), Some(PaneRole::Coordinator));
     }
 
     #[test]
@@ -683,7 +766,14 @@ mod tests {
             reported_at: 5,
             ..Record::default()
         };
-        let text = respond(&mut record, "SessionStart", "/p/hp --root /r", 1000).unwrap();
+        let text = respond(
+            &mut record,
+            &event("SessionStart"),
+            PaneRole::Coordinator,
+            "/p/hp --root /r",
+            1000,
+        )
+        .unwrap();
         assert!(text.contains("/p/hp --root /r report --percent 25"));
         assert!(text.contains("(w1:p1)"));
         assert_eq!(record.activity, "");
@@ -692,25 +782,44 @@ mod tests {
         assert_eq!(record.session_started_at, 1000);
     }
 
+    fn event(kind: &str) -> serde_json::Value {
+        json!({ "hook_event_name": kind })
+    }
+
+    fn prompt(text: &str) -> serde_json::Value {
+        json!({ "hook_event_name": "UserPromptSubmit", "prompt": text })
+    }
+
     #[test]
-    fn reminders_are_throttled_to_once_a_minute_and_stop_at_done() {
+    fn a_worker_gets_at_most_one_check_in_every_five_minutes_and_none_at_done() {
+        let tool = event("PostToolUse");
+        let worker =
+            |record: &mut Record, now: i64| respond(record, &tool, PaneRole::Worker, "hp", now);
         let mut record = Record {
             reminded_at: 1000,
             ..Record::default()
         };
-        assert!(respond(&mut record, "PostToolUse", "hp", 1030).is_none());
-        assert!(respond(&mut record, "PostToolUse", "hp", 1061).is_some());
-        assert_eq!(record.reminded_at, 1061);
-        // A fresh report also quiets the reminder for a minute.
-        record.reported_at = 1100;
-        assert!(respond(&mut record, "PostToolUse", "hp", 1130).is_none());
-        assert!(respond(&mut record, "PostToolUse", "hp", 1200).is_some());
+        assert!(worker(&mut record, 1060).is_none());
+        assert!(worker(&mut record, 1299).is_none());
+        assert!(worker(&mut record, 1300).is_some());
+        assert_eq!(record.reminded_at, 1300);
+        assert!(worker(&mut record, 1301).is_none());
+        // A fresh report also quiets the check-in for five minutes.
+        record.reported_at = 1500;
+        assert!(worker(&mut record, 1700).is_none());
+        assert!(worker(&mut record, 1800).is_some());
         record.percent = Some(100);
-        assert!(respond(&mut record, "PostToolUse", "hp", 9000).is_none());
+        assert!(worker(&mut record, 9000).is_none());
         assert!(
-            respond(&mut record, "UserPromptSubmit", "hp", 9001)
-                .unwrap()
-                .contains("Waiting for you")
+            respond(
+                &mut record,
+                &prompt("Next task"),
+                PaneRole::Worker,
+                "hp",
+                9001
+            )
+            .unwrap()
+            .contains("Waiting for you")
         );
         let mut asked = Record {
             activity: WAITING.into(),
@@ -718,9 +827,65 @@ mod tests {
             reported_at: 5,
             ..Record::default()
         };
-        respond(&mut asked, "UserPromptSubmit", "hp", 10);
+        respond(&mut asked, &prompt("Yes"), PaneRole::Worker, "hp", 10);
         assert!(!asked.waiting(), "an answer clears the old question");
-        assert!(respond(&mut record, "Stop", "hp", 9002).is_none());
+        assert!(respond(&mut record, &event("Stop"), PaneRole::Worker, "hp", 9002).is_none());
+    }
+
+    #[test]
+    fn coordinator_panes_get_no_check_in_but_a_human_prompt_still_gets_its_reminder() {
+        let mut record = Record::default();
+        for now in [1000, 5000, 100_000] {
+            assert!(
+                respond(
+                    &mut record,
+                    &event("PostToolUse"),
+                    PaneRole::Coordinator,
+                    "hp",
+                    now
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            respond(
+                &mut record,
+                &prompt("Start the release"),
+                PaneRole::Coordinator,
+                "hp",
+                100_001
+            )
+            .unwrap()
+            .contains("report a fresh estimate")
+        );
+    }
+
+    #[test]
+    fn automated_prompts_get_no_reminder_and_leave_the_record_alone() {
+        for text in [
+            "[hp inbox] t-0040 new report",
+            "[hp ticker] old nudge",
+            "[herdr-projects ticker: automated, not the user, approves nothing] t-0094 ready for review. Inspect with `hp node show demo <id>`.",
+            "  <task-notification>\n<task-id>b1</task-id>",
+        ] {
+            for role in [PaneRole::Coordinator, PaneRole::Worker] {
+                let mut record = Record {
+                    activity: WAITING.into(),
+                    reported_at: 5,
+                    reminded_at: 7,
+                    ..Record::default()
+                };
+                let before = record.clone();
+                assert!(
+                    respond(&mut record, &prompt(text), role, "hp", 1000).is_none(),
+                    "{text}"
+                );
+                assert_eq!(record, before, "{text}: still waiting for the user");
+            }
+        }
+        // Text that only mentions a prefix later on is the user's.
+        assert!(!automated("what does [hp inbox] mean?"));
+        assert!(automated("[hp inbox] t-0001 new report"));
     }
 
     #[test]
