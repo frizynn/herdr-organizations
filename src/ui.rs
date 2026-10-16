@@ -2070,7 +2070,8 @@ impl<'a> App<'a> {
             .asks
             .iter()
             .copied()
-            .filter(|a| a.state != crate::asks::State::NeedsDecision)
+            // What WAITS ON YOU already showed, by the list's own rule.
+            .filter(|a| a.rank(card.resolved) != 0)
             .collect();
         if !asks.is_empty() {
             lines.push(Line::new());
