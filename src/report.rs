@@ -1,8 +1,9 @@
 //! What a thread's report says about itself, for a reader who should not
 //! have to open the whole report: a verdict from a fixed set, a short
-//! summary, and the captures and deliverables in its library. Only the
-//! verdict may reach a prompt; the rest is agent-written data for `--json`
-//! and the popup.
+//! summary, what it proposes to remember, and the captures and deliverables
+//! in its library. Only the verdict, and the fixed word `remember` when there
+//! is something to remember, may reach a prompt; the rest is agent-written
+//! data for `--json`, `node show` and the popup.
 
 use std::path::{Path, PathBuf};
 
@@ -11,8 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::thread::is_real_dir;
 
 pub const MAX_SUMMARY_CHARS: usize = 600;
+/// A summary is at most three plain lines (the thread brief asks for that).
+pub const MAX_SUMMARY_LINES: usize = 3;
 pub const MAX_CAPTURES: usize = 24;
 pub const MAX_DELIVERABLES: usize = 10;
+pub const MAX_REMEMBER_LINES: usize = 10;
+pub const MAX_REMEMBER_CHARS: usize = 600;
 
 /// The `Status:` line of a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,12 +80,44 @@ pub fn verdict(report: &str) -> Option<Verdict> {
     }
 }
 
-/// The `## Summary` section, trimmed and cut to `MAX_SUMMARY_CHARS`.
+/// The `## Summary` section: its first `MAX_SUMMARY_LINES` lines that are not
+/// blank, trimmed and cut to `MAX_SUMMARY_CHARS`.
 pub fn summary(report: &str) -> Option<String> {
-    let text = section(report, "Summary").join("\n");
+    let text = section(report, "Summary")
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .take(MAX_SUMMARY_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
     let cut: String = text.trim().chars().take(MAX_SUMMARY_CHARS).collect();
     let cut = cut.trim_end();
     (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// The lines of the `## Remember` section, where a thread proposes lessons
+/// for the coordinator to keep: trimmed, without a leading `- ` or `* `,
+/// blank ones left out, at most `MAX_REMEMBER_LINES` lines and
+/// `MAX_REMEMBER_CHARS` characters in all, the last line cut to fit.
+pub fn remember(report: &str) -> Vec<String> {
+    let mut room = MAX_REMEMBER_CHARS;
+    let mut lines = Vec::new();
+    for line in section(report, "Remember") {
+        let line = line.trim();
+        let line = match line.strip_prefix(['-', '*']) {
+            Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => rest.trim(),
+            _ => line,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        if lines.len() == MAX_REMEMBER_LINES || room == 0 {
+            break;
+        }
+        let cut: String = line.chars().take(room).collect();
+        room -= cut.chars().count();
+        lines.push(cut.trim_end().to_string());
+    }
+    lines
 }
 
 /// The images listed under `## Captures` as `- <path> - <caption>` (or with
@@ -276,6 +313,39 @@ mod tests {
         );
         assert_eq!(summary("## Summary\n\n## Report\nx\n"), None);
         assert_eq!(summary("## Report\nx\n"), None);
+    }
+
+    #[test]
+    fn the_summary_keeps_its_first_three_lines() {
+        let report = "Status: done\n## Summary\nOne.\n\nTwo.\nThree.\nFour.\nFive.\n## Report\nx\n";
+        assert_eq!(summary(report).as_deref(), Some("One.\nTwo.\nThree."));
+    }
+
+    #[test]
+    fn remember_is_its_lines_without_list_markers_within_the_limits() {
+        let report = "Status: done\n## Summary\nx\n## Remember\n- Run the gates before a push.\n\n* `cargo test` needs the fake gh.\n  Plain line.  \n## Next\n- not this\n";
+        assert_eq!(
+            remember(report),
+            [
+                "Run the gates before a push.",
+                "`cargo test` needs the fake gh.",
+                "Plain line."
+            ]
+        );
+        assert!(remember("## Summary\nx\n").is_empty());
+        assert!(remember("## Remember\n\n-\n## Next\n- y\n").is_empty());
+
+        let many: String = (0..12).map(|n| format!("- lesson {n}\n")).collect();
+        let lines = remember(&format!("## Remember\n{many}"));
+        assert_eq!(lines.len(), MAX_REMEMBER_LINES);
+        assert_eq!(lines[9], "lesson 9");
+
+        let long = format!(
+            "## Remember\n- {}\n- {}\n- tail\n",
+            "a".repeat(400),
+            "é".repeat(400)
+        );
+        assert_eq!(remember(&long), ["a".repeat(400), "é".repeat(200)]);
     }
 
     #[test]
