@@ -92,6 +92,10 @@ pub struct Link {
     /// `open`, `merged`, `closed`, or empty before the ticker read it; a
     /// task's `todo`, `done` or `missing`; empty for a page.
     pub state: String,
+    /// The pull request behind a thread or pull request link, and its state
+    /// as `state` words it; empty when there is none.
+    pub pr: String,
+    pub pr_state: String,
 }
 
 /// One line under `## Asked`.
@@ -588,6 +592,11 @@ mod tests {
             ]
         );
         assert_eq!(ask.links[3].title, "Write the docs");
+        // A thread brings its pull request along.
+        assert_eq!(
+            (ask.links[0].pr.as_str(), ask.links[0].pr_state.as_str()),
+            ("https://github.com/acme/app/pull/13", "open")
+        );
         assert_eq!(ask.confirmed, Confirmed::InProgress);
 
         // A parenthesis with no link in it stays part of the answer.
@@ -621,6 +630,7 @@ mod tests {
     fn an_ask_does_not_close_when_its_state_and_its_links_disagree() {
         let cases = [
             ("done", "(#13)", "a linked PR is still open"),
+            ("done", "(t-0004)", "a linked PR is still open"),
             ("answered", "(t-0004 #13)", "a linked PR is still open"),
             ("done", "(t-0001)", "a linked thread is still working"),
             ("answered", "(t-0007)", "a linked thread is still working"),
@@ -662,6 +672,7 @@ mod tests {
         let confirmed = |links: &str| one(&format!("- [open] x : y ({links})")).confirmed;
         assert_eq!(confirmed("t-0003 t-0001"), Confirmed::InProgress);
         assert_eq!(confirmed("t-0003 t-0002"), Confirmed::Stopped);
+        assert_eq!(confirmed("t-0004"), Confirmed::InProgress, "its PR is open");
         assert_eq!(confirmed("t-0003 t-0005"), Confirmed::Failed);
         assert_eq!(confirmed("t-0003 #12 task:3"), Confirmed::Done);
         assert_eq!(
