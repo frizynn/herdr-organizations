@@ -1121,6 +1121,34 @@ mod tests {
         assert_eq!(body, "");
     }
 
+    /// Settings are read without `deny_unknown_fields`, so a binary from
+    /// before a key reads a PROJECT.md that has it, and one from after reads
+    /// a PROJECT.md without it by its default.
+    #[test]
+    fn keys_a_binary_does_not_know_are_ignored_and_missing_ones_default() {
+        let (settings, _) = parse_project_md(
+            "+++\nname = \"X\"\nrecords = \"/v\"\nprogress = false\na_later_key = 1\n+++\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                settings.records.as_str(),
+                settings.progress,
+                settings.turn_reminder
+            ),
+            ("/v", false, true)
+        );
+        let (settings, _) = parse_project_md("+++\nname = \"X\"\n+++\n").unwrap();
+        assert_eq!(
+            (
+                settings.records.as_str(),
+                settings.progress,
+                settings.turn_reminder
+            ),
+            ("", true, true)
+        );
+    }
+
     #[test]
     fn repo_arg_parsing() {
         assert_eq!(parse_repo_arg("/a/b").machine, None);
