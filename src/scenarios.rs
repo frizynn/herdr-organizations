@@ -6529,25 +6529,6 @@ fn a_merge_after_the_thread_was_resolved_still_tells_link() {
 
 use crate::inbox::Audience;
 
-/// Every item the coordinator cannot act on, by kind and event: written for
-/// the user (the popup, Nenu, `inbox list`), never for the coordinator.
-const FOR_THE_USER: [(&str, &str); 14] = [
-    ("thread-state", "landing"),
-    ("thread-state", "idle"),
-    ("thread-state", "resolved"),
-    ("pr", "PR opened"),
-    ("pr", "PR created"),
-    ("pr", "PR review activity"),
-    ("pr", "auto-fix"),
-    ("pr", "fix CI already asked"),
-    ("pr", "address comments already asked"),
-    ("pr", "resolve conflicts already asked"),
-    ("pr", "auto-merged"),
-    ("pr", "auto-merge refused"),
-    ("pr", "merge gate refused"),
-    ("pr", "merged"),
-];
-
 /// As if the coordinator's input box had looked empty for a while: the next
 /// tick nudges it when there is anything to nudge about.
 fn quiet_box(project: &Project) {
@@ -6564,9 +6545,11 @@ fn events_and_audiences(items: &[inbox::Item]) -> Vec<(String, Audience)> {
         .collect()
 }
 
+/// Every pair of the user's table: the item is written and shown, but it
+/// never wakes the coordinator or reaches its context.
 #[test]
 fn an_item_for_the_user_never_wakes_the_coordinator_or_reaches_its_context() {
-    for (kind, event) in FOR_THE_USER {
+    for (kind, event) in inbox::FOR_THE_USER {
         let (world, project, _) = finished_world("idle");
         set_front_matter(&project, "nudge = true");
         settle(&project);

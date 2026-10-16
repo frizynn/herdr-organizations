@@ -30,9 +30,9 @@ pub enum Audience {
 }
 
 /// The items the coordinator cannot act on, by kind and event: the user
-/// merges, and these say what the user or the binary already did or what
-/// the user alone decides next. Everything else is the coordinator's.
-const FOR_THE_USER: [(&str, &str); 14] = [
+/// merges, and these say what the binary already did or what the user alone
+/// decides next. Everything else is the coordinator's.
+pub(crate) const FOR_THE_USER: [(&str, &str); 13] = [
     ("thread-state", "landing"),
     // Idle again after its report was read; a thread that stops without a
     // new report is `stopped without a new report`, the coordinator's.
@@ -48,9 +48,6 @@ const FOR_THE_USER: [(&str, &str); 14] = [
     ("pr", "auto-merged"),
     ("pr", "auto-merge refused"),
     ("pr", "merge gate refused"),
-    // Merged by the user with `thread merge` or the popup. The ticker's own
-    // `PR merged` stays the coordinator's.
-    ("pr", "merged"),
 ];
 
 /// Who an item of this kind and event is for.

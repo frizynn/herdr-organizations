@@ -350,7 +350,7 @@ pub fn write_thread_items(
             project,
             "thread-state",
             &t.id,
-            transition_event(change),
+            transition_event(change, &t),
             &summary,
             "",
         )?;
@@ -402,7 +402,11 @@ pub fn write_thread_items(
                     ));
                 }
                 let text = std::fs::read_to_string(&report).unwrap_or_default();
-                let event = with_remember(NEW_REPORT, &text);
+                let event = if has_remember(&text) {
+                    format!("{NEW_REPORT}, {REMEMBER}")
+                } else {
+                    NEW_REPORT.to_string()
+                };
                 inbox::write(project, "thread-state", &t.id, &event, &summary, "")?;
             }
         }
@@ -420,18 +424,21 @@ pub fn write_thread_items(
     Ok(())
 }
 
-/// A thread-state item's event, from the group it moved to. Idle straight
-/// from Working is a stop without a new report, which only the coordinator
-/// would notice; any other Idle (its report was read) is not news for it,
-/// as `parent_phrase` says for a coordinator node.
-fn transition_event(change: &Transition) -> &'static str {
+/// A thread-state item's event, from the group it moved to. Idle is a stop
+/// without a new report, which only the coordinator would notice, when the
+/// thread was working or has no report at all. Otherwise its report was
+/// read (an unread one would make it Ready for review), and Idle is no news
+/// for the coordinator.
+fn transition_event(change: &Transition, t: &Thread) -> &'static str {
     match (change.to, change.note.as_str()) {
         (Group::WaitingOnYou, "blocked") => "blocked on a prompt",
         (Group::WaitingOnYou, "pane closed") => "pane closed",
         (Group::WaitingOnYou, "no agent") => "agent gone",
         (Group::WaitingOnYou, _) => WAITING_ON_YOU,
         (Group::Landing, _) => LANDING,
-        (Group::Idle, _) if change.from == Some(Group::Working) => STOPPED,
+        (Group::Idle, _) if change.from == Some(Group::Working) || t.report_hash.is_empty() => {
+            STOPPED
+        }
         (Group::Idle, _) => "idle",
         _ => "changed state",
     }
@@ -586,15 +593,11 @@ fn nudge_on(project: &Project) -> bool {
 /// proposes what to remember (`report::remember`).
 const REMEMBER: &str = "remember";
 
-/// `phrase`, followed by `remember` when `report` has a `## Remember`
-/// section. Only the fixed word reaches a prompt, never the section's text:
-/// `node show` and `--json` carry it.
-fn with_remember(phrase: &str, report: &str) -> String {
-    if report::remember(report).is_empty() {
-        phrase.to_string()
-    } else {
-        format!("{phrase}, {REMEMBER}")
-    }
+/// Whether `report` has a `## Remember` section. Only the fixed word
+/// `remember` reaches a prompt, never the section's text: `node show` and
+/// `--json` carry it.
+fn has_remember(report: &str) -> bool {
+    !report::remember(report).is_empty()
 }
 
 const WAITING_ON_YOU: &str = "waiting on you";
@@ -688,31 +691,35 @@ fn parent_update_line(
     updates: &BTreeMap<String, String>,
     report: impl Fn(&str) -> String,
 ) -> String {
-    let said: Vec<(String, String)> = updates
+    // (child, phrase, whether its report proposes what to remember)
+    let said: Vec<(String, &str, bool)> = updates
         .iter()
         .filter_map(|(id, pending)| {
             let phrase = *PARENT_PHRASES
                 .iter()
                 .find(|phrase| pending.eq_ignore_ascii_case(phrase))?;
-            let said = if REPORT_PHRASES.contains(&phrase) {
-                let text = report(id);
-                let phrase = report::verdict(&text).map_or(phrase, Verdict::words);
-                with_remember(phrase, &text)
-            } else {
-                phrase.to_string()
-            };
-            Some((inbox::safe_subject(id), said))
+            if !REPORT_PHRASES.contains(&phrase) {
+                return Some((inbox::safe_subject(id), phrase, false));
+            }
+            let text = report(id);
+            let phrase = report::verdict(&text).map_or(phrase, Verdict::words);
+            Some((inbox::safe_subject(id), phrase, has_remember(&text)))
         })
         .collect();
     PARENT_LINE_ORDER
         .iter()
-        .flat_map(|phrase| [phrase.to_string(), format!("{phrase}, {REMEMBER}")])
-        .filter_map(|phrase| {
+        .flat_map(|phrase| [(*phrase, false), (*phrase, true)])
+        .filter_map(|(phrase, remember)| {
             let ids: Vec<&str> = said
                 .iter()
-                .filter(|(_, said)| *said == phrase)
-                .map(|(id, _)| id.as_str())
+                .filter(|(_, said, with)| *said == phrase && *with == remember)
+                .map(|(id, _, _)| id.as_str())
                 .collect();
+            let phrase = if remember {
+                format!("{phrase}, {REMEMBER}")
+            } else {
+                phrase.to_string()
+            };
             (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
         })
         .collect::<Vec<_>>()
