@@ -3125,6 +3125,83 @@ mod tests {
         assert_eq!(popup.scope.as_deref(), Some("alpha"));
     }
 
+    /// With a tracker, the task rows come from its cache (the popup never runs
+    /// `list` itself) and the editing keys ask the coordinator to change the
+    /// task in the tracker.
+    #[test]
+    fn tracker_tasks_show_from_the_cache_and_keys_name_the_tracker() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let ctx = world.ctx();
+        std::fs::create_dir_all(&ctx.config_dir).unwrap();
+        std::fs::write(
+            ctx.config_dir.join("config.toml"),
+            format!(
+                "[tracker.\"{}\"]\nlist = [\"tracker-list\"]\n",
+                project.canonical_dir().display()
+            ),
+        )
+        .unwrap();
+        world.runner.on(
+            "tracker-list",
+            crate::runner::fake::ok(
+                r#"{"schema_version":1,"tasks":[{"id":"AWA-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0003","description":"Safari drops the cookie.","url":"https://tracker.example/AWA-1"}]}"#,
+            ),
+        );
+        world.runner.on("coordinator", crate::runner::fake::ok("sent"));
+        let texts = |rows: &[Row]| -> Vec<(String, bool)> {
+            rows.iter().map(|r| (r.text.clone(), r.header)).collect()
+        };
+        // Nothing fetched yet: the popup says so and does not ask the tracker.
+        assert_eq!(
+            texts(&build(&ctx, Section::Tasks, Some("demo"))),
+            [(
+                "tracker tasks not loaded yet; `context` or `task list` loads them".to_string(),
+                true
+            )]
+        );
+        assert_eq!(world.runner.count("tracker-list"), 0);
+
+        crate::tasks::print_list(&ctx, "demo", true).unwrap();
+        assert_eq!(world.runner.count("tracker-list"), 1);
+        let rows = build(&ctx, Section::Tasks, Some("demo"));
+        assert_eq!(
+            texts(&rows),
+            [
+                ("Backlog".to_string(), true),
+                ("  [AWA-1] Fix login  (claude) · t-0003  ≡".to_string(), false)
+            ]
+        );
+        assert_eq!(world.runner.count("tracker-list"), 1);
+        let RowKind::Task(task) = &rows[1].kind else {
+            panic!()
+        };
+        let Mode::Detail { lines, .. } = task_detail(task) else {
+            panic!()
+        };
+        assert!(
+            lines.contains(&"https://tracker.example/AWA-1".to_string()),
+            "{lines:?}"
+        );
+
+        let mut popup = Popup::new(&ctx, Some("demo".into()), String::new());
+        popup.section = SECTIONS.iter().position(|s| *s == Section::Tasks).unwrap();
+        popup.reload();
+        popup.selected = 1;
+        popup.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        let calls = world.runner.calls.borrow();
+        let sent = calls
+            .iter()
+            .find(|c| c.args.iter().any(|a| a == "coordinator"))
+            .expect("a sentence to the coordinator");
+        assert_eq!(
+            sent.stdin.as_deref(),
+            Some(
+                "(from the projects popup) Please mark as done the task AWA-1 \"Fix login\" in the tracker, with the tracker's own tool."
+            )
+        );
+    }
+
     #[test]
     fn yolo_toggles_from_the_settings_tab_per_project_and_for_all_projects() {
         let world = crate::scenarios::World::new();
