@@ -1037,7 +1037,7 @@ pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> Strin
         text.push_str("\nRemote recursive coordinators are unsupported until a remote CLI bridge is available. Remote workers remain supported.\n");
     } else if record.role == NodeRole::Coordinator && record.can_spawn {
         text.push_str(&format!(
-            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. `--profile <name>` picks one of the profiles the project allows; without it the child gets your profile. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags; omitted ones inherit yours at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you once when a direct child needs attention or has a result. Inspect only the changed ids from that message, then return idle again.\n",
+            "\n# Creating child nodes\n\nUse this CLI protocol for every child. Always set `--parent` to your own node id (`{}`), so instructions and memory follow the ancestor chain. A child coordinator may create its own descendants; a worker cannot spawn.\n\n```sh\n{command_prefix} node start {slug} --parent {} --role worker --title \"Short task\" --task-file - <<'TASK'\nDescribe the task, repository and acceptance criteria.\nTASK\n```\n\nChoose `--role coordinator` for a child that must plan and delegate. `--profile <name>` picks one of the profiles the project allows; without it the child gets your profile. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags; omitted ones inherit yours at creation.\n\n# Watching child nodes\n\nAfter delegating, return idle. Never poll children with repeated `herdr agent wait`, `herdr agent read`, node-list commands, sleeps or status loops. The ticker watches them in code and wakes you with one line when a direct child is waiting on you, ready for review, has a new report or is landing; an idle child does not wake you. Inspect each id it names once with `{command_prefix} node show {slug} <id>`, read `threads/<id>.md` when it has a report, then return idle again. Your children's routine results reach only you, not the root coordinator.\n",
             record.id, record.id
         ));
     } else if record.role == NodeRole::Coordinator {
@@ -1069,6 +1069,20 @@ mod tests {
             role,
             ..NodeRequest::default()
         }
+    }
+
+    /// The parent nudge is one line with no instructions, so the brief of a
+    /// coordinator that may spawn says once how to watch children.
+    #[test]
+    fn a_spawning_coordinators_brief_says_once_how_to_watch_children() {
+        let protocol = node_protocol(
+            &node("t-0001", ROOT_ID, NodeRole::Coordinator, true),
+            "hp",
+            "demo",
+        );
+        assert_eq!(protocol.matches("Never poll").count(), 1, "{protocol}");
+        assert!(protocol.contains("an idle child does not wake you"));
+        assert!(protocol.contains("`hp node show demo <id>`"));
     }
 
     /// The coordinator renamed the task between the command's check and the

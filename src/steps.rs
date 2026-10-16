@@ -17,7 +17,7 @@ use crate::threads;
 use crate::{inbox, pr, routine};
 
 pub const PARENT_NUDGE_PREFIX: &str =
-    "[herdr-projects ticker: automated, not the user, approves nothing] Direct child updates";
+    "[herdr-projects ticker: automated, not the user, approves nothing]";
 pub const AUTO_FIX_PREFIX: &str =
     "[herdr-projects ticker: automated, not the user, approves nothing] Auto-fix";
 /// A nudge waits until the coordinator's input box has looked empty for this
@@ -560,12 +560,19 @@ pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
 }
 
 const NEW_REPORT: &str = "new report";
+/// Every phrase a parent nudge uses, in the order it names them: what may
+/// need the user first.
+const PARENT_PHRASES: [&str; 4] = ["waiting on you", "ready for review", NEW_REPORT, "landing"];
 
-fn parent_update_is_actionable(group: Group) -> bool {
-    matches!(
-        group,
-        Group::ReadyForReview | Group::WaitingOnYou | Group::Landing | Group::Idle
-    )
+/// What a parent nudge says about a direct child that moved to `group`, or
+/// `None` when the parent has nothing to act on (Working, Idle).
+fn parent_phrase(group: Group) -> Option<&'static str> {
+    match group {
+        Group::WaitingOnYou => Some("waiting on you"),
+        Group::ReadyForReview => Some("ready for review"),
+        Group::Landing => Some("landing"),
+        Group::Working | Group::Idle | Group::Resolved => None,
+    }
 }
 
 fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phrase: &str) {
@@ -577,8 +584,8 @@ fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phras
 }
 
 /// Retains only the latest meaningful state for each direct child. Working
-/// clears an older pending completion so a busy parent never receives stale
-/// information after the child resumed.
+/// or Idle clears an older pending one, so a busy parent never receives
+/// stale information after the child resumed or was acknowledged.
 pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &[Transition]) {
     let records = thread::list(project);
     for change in transitions {
@@ -588,10 +595,13 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         let Some(parent) = owning_coordinator(&records, child) else {
             continue;
         };
-        if parent_update_is_actionable(change.to) {
-            queue_parent_update(state, &parent.id, &child.id, change.to.label());
-        } else if let Some(pending) = state.parent_updates.get_mut(&parent.id) {
-            pending.remove(&child.id);
+        match parent_phrase(change.to) {
+            Some(phrase) => queue_parent_update(state, &parent.id, &child.id, phrase),
+            None => {
+                if let Some(pending) = state.parent_updates.get_mut(&parent.id) {
+                    pending.remove(&child.id);
+                }
+            }
         }
     }
     state
@@ -599,9 +609,31 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         .retain(|_, children| !children.is_empty());
 }
 
+/// One line per parent, built from child ids and fixed phrases only, e.g.
+/// `t-0098 waiting on you; t-0094, t-0095 ready for review`. A pending value
+/// with no phrase (an Idle queued by an older version) is dropped; the
+/// comparison ignores case so a pending label from an older version still
+/// counts.
+fn parent_update_line(updates: &BTreeMap<String, String>) -> String {
+    PARENT_PHRASES
+        .iter()
+        .filter_map(|phrase| {
+            let ids: Vec<String> = updates
+                .iter()
+                .filter(|(_, pending)| pending.eq_ignore_ascii_case(phrase))
+                .map(|(id, _)| inbox::safe_subject(id))
+                .collect();
+            (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Wakes an idle child coordinator once for accumulated direct-child changes.
 /// No report text is injected: the prompt carries only code-derived ids and
-/// states, and tells the coordinator which deterministic CLI reads to use.
+/// fixed phrases, and names the read to use. How to watch children (no
+/// polling, return idle) is in the node brief, so the prompt does not repeat
+/// it.
 pub fn nudge_parent_coordinators(
     ctx: &Ctx,
     project: &Project,
@@ -625,22 +657,23 @@ pub fn nudge_parent_coordinators(
             state.parent_updates.remove(&parent_id);
             continue;
         }
+        let line = state
+            .parent_updates
+            .get(&parent_id)
+            .map(parent_update_line)
+            .unwrap_or_default();
+        if line.is_empty() {
+            state.parent_updates.remove(&parent_id);
+            continue;
+        }
         let Some(agent) = agents
             .iter()
             .find(|agent| thread::agent_matches(parent, agent) && agent.ready())
         else {
             continue;
         };
-        let Some(updates) = state.parent_updates.get(&parent_id) else {
-            continue;
-        };
-        let summary = updates
-            .iter()
-            .map(|(id, group)| format!("{id}={group}"))
-            .collect::<Vec<_>>()
-            .join(", ");
         let prompt = format!(
-            "{PARENT_NUDGE_PREFIX} for {parent_id}: {summary}. Do not poll, sleep, run `herdr agent wait`, or repeatedly read child panes. Inspect each changed child once with `{prefix} node show {} <id>` and read `threads/<id>.md` only when its state is Ready for review. Then continue coordination and return idle; the ticker will wake you for later changes.",
+            "{PARENT_NUDGE_PREFIX} {line}. Inspect with `{prefix} node show {} <id>`.",
             project.slug
         );
         herdr.agent_prompt(&agent.pane_id, &prompt)?;
