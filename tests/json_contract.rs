@@ -807,7 +807,10 @@ Ship small PRs.
         "mute": false,
         "progress": true,
         "turn_reminder": true,
-        "records": fixture.dir()
+        "records": fixture.dir(),
+        "merge_gate": "",
+        "merge_method": "squash",
+        "auto_merge": false
     });
     for (key, value) in fields.as_object().unwrap() {
         expected[key] = value.clone();

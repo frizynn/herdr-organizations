@@ -33,7 +33,7 @@ How Herdr Organizations works, what it writes where, how it stores recursive nod
   threads/<id>.next.md    Next lines the coordinator added    threads/<id>/  a tab thread's folder
   inbox/, inbox/done/     events for the coordinator
   library/<id>/           home copy of files a thread produced
-  .state/                 status, coordinator record, live coordinators, ticker state, lock
+  .state/                 status, coordinator record, live coordinators, ticker state, merge gate verdicts, lock
 ~/.herdr-projects/.ticker.lock  .ticker.log  .progress/  .trash/
 ~/.herdr-projects/.organizations-state.json      the popup's view model, written by the ticker
 ~/.config/herdr-projects/tui.toml                popup and dock keybindings and view settings
@@ -66,7 +66,7 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `thread read [--lines N]`, `thread keys [KEY]... [--text T]`, `thread brief` | Answer a thread's pane without going there: print what it shows (a trust dialog, a question menu, a permission prompt), then type text and press keys (`up`, `down`, `enter`, `esc`, `tab`, a digit). `thread keys` refuses a trust screen when `trust_screens` is `user`. `thread brief` sends a brief the ticker has not delivered yet (the ticker waits for a settled, empty input box, counts a brief sent only once the agent starts working, never types it twice, and after three unconfirmed tries leaves an inbox item). |
 | `thread list/show [--json]`, `thread ack`, `thread adopt` | Look at threads. `--json` prints the versioned document of [docs/json.md](json.md). |
 | `thread resolve [--keep-worktree \| --close-view] [--discard-uncopied] [--skip-copy] [--reopen]` | Final copy home, then clean up. `--close-view` keeps the worktree and branch, closes the thread's tab or workspace first, and resolves nothing when it cannot close it. |
-| `thread merge [--method squash\|merge\|rebase] [--json]`, `thread set [--auto-fix-ci on\|off] [--auto-merge on\|off] [--json]` | Merge a thread's pull request only when it is open, approved, conflict-free and every check passed, pinned to the checked head commit; and the per-thread pull request automation. Both refuse from an agent pane of the project. Auto-fix leaves events an enabled `pr` routine covers to that routine. |
+| `thread merge [--method squash\|merge\|rebase] [--json]`, `thread set [--auto-fix-ci on\|off] [--auto-merge on\|off] [--json]` | Merge a thread's pull request only when it is open, approved, conflict-free and every check passed (with a [merge gate](#merge-gate), when the gate passes instead of the approval), pinned to the checked head commit; and the per-thread pull request automation. `--method` defaults to the project's `merge_method`, else squash. Both refuse from an agent pane of the project. Auto-fix leaves events an enabled `pr` routine covers to that routine. |
 | `thread pr-action <project> <id> fix-ci\|address-comments\|resolve-conflicts [--json]` | Ask the thread to fix its pull request: a follow-up with counts and `gh` commands the binary wrote from a fresh read, refused when the pull request's state does not call for it, and not sent again while nothing changed since it, auto-fix or a `pr` routine asked (see [Pull request actions](json.md#pull-request-actions)). |
 | `thread pr-create <project> <id> [--json]` | Open the pull request of a local worktree thread whose agent is idle and whose branch origin has without one: its title, its report's `## Report` as the description, into its base. It is recorded at once. |
 | `node start <project> --parent root\|<id> [--role worker\|coordinator] [--template NAME] --title T [--can-spawn \| --no-spawn] [--profile P \| --harness KIND] [--model M] [--reasoning-effort E] [--permission-profile P] [--raw-agent-arg A]... [--repo PATH] [--kind K] [--machine M] [--base REF] [--rules-file F] --task-file F [--from-task TITLE]` | A node in the tree (`node create` is an alias); `--role` defaults to the template's, else `worker`. `--from-task` works as for `thread start`. `thread start` is the same for a worker under `root`. |
@@ -159,6 +159,10 @@ trust_screens = "user"             # or "coordinator": who answers trust screens
 coordinator_agent_args = []        # extra arguments for every coordinator's agent CLI
 thread_agent_args = []             # extra arguments for every thread's agent CLI
 routine_commands = false           # true lets approved routines run shell commands
+merge_gate = ["/Users/you/bin/approve.sh"]  # your command decides merges instead of GitHub's approval (by hand only)
+merge_gate_timeout = 120           # seconds (1 to 3600) before the gate counts as a refusal
+merge_method = "squash"            # or "merge" or "rebase": the popup, auto-merge and thread merge without --method
+auto_merge = false                 # true: the ticker auto-merges every thread of the project
 ```
 
 **Yolo mode** is the one switch for "never stop to ask": `start_threads` becomes `auto` whatever it says, and every coordinator and thread launches with its own harness's skip-permissions flag, added after the profile's own arguments: Claude Code `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`, Gemini CLI and Qwen Code `--yolo`, Cursor Agent `--force`, OpenCode `--auto`, Copilot CLI `--allow-all-tools`, Amp `--dangerously-allow-all`, Pi nothing (it never asks). Other kinds have no known flag: their agents still ask (`safety show` says so for the project's kinds). Routine commands are not part of yolo mode: a routine command runs with no agent in the loop, so it stays behind `routine_commands` and a per-command approval.
@@ -168,6 +172,27 @@ routine_commands = false           # true lets approved routines run shell comma
 A change reaches agents launched after it. Running agents keep the flags they started with until restarted: `r` on a thread in the Projects popup, or quit the coordinator and `open` it again (it resumes its session). A running coordinator sees a new `start_threads` at its next `context`.
 
 `thread_agent_args` and `coordinator_agent_args` are from before profiles. They were written for the harness of the project's default profile, so they now reach only a built-in profile of that harness: Claude flags stay with Claude threads and no longer break a Codex thread. Move them into a profile of your own (below) and remove them.
+
+### Merge gate
+
+`merge_gate`, `merge_gate_timeout`, `merge_method` and `auto_merge` are edited by hand in `config.toml`, in the project's table or in `[safety.default]`. `safety set` refuses them, `default` included, and nothing in the popup changes them, so an agent cannot turn merging on through the CLI. The gate's program is an absolute path or a bare name looked up on `PATH`; a relative path is a config error, because it would resolve in the thread's repository or the project folder, which agents write. A `config.toml` that exists but cannot be read is an error too, not an empty file, so a merge fails instead of skipping the gate.
+
+A binary from before these keys ignores them: its `thread merge`, popup and ticker merge under GitHub's rules and never run the gate. Update every installed binary before a project relies on the gate. `context` and `project show --json` name the gate's program (not its arguments), the method and `auto_merge`.
+
+Without `merge_gate`, `thread merge` needs an approving review and at least one reported check, as before. With it, the command decides those two instead. What GitHub reports still blocks in every case: a closed pull request, a draft, a merge conflict, a check that failed or has not finished, a head branch, repository or base that is not the thread's, an unknown head commit. The gate never runs on such a pull request.
+
+The gate runs only when something merges (`thread merge`, the popup's merge, auto-merge), just before `gh pr merge`, on the head commit the merge is then pinned to with `--match-head-commit`: a push while the gate runs makes GitHub refuse the merge. It is an argv list, run without a shell and without standard input, in the thread's local repository (the project folder for a remote or repository-less thread), with these variables:
+
+| Variable | Value |
+| --- | --- |
+| `HP_PROJECT`, `HP_THREAD_ID` | The project slug and the thread id. |
+| `HP_PR_URL`, `HP_PR_NUMBER`, `HP_REPO` | The pull request, its number and its `owner/name`. |
+| `HP_HEAD_SHA`, `HP_HEAD_REF`, `HP_BASE_REF` | The head commit it decides on, the thread's branch and the base branch. |
+| `HP_WORKTREE` | The thread's worktree, when it exists on this machine. |
+
+Exit 0 passes. Any other exit, running longer than `merge_gate_timeout` seconds (120 by default) or a command that cannot start refuses. The reason is the first line of its standard output, without control characters and cut to 200 characters, or `merge gate exited <code>` and `merge gate timed out`. It goes to `thread merge`'s error, one `pr` inbox item each time the reason changes (`merge gate refused`), the `merge_blocker` of `--json` and the popup. It never goes into a prompt. The last verdict per thread and head commit is kept in `.state/merge-gate.json`, so those read it without running the command; before the gate has run on a commit, they show nothing blocking, and a merge runs it. A refusal does not stop the next merge: `thread merge`, the popup's merge and Nenu ask the gate again, since its answer for the same commit can change.
+
+`auto_merge = true` makes the ticker auto-merge every thread of the project, as `thread set --auto-merge on` does for one; a thread cannot opt out. With a gate, a refusal on a head commit is asked again at every pull request check (about every two minutes) until it passes or a new commit arrives, so a reviewer's verdict that lands later for the same commit is picked up.
 
 ## Agent profiles
 
@@ -309,6 +334,7 @@ The coordinator runs the binary every turn, so allow-list it in your agent by su
 - **The coordinator answers threads' prompts.** With `thread keys` it approves plainly in-task permission prompts once, accepts trust screens for the thread's own folder when `trust_screens` is `coordinator`, and asks you about the rest. That is the skill's judgement, not a hard rule (except that `thread keys` refuses trust screens when `trust_screens` is `user`); take `thread keys` off the allow-list to see each one first.
 - **A thread can impersonate you.** Any thread agent can prompt the coordinator's pane through Herdr. The skill's rule that a go-ahead must name the threads lowers the risk; it does not remove it.
 - **An approved routine command covers the command text only.** `./check.sh` keeps its hash while the script changes.
+- **A merge gate is your code.** It decides merges for the project, so whatever can change its script can merge. Keep it outside every agent's working directory, as `config.toml` is.
 - **Prompt injection is reduced, not removed.** No GitHub text reaches a prompt from the plugin, but threads read pull request comments themselves with `gh`, and memory is inlined into every later brief.
 - **Hooks run in every agent session on the machine.** They exit at once outside a Herdr pane.
 - **Cost.** Every thread is a full agent session, and each nudge and each `context` spends coordinator tokens.

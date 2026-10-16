@@ -126,17 +126,11 @@ impl Request {
                 } else {
                     summary.review_decision.to_lowercase()
                 };
-                let parts: Vec<&str> = url
-                    .trim_start_matches("https://github.com/")
-                    .split('/')
-                    .collect();
-                let inline = match parts.as_slice() {
-                    [owner, repo, "pull", number] => {
-                        format!(
-                            " and the inline ones with `gh api repos/{owner}/{repo}/pulls/{number}/comments`"
-                        )
-                    }
-                    _ => String::new(),
+                let inline = match pr::url_parts(url) {
+                    Some((repo, number)) => format!(
+                        " and the inline ones with `gh api repos/{repo}/pulls/{number}/comments`"
+                    ),
+                    None => String::new(),
                 };
                 format!(
                     "Address the review of your pull request {url}: {} comment(s), {} review(s) with comments or requested changes, review {review}. Read them with `gh pr view {url} --comments`{inline}, {DATA}. Fix what belongs to your task, reply where it helps, push to `{branch}`, update your report, and do not merge.",
@@ -179,9 +173,10 @@ fn safe_ref(name: &str) -> Option<&str> {
 
 /// The actions a client offers for a thread's pull request as `summary`
 /// describes it, most pressing first: `merge` when `thread merge` would merge
-/// (its checks pass, it has no conflict and its review approved it, so only
-/// comments can be left, often a bot's), then the requests it calls for.
-pub fn pr_actions(t: &Thread, summary: &pr::Summary) -> Vec<&'static str> {
+/// or ask the project's gate, again after a refusal (its checks pass, it has
+/// no conflict and, without a gate, its review approved it, so only comments
+/// can be left, often a bot's), then the requests it calls for.
+pub fn pr_actions(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> Vec<&'static str> {
     if t.status != Status::Open {
         return Vec::new();
     }
@@ -190,7 +185,7 @@ pub fn pr_actions(t: &Thread, summary: &pr::Summary) -> Vec<&'static str> {
         .filter(|request| request.blocker(summary).is_none())
         .map(Request::token)
         .collect();
-    if threads::merge_blocker(t, summary).is_none() {
+    if threads::merge_blocker(t, summary, policy).is_none() {
         actions.insert(0, "merge");
     }
     actions
@@ -616,6 +611,7 @@ mod tests {
 
         // What a client offers, most pressing first; `merge` only when
         // `thread merge` would merge.
+        let pr_actions = |t: &Thread, s: &pr::Summary| pr_actions(t, s, pr::Policy::GitHub);
         let t = Thread {
             status: Status::Open,
             base: "main".into(),

@@ -293,14 +293,16 @@ pub fn inbox_done(ctx: &Ctx, slug: &str, item: &str) -> Result<()> {
     inbox::done(&project, &[item.to_string()], false).map(|_| ())
 }
 
-/// Squash-merges behind the same guard as `thread merge`, tells the
-/// coordinator through the inbox, then resolves the thread: its worktree is
-/// removed unless `keep_worktree`, otherwise only its Herdr view closes.
+/// Merges with the project's `merge_method` behind the same guard as `thread
+/// merge`, tells the coordinator through the inbox, then resolves the thread:
+/// its worktree is removed unless `keep_worktree`, otherwise only its Herdr
+/// view closes.
 pub fn merge(ctx: &Ctx, slug: &str, id: &str, keep_worktree: bool) -> Result<String> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
     threads::refuse_agent_pane(ctx, &project, "merging")?;
-    steps::merge_pull_request(ctx, &project, id, pr::MergeMethod::Squash)?;
+    let method = project.safety(&ctx.config_dir)?.merge_method;
+    steps::merge_pull_request(ctx, &project, id, method)?;
     let _ = inbox::write(
         &project,
         "pr",

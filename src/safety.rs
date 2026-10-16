@@ -27,6 +27,15 @@ pub const KEYS: [(&str, &str); 6] = [
     ("routine_commands", "on/off"),
 ];
 
+/// The merge settings: changed only by editing config.toml by hand, so no
+/// popup, terminal prompt or faked terminal can turn an agent's merge on.
+const HAND_EDITED: [&str; 4] = [
+    "merge_gate",
+    "merge_gate_timeout",
+    "merge_method",
+    "auto_merge",
+];
+
 /// What the popup and the CLI say after a change.
 pub const RESTART_NOTE: &str = "agents launched from now on use it; running agents keep their flags until restarted (r on a thread, quit and reopen the coordinator)";
 
@@ -101,6 +110,12 @@ fn parse_on_off(value: &str) -> Result<bool> {
 /// key so the table below applies. Argument lists split on whitespace, and no
 /// words at all is the empty list.
 fn value_item(key: &str, words: &[String]) -> Result<Option<Item>> {
+    // Before `default`: removing a key can drop a project's opt-out.
+    if HAND_EDITED.contains(&key) {
+        bail!(
+            "`{key}` is changed only by editing the project's or the default [safety] table of config.toml by hand"
+        );
+    }
     if words.len() == 1 && words[0] == "default" {
         return Ok(None);
     }

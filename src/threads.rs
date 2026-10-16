@@ -13,7 +13,7 @@ use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::runner::{Cmd, Runner};
 use crate::thread::{self, CopyOutcome, Group, Kind, Live, Status, Thread};
-use crate::{coordinator, pr, remote, report, steps, ticker};
+use crate::{coordinator, merge_gate, pr, remote, report, steps, ticker};
 
 /// The version of every `--json` document; see docs/json.md. Adding a field
 /// keeps it; renaming, removing or changing the meaning of one bumps it.
@@ -1686,17 +1686,25 @@ pub struct Row {
 
 pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
     let view = session_view(ctx, project);
+    let rule = merge_gate::Rule::load(ctx, project);
     let now = jiff::Timestamp::now();
     thread::list(project)
         .into_iter()
-        .map(|t| row(&t, &project.root, view.as_ref(), now))
+        .map(|t| row(&t, &project.root, view.as_ref(), rule.landing(&t.id), now))
         .collect()
 }
 
 /// One thread's row, asking the project's Herdr session now.
 pub fn live_row(ctx: &Ctx, project: &Project, t: &Thread) -> Row {
     let view = session_view(ctx, project);
-    row(t, &project.root, view.as_ref(), jiff::Timestamp::now())
+    let landing = merge_gate::Rule::load(ctx, project).landing(&t.id);
+    row(
+        t,
+        &project.root,
+        view.as_ref(),
+        landing,
+        jiff::Timestamp::now(),
+    )
 }
 
 /// Best known group without a live Herdr round trip. The ticker persists this
@@ -1713,7 +1721,13 @@ pub fn recorded_group(thread: &Thread) -> Group {
     })
 }
 
-fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
+fn row(
+    t: &Thread,
+    root: &Path,
+    view: Option<&SessionView>,
+    merge_gate: Option<bool>,
+    now: jiff::Timestamp,
+) -> Row {
     // Before the first poll a thread that is waiting for its launch is Working.
     let recorded = recorded_group(t);
     if t.status == Status::Resolved {
@@ -1747,7 +1761,10 @@ fn row(t: &Thread, root: &Path, view: Option<&SessionView>, now: jiff::Timestamp
             live: false,
         };
     }
-    let live = thread::live_with_report(t, &view.agents, &view.panes, now, root, &view.socket);
+    let live = thread::Live {
+        merge_gate,
+        ..thread::live_with_report(t, &view.agents, &view.panes, now, root, &view.socket)
+    };
     // A report the ticker has not hashed yet still counts, as it does for the ticker.
     let fresh = Thread {
         report_hash: thread::local_report_hash(t).unwrap_or_else(|| t.report_hash.clone()),
@@ -1890,15 +1907,21 @@ pub fn refuse_agent_pane(ctx: &Ctx, project: &Project, action: &str) -> Result<(
 }
 
 /// Why `thread merge` would refuse this thread's pull request as `summary`
-/// describes it, or `None` when it would merge.
-pub fn merge_blocker(t: &Thread, summary: &pr::Summary) -> Option<String> {
+/// describes it under `policy`, or `None` when it would merge or, with a
+/// gate, run the gate.
+pub fn merge_blocker(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> Option<String> {
     if t.status != Status::Open {
         return Some("the thread is not open".into());
     }
-    pr::merge_blocker(summary).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
+    pr::merge_blocker(summary, policy).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
 }
 
-pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> ThreadJson {
+pub fn thread_json(
+    project: &Project,
+    row: &Row,
+    state: &steps::State,
+    rule: &merge_gate::Rule,
+) -> ThreadJson {
     let t = &row.thread;
     let report_path = thread::home_report_path(project, &t.id);
     let report_text = std::fs::read_to_string(&report_path).unwrap_or_default();
@@ -1927,12 +1950,16 @@ pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> Thread
                 _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => {
                     Some(format!("it is not open (state {})", t.pr_state))
                 }
-                Some(s) => merge_blocker(t, s),
+                // The gate's last refusal on this commit shows too; a merge
+                // asks the gate again, so `actions` still offers it.
+                Some(s) => {
+                    merge_blocker(t, s, rule.policy).or_else(|| rule.refusal(&t.id, &s.head_oid))
+                }
                 None => Some("the ticker has not read this pull request yet".into()),
             },
             actions: match summary {
                 _ if !t.pr_state.is_empty() && t.pr_state != "OPEN" => Vec::new(),
-                Some(s) => crate::pr_actions::pr_actions(t, s),
+                Some(s) => crate::pr_actions::pr_actions(t, s, rule.policy),
                 None => Vec::new(),
             },
         }
@@ -1995,10 +2022,11 @@ pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> Thread
 }
 
 /// Every thread of a project in the `--json` contract, in id order.
-pub fn threads_json(project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
+pub fn threads_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
     let state = steps::load_state(project);
+    let rule = merge_gate::Rule::load(ctx, project);
     rows.iter()
-        .map(|row| thread_json(project, row, &state))
+        .map(|row| thread_json(project, row, &state, &rule))
         .collect()
 }
 
@@ -2013,7 +2041,7 @@ pub fn print_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     print_json(&serde_json::json!({
         "schema_version": JSON_SCHEMA_VERSION,
         "project": project.slug,
-        "threads": threads_json(&project, &rows),
+        "threads": threads_json(ctx, &project, &rows),
     }))
 }
 
@@ -2030,12 +2058,13 @@ pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     let entries = organizations::tree(&project)?;
     let rows = rows(ctx, &project);
     let state = steps::load_state(&project);
+    let rule = merge_gate::Rule::load(ctx, &project);
     let nodes: Vec<NodeJson> = entries
         .iter()
         .filter_map(|entry| {
             let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
             Some(NodeJson {
-                thread: thread_json(&project, row, &state),
+                thread: thread_json(&project, row, &state, &rule),
                 depth: entry.depth,
                 tree_order: entry.tree_order,
             })
@@ -2068,9 +2097,10 @@ pub fn set_flags(
 }
 
 /// One thread as JSON, the same document `thread show --json` prints.
-pub fn row_json(project: &Project, row: &Row) -> serde_json::Value {
+pub fn row_json(ctx: &Ctx, project: &Project, row: &Row) -> serde_json::Value {
     let state = steps::load_state(project);
-    serde_json::to_value(thread_json(project, row, &state)).unwrap_or_default()
+    let rule = merge_gate::Rule::load(ctx, project);
+    serde_json::to_value(thread_json(project, row, &state, &rule)).unwrap_or_default()
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
@@ -2121,7 +2151,7 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
         return print_json(&serde_json::json!({
             "schema_version": JSON_SCHEMA_VERSION,
             "project": project.slug,
-            "thread": row_json(&project, &row),
+            "thread": row_json(ctx, &project, &row),
         }));
     }
     println!("group = {:?}", row.group.label());

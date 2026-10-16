@@ -15,7 +15,7 @@ use crate::organizations::{self, ROOT_ID};
 use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::thread::{self, Group, NodeRole, Thread};
-use crate::{inbox, pr, report, steps, threads};
+use crate::{inbox, merge_gate, pr, report, steps, threads};
 
 pub const FILE: &str = ".organizations-state.json";
 pub const SCHEMA_VERSION: u32 = 1;
@@ -120,8 +120,14 @@ pub struct Pr {
     pub failed: usize,
     pub additions: u64,
     pub deletions: u64,
-    /// `None` when `thread merge` would merge it now.
+    /// `None` when `thread merge` would merge it now, or ask the gate.
     pub blocker: Option<String>,
+    /// The project's `merge_method`; squash in a model written before it.
+    pub method: pr::MergeMethod,
+    /// The project's merge gate decides instead of the approval.
+    pub gated: bool,
+    /// The gate's last refusal on this head commit; a merge asks it again.
+    pub gate_refusal: Option<String>,
 }
 
 impl Pr {
@@ -301,7 +307,7 @@ impl Live {
     }
 }
 
-fn pr_view(t: &Thread, summary: Option<&pr::Summary>) -> Option<Pr> {
+fn pr_view(t: &Thread, summary: Option<&pr::Summary>, rule: &merge_gate::Rule) -> Option<Pr> {
     if t.pr.is_empty() {
         return None;
     }
@@ -312,6 +318,8 @@ fn pr_view(t: &Thread, summary: Option<&pr::Summary>) -> Option<Pr> {
         url: t.pr.clone(),
         state: t.pr_state.clone(),
         review: t.pr_review.clone(),
+        method: rule.method,
+        gated: rule.policy == pr::Policy::Gate,
         ..Pr::default()
     };
     if let Some(s) = summary {
@@ -323,7 +331,8 @@ fn pr_view(t: &Thread, summary: Option<&pr::Summary>) -> Option<Pr> {
         view.failed = s.checks.failed;
         view.additions = s.additions;
         view.deletions = s.deletions;
-        view.blocker = threads::merge_blocker(t, s);
+        view.blocker = threads::merge_blocker(t, s, rule.policy);
+        view.gate_refusal = rule.refusal(&t.id, &s.head_oid);
     } else {
         view.blocker = Some("the pull request has not been read yet".into());
     }
@@ -373,7 +382,7 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         if project.status() == project::Status::Archived {
             continue;
         }
-        let view = project_view(&project, lives);
+        let view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
         for node in view.coordinators.iter().chain(&view.threads) {
             if !node.workspace_id.is_empty() && node.machine.is_empty() {
                 owners.insert(
@@ -409,7 +418,7 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
     }
 }
 
-pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
+pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) -> ProjectView {
     let settings = project
         .read_project_md()
         .map(|(s, _)| s)
@@ -488,7 +497,10 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         let local_live = live.filter(|_| !t.is_remote());
         let (group, note, agent) = match local_live {
             Some(l) if t.status != thread::Status::Resolved => {
-                let state = thread::live_state(t, &l.agents, &l.panes, now);
+                let state = thread::Live {
+                    merge_gate: rule.landing(&t.id),
+                    ..thread::live_state(t, &l.agents, &l.panes, now)
+                };
                 let fresh = Thread {
                     report_hash: thread::local_report_hash(t)
                         .unwrap_or_else(|| t.report_hash.clone()),
@@ -513,7 +525,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
             _ => (threads::recorded_group(t), t.last_state.clone(), None),
         };
         let status = Status::from_group(group);
-        let pr = pr_view(t, prs.get(&t.id));
+        let pr = pr_view(t, prs.get(&t.id), rule);
         let mut node = Node {
             id: t.id.clone(),
             title: t.title.clone(),
@@ -708,7 +720,7 @@ mod tests {
         );
         node_record(&project, "t-0005", "root", NodeRole::Worker, Group::Working);
 
-        let view = project_view(&project, &[]);
+        let view = project_view(&project, &[], &Default::default());
         let ids: Vec<_> = view.coordinators.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["root", "t-0001", "t-0003"]);
         assert_eq!(view.node("t-0002").unwrap().coordinator, "t-0001");
@@ -742,7 +754,7 @@ mod tests {
         );
         report("t-0002", "Status: blocked, kind of\n");
         report("t-0004", "Status: done\n");
-        let view = project_view(&project, &[]);
+        let view = project_view(&project, &[], &Default::default());
         let verdict = |id: &str| view.node(id).unwrap().verdict;
         assert_eq!(verdict("t-0001"), Some(crate::report::Verdict::Blocked));
         assert_eq!(verdict("t-0002"), None);
@@ -806,7 +818,7 @@ mod tests {
             },
             ..pr::Summary::default()
         };
-        let pr = pr_view(&t, Some(&summary)).unwrap();
+        let pr = pr_view(&t, Some(&summary), &Default::default()).unwrap();
         assert_eq!(
             node_text(&t, Status::Review, Some(&pr), None, ""),
             "PR #1342 · approved · checks 5/5"

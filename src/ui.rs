@@ -1655,15 +1655,13 @@ impl<'a> App<'a> {
                 &format!("{} open", self.key_label(Action::OpenPr)),
                 DIM,
             );
-            if let Some(blocker) = &pr.blocker
-                && !pr.merged()
-            {
-                frame.put(
-                    3,
-                    y + 2,
-                    &term::fit(&format!("not mergeable: {blocker}"), frame.width - 4),
-                    DIM,
-                );
+            let why = match (&pr.blocker, &pr.gate_refusal) {
+                (Some(blocker), _) => Some(format!("not mergeable: {blocker}")),
+                (None, Some(refusal)) => Some(format!("merge gate refused: {refusal}")),
+                (None, None) => None,
+            };
+            if let Some(why) = why.filter(|_| !pr.merged()) {
+                frame.put(3, y + 2, &term::fit(&why, frame.width - 4), DIM);
                 y += 1;
             }
             y += 3;
@@ -2616,6 +2614,10 @@ impl<'a> App<'a> {
         }
         cx = frame.put(cx, y + 3, &format!("+{}", pr.additions), GREEN) + 1;
         frame.put(cx, y + 3, &format!("−{}", pr.deletions), RED);
+        if let Some(refusal) = &pr.gate_refusal {
+            let refused = format!("Gate refused this commit: {refusal}");
+            frame.put(x + 1, y + 4, &term::fit(&refused, w - 4), YELLOW);
+        }
         match &pr.blocker {
             Some(blocker) => {
                 frame.put(x + 1, y + 5, "Not mergeable now:", RED);
@@ -2623,7 +2625,17 @@ impl<'a> App<'a> {
                 frame.put(x + 1, y + 10, " esc back ", term::CHIP);
             }
             None => {
-                frame.put(x + 1, y + 5, "Squash and merge, then", Style::PLAIN);
+                let (lead, merge) = match pr.method {
+                    crate::pr::MergeMethod::Squash => ("Squash and merge", "squash and merge"),
+                    crate::pr::MergeMethod::Merge => ("Merge", "merge"),
+                    crate::pr::MergeMethod::Rebase => ("Rebase and merge", "rebase and merge"),
+                };
+                let first = if pr.gated {
+                    format!("If the merge gate passes, {merge}, then")
+                } else {
+                    format!("{lead}, then")
+                };
+                frame.put(x + 1, y + 5, &term::fit(&first, w - 4), Style::PLAIN);
                 frame.put(x + 3, y + 6, "·", DIM);
                 frame.put(
                     x + 5,
@@ -4361,6 +4373,49 @@ mod tests {
             assert!(text.contains("tell coordinator mobile redesign"), "{text}");
             press(app, crossterm::event::KeyCode::Esc);
             assert!(matches!(app.stack.last(), Some(View::Tree { .. })));
+        });
+    }
+
+    #[test]
+    fn the_merge_dialog_names_the_projects_method_and_its_gate() {
+        with_app(|app| {
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.method = crate::pr::MergeMethod::Rebase;
+                }
+            }
+            app.open_tree("acme", Some("t-0004"));
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(text.contains("Rebase and merge, then"), "{text}");
+            press(app, crossterm::event::KeyCode::Esc);
+
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.gated = true;
+                }
+            }
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(
+                text.contains("If the merge gate passes, rebase and merge, then"),
+                "{text}"
+            );
+            press(app, crossterm::event::KeyCode::Esc);
+
+            // A refusal on this commit is shown, and a merge asks again.
+            for node in app.snap.projects.iter_mut().flat_map(|p| &mut p.threads) {
+                if let Some(pr) = &mut node.pr {
+                    pr.gate_refusal = Some("rev-u2 has not passed it".into());
+                }
+            }
+            press(app, crossterm::event::KeyCode::Char('m'));
+            let text = app.render(90, 29).text();
+            assert!(
+                text.contains("Gate refused this commit: rev-u2 has not passed it"),
+                "{text}"
+            );
+            assert!(text.contains("↵ merge"), "{text}");
         });
     }
 

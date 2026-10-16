@@ -534,12 +534,13 @@ enum ThreadCommand {
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
-    /// Merge the thread's pull request: only when it is open, approved and every check passed
+    /// Merge the thread's pull request: only when it is open, approved and every check passed, or its project's merge gate passes
     Merge {
         slug: String,
         id: String,
-        #[arg(long, value_enum, default_value_t = pr::MergeMethod::Squash)]
-        method: pr::MergeMethod,
+        /// Default: the project's `merge_method` in config.toml, else squash
+        #[arg(long, value_enum)]
+        method: Option<pr::MergeMethod>,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
@@ -1308,6 +1309,10 @@ pub fn run() -> Result<()> {
                 let project = Project::load(&ctx.root, &slug)?;
                 threads::refuse_agent_pane(&ctx, &project, "`thread merge`")?;
                 let record = thread::load(&project, &id)?;
+                let method = match method {
+                    Some(method) => method,
+                    None => project.safety(&ctx.config_dir)?.merge_method,
+                };
                 steps::merge_pull_request(&ctx, &project, &id, method)?;
                 // The merge already happened; a missing item must not report failure.
                 if let Err(error) = inbox::write(
