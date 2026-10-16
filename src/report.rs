@@ -5,7 +5,6 @@
 //! and the popup.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,8 +12,6 @@ use crate::thread::is_real_dir;
 
 pub const MAX_SUMMARY_CHARS: usize = 600;
 pub const MAX_CAPTURES: usize = 24;
-/// What a report without a `## Captures` list shows: its newest images.
-pub const NEWEST_CAPTURES: usize = 12;
 pub const MAX_DELIVERABLES: usize = 10;
 
 /// The `Status:` line of a report.
@@ -55,9 +52,6 @@ pub struct Deliverable {
 
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 const DOCUMENT_KINDS: [&str; 3] = ["html", "pdf", "md"];
-/// Entries the newest-images walk looks at, so a large library cannot slow
-/// down every `--json` read.
-const MAX_SCANNED: usize = 4096;
 
 /// The home copy of a thread's report in a project folder, empty without one.
 pub fn home_text(project_dir: &Path, id: &str) -> String {
@@ -89,19 +83,12 @@ pub fn summary(report: &str) -> Option<String> {
 }
 
 /// The images listed under `## Captures` as `- <path> - <caption>` (or with
-/// an em dash), the path relative to the library; or the newest images of
-/// the library when the report lists none.
+/// an em dash), the path relative to the library.
 pub fn captures(report: &str, library: &Path) -> Vec<Capture> {
-    let items: Vec<&str> = section(report, "Captures")
-        .into_iter()
-        .filter_map(|line| {
-            let line = line.trim();
-            line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
-        })
-        .collect();
-    if items.is_empty() {
-        return newest_images(library);
-    }
+    let items = section(report, "Captures").into_iter().filter_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+    });
     let mut found: Vec<Capture> = Vec::new();
     for item in items {
         let (path, caption) = item
@@ -199,54 +186,6 @@ fn library_file(library: &Path, relative: &str) -> Option<PathBuf> {
         .then_some(path)
 }
 
-/// The `NEWEST_CAPTURES` most recently modified images anywhere under the
-/// library, without following symbolic links or entering hidden folders.
-fn newest_images(library: &Path) -> Vec<Capture> {
-    let mut found = Vec::new();
-    if is_real_dir(library) {
-        let mut budget = MAX_SCANNED;
-        walk_images(library, &mut budget, &mut found);
-    }
-    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    found
-        .into_iter()
-        .take(NEWEST_CAPTURES)
-        .map(|(_, path)| Capture {
-            path,
-            caption: String::new(),
-        })
-        .collect()
-}
-
-fn walk_images(dir: &Path, budget: &mut usize, found: &mut Vec<(SystemTime, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if *budget == 0 {
-            return;
-        }
-        *budget -= 1;
-        // `file_type` and `metadata` of a directory entry do not follow links.
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if hidden(&entry) {
-            continue;
-        }
-        let path = entry.path();
-        if kind.is_dir() {
-            walk_images(&path, budget, found);
-        } else if kind.is_file() {
-            let path = path.to_string_lossy().into_owned();
-            if has_extension(&path, &IMAGE_EXTENSIONS) {
-                let modified = entry.metadata().and_then(|m| m.modified());
-                found.push((modified.unwrap_or(SystemTime::UNIX_EPOCH), path));
-            }
-        }
-    }
-}
-
 fn has_extension(path: &str, extensions: &[&str]) -> bool {
     Path::new(path)
         .extension()
@@ -261,23 +200,12 @@ fn hidden(entry: &std::fs::DirEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, SystemTime};
 
     fn put(dir: &Path, rel: &str) -> PathBuf {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"x").unwrap();
         path
-    }
-
-    fn aged(path: &Path, seconds: u64) {
-        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + seconds);
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(time)
-            .unwrap();
     }
 
     fn shown(captures: &[Capture], library: &Path) -> Vec<(String, String)> {
@@ -397,7 +325,7 @@ mod tests {
                 .iter()
                 .all(|c| Path::new(&c.path).is_absolute())
         );
-        // A list whose files are all gone shows nothing, not the newest images.
+        // A list whose files are all gone shows nothing.
         assert!(captures("## Captures\n- gone.png - x\n", &library).is_empty());
     }
 
@@ -417,15 +345,10 @@ mod tests {
             shown(&captures(report, &library), &library),
             [("real.png".to_string(), "c".to_string())]
         );
-        // Nor does the fallback, and a linked library shows nothing at all.
-        assert_eq!(
-            shown(&captures("", &library), &library),
-            [("real.png".to_string(), String::new())]
-        );
+        // A linked library shows nothing at all.
         let linked_library = home.path().join("library/t-0002");
         symlink(&library, &linked_library).unwrap();
         assert!(captures(report, &linked_library).is_empty());
-        assert!(captures("", &linked_library).is_empty());
         assert!(deliverables(&linked_library).is_empty());
     }
 
@@ -445,38 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn without_a_list_the_twelve_newest_images_show_from_any_subfolder() {
+    fn a_report_without_a_list_shows_no_captures() {
         let home = tempfile::tempdir().unwrap();
         let library = home.path().join("library/t-0001");
-        assert!(
-            captures("## Report\n", &library).is_empty(),
-            "no library yet"
-        );
-        for n in 0..14u64 {
-            let rel = if n % 2 == 0 {
-                format!("i{n:02}.png")
-            } else {
-                format!("deep/er/i{n:02}.gif")
-            };
-            aged(&put(&library, &rel), n);
+        put(&library, "shot.png");
+        put(&library, "deep/er/other.gif");
+        for report in ["", "## Report\nno list\n", "## Captures\nnone this time\n"] {
+            assert!(captures(report, &library).is_empty(), "{report:?}");
         }
-        aged(&put(&library, "newest.pdf"), 100);
-        aged(&put(&library, ".hidden.png"), 100);
-        let newest = captures(
-            "## Report\nno list\n## Captures\nnone this time\n",
-            &library,
-        );
-        let names: Vec<String> = shown(&newest, &library)
-            .into_iter()
-            .map(|(path, caption)| {
-                assert!(caption.is_empty());
-                path
-            })
-            .collect();
-        assert_eq!(names.len(), NEWEST_CAPTURES);
-        assert_eq!(names[0], "deep/er/i13.gif");
-        assert_eq!(names[1], "i12.png");
-        assert_eq!(names[11], "i02.png");
     }
 
     #[test]
