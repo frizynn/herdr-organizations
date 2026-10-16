@@ -56,7 +56,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `counts` | object | Group token to number of threads. Groups with no threads are left out. |
 | `icon` | string | The glyph name the user picked, empty when none was picked. |
 | `tone` | string | The colour name the user picked, empty when none was picked. |
-| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`. `null` when it does not exist. |
+| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, in the project's records folder. `null` when it does not exist. |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -72,7 +72,8 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `repos` | `[{path, machine}]` | `machine` is empty for this machine. `path` is as it is on that machine. |
 | `coordinator_profile`, `thread_profile` | string | The default profiles. |
 | `max_parallel_threads`, `auto_resolve_days` | number | |
-| `nudge`, `mute` | bool | |
+| `nudge`, `mute`, `progress`, `turn_reminder` | bool | What runs in the project's panes ([operations](operations.md#what-runs-and-where-records-go)). |
+| `records` | string | Absolute path of the folder that holds its reports, task files, libraries and status files: the `records` setting, else `dir`. |
 
 ## Thread
 
@@ -110,7 +111,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `state_line` | string | The sidebar's state line as the ticker last computed it (`needs you · ~55%`). |
 | `activity`, `percent` | string, number or `null` | The agent's own last progress report (`report`); local threads only. |
 | `next` | [string] | The `## Next` list of its report, then lines the coordinator added. |
-| `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. |
+| `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. It is in the project's records folder. |
 | `library` | string | Absolute path of the folder for files it produced. |
 | `verdict` | `"done"`, `"needs-decision"`, `"blocked"`, `"failed"` or `null` | The `Status:` line of its report, above the first `##` section. Any other value, or no such line, is `null`. |
 | `summary` | string or `null` | The `## Summary` section of its report, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
@@ -118,7 +119,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `deliverables` | `[{path, kind}]` | Regular `html` and `pdf` files directly in `library` (not in subfolders, not hidden), `kind` being the extension in lower case; at most 10, by name. `path` is absolute. |
 | `task` | string | The title of the `TASKS.md` task it was delegated from (`--from-task`), as written there when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
-| `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md`. `null` for every other node and while the file is missing. |
+| `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md` in the project's records folder. `null` for every other node and while the file is missing. |
 
 ## Status file
 
