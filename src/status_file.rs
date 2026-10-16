@@ -32,7 +32,7 @@ pub const NODE_STALE: &str =
 
 /// The root coordinator's status file.
 pub fn root(project: &Project) -> PathBuf {
-    project.dir().join(NAME)
+    crate::records::root_status(&project.records_dir())
 }
 
 /// The root's status file, empty when it is missing.

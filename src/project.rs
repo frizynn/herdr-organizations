@@ -161,7 +161,24 @@ pub struct Settings {
     pub icon: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tone: String,
+    /// Where the records a person reads later go (`crate::records`): an
+    /// absolute folder outside the projects root. Empty, the default: the
+    /// project folder.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub records: String,
+    /// Progress self-reporting in the project's panes: the hooks'
+    /// instructions and reminders, and the briefs' progress section.
+    #[serde(skip_serializing_if = "is_true")]
+    pub progress: bool,
+    /// What the hook adds after a prompt the user typed: the progress
+    /// reminder and a coordinator node's stale status line.
+    #[serde(skip_serializing_if = "is_true")]
+    pub turn_reminder: bool,
     pub repos: Vec<Repo>,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for Settings {
@@ -180,6 +197,9 @@ impl Default for Settings {
             mute: false,
             icon: String::new(),
             tone: String::new(),
+            records: String::new(),
+            progress: true,
+            turn_reminder: true,
             repos: Vec::new(),
         }
     }
@@ -389,6 +409,17 @@ impl Project {
 
     pub fn state_dir(&self) -> PathBuf {
         self.dir().join(".state")
+    }
+
+    /// The folder of the records a person reads later (`crate::records`):
+    /// `records` in PROJECT.md, else the project folder. Read from the file
+    /// on every call, so a `set` takes effect at once.
+    pub fn records_dir(&self) -> PathBuf {
+        let value = self
+            .read_project_md()
+            .map(|(settings, _)| settings.records)
+            .unwrap_or_default();
+        crate::records::resolve(&self.dir(), &value)
     }
 
     /// The canonical folder (symlinks resolved): the key of the project's
@@ -777,11 +808,14 @@ pub const SUBDIRS: [&str; 9] = [
 /// working directory, and tab threads run under `threads/<id>/`, so it says
 /// who is who by working directory. `prefix` is `<absolute binary> --root
 /// <root>`: bare `hp` is on no harness's `PATH`.
-pub fn agents_md(name: &str, slug: &str, prefix: &str) -> String {
+pub fn agents_md(name: &str, slug: &str, prefix: &str, status: Option<&str>) -> String {
+    let status = status
+        .map(|path| format!(" Your status file is `{path}`."))
+        .unwrap_or_default();
     format!(
         "# {name}\n\n\
          This folder is the home of the Herdr project \"{name}\" (`{slug}`). Written by herdr-projects; `doctor --fix` refreshes it.\n\n\
-         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, and run `{prefix} context {slug}` now and whenever you need project state.\n\n\
+         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, and run `{prefix} context {slug}` now and whenever you need project state.{status}\n\n\
          If your working directory is under `threads/`, you are a thread: your brief is in your own folder (`.herdr-project/{slug}-<id>/brief.md`); ignore the rest of this file.\n"
     )
 }
@@ -830,7 +864,13 @@ pub fn write_priming(project: &Project, prefix: &str) -> Result<()> {
             std::fs::rename(&agents, &kept)?;
         }
     }
-    write_atomic(&agents, agents_md(&name, &project.slug, prefix).as_bytes())?;
+    // Named only when it is not the STATUS.md beside it, in a records folder.
+    let status = crate::status_file::root(project);
+    let elsewhere = (!status.starts_with(&dir)).then(|| status.display().to_string());
+    write_atomic(
+        &agents,
+        agents_md(&name, &project.slug, prefix, elsewhere.as_deref()).as_bytes(),
+    )?;
     let claude = dir.join("CLAUDE.md");
     let link_ok = std::fs::read_link(&claude).is_ok_and(|target| target == Path::new("AGENTS.md"));
     if !link_ok {
@@ -849,19 +889,22 @@ pub fn write_priming(project: &Project, prefix: &str) -> Result<()> {
     if !dir.join("uploads").is_dir() {
         std::fs::create_dir(dir.join("uploads"))?;
     }
-    if let Some(handoff) = handoff_to_rename(&dir) {
-        std::fs::rename(handoff, dir.join(crate::status_file::NAME))?;
+    if let Some(handoff) = handoff_to_rename(&dir, &status) {
+        // A records folder on another disk cannot take a rename.
+        std::fs::rename(&handoff, &status).or_else(|_| {
+            std::fs::copy(&handoff, &status).and_then(|_| std::fs::remove_file(&handoff))
+        })?;
     }
     write_default_routine(project)?;
     Ok(())
 }
 
 /// A project from before STATUS.md kept the coordinator's state in
-/// HANDOFF.md: priming renames it while nothing is at STATUS.md, so the
-/// coordinator keeps what it wrote.
-fn handoff_to_rename(dir: &Path) -> Option<PathBuf> {
+/// HANDOFF.md: priming renames it to the root's status file while nothing
+/// is there, so the coordinator keeps what it wrote.
+fn handoff_to_rename(dir: &Path, status: &Path) -> Option<PathBuf> {
     let handoff = dir.join("HANDOFF.md");
-    let free = std::fs::symlink_metadata(dir.join(crate::status_file::NAME)).is_err();
+    let free = std::fs::symlink_metadata(status).is_err();
     (free && std::fs::symlink_metadata(&handoff).is_ok_and(|m| m.is_file())).then_some(handoff)
 }
 
@@ -898,7 +941,7 @@ pub fn priming_problems(project: &Project, prefix: &str) -> Vec<String> {
     if !dir.join(PR_FOLLOWUP).exists() {
         problems.push("routines/pr-followup.md is missing".into());
     }
-    if handoff_to_rename(&dir).is_some() {
+    if handoff_to_rename(&dir, &crate::status_file::root(project)).is_some() {
         problems.push("HANDOFF.md is not renamed to STATUS.md yet".into());
     }
     problems
@@ -1153,6 +1196,10 @@ mod tests {
         assert!(text.contains(&format!("`{prefix} skill`")));
         assert!(text.contains(&format!("`{prefix} context demo-project`")));
         assert!(text.contains("under `threads/`, you are a thread"));
+        assert!(
+            !text.contains("Your status file"),
+            "STATUS.md beside it needs no word"
+        );
         assert_eq!(prefix_in_agents_md(&text).as_deref(), Some(prefix.as_str()));
         assert_eq!(
             std::fs::read_link(project.dir().join("CLAUDE.md")).unwrap(),
@@ -1163,7 +1210,12 @@ mod tests {
 
         // Idempotent, and a stale binary path is reported.
         write_priming(&project, &prefix).unwrap();
-        let stale = agents_md("Demo Project", "demo-project", "/no/such/binary --root /r");
+        let stale = agents_md(
+            "Demo Project",
+            "demo-project",
+            "/no/such/binary --root /r",
+            None,
+        );
         std::fs::write(project.dir().join("AGENTS.md"), stale).unwrap();
         let problems = priming_problems(&project, &prefix);
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1246,6 +1298,34 @@ mod tests {
         assert!(parse_project_md("+++\nname = \"X\"\n").is_err());
         let (_, body) = parse_project_md("+++\nname = \"X\"\n+++").unwrap();
         assert_eq!(body, "");
+    }
+
+    /// Settings are read without `deny_unknown_fields`, so a binary from
+    /// before a key reads a PROJECT.md that has it, and one from after reads
+    /// a PROJECT.md without it by its default.
+    #[test]
+    fn keys_a_binary_does_not_know_are_ignored_and_missing_ones_default() {
+        let (settings, _) = parse_project_md(
+            "+++\nname = \"X\"\nrecords = \"/v\"\nprogress = false\na_later_key = 1\n+++\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                settings.records.as_str(),
+                settings.progress,
+                settings.turn_reminder
+            ),
+            ("/v", false, true)
+        );
+        let (settings, _) = parse_project_md("+++\nname = \"X\"\n+++\n").unwrap();
+        assert_eq!(
+            (
+                settings.records.as_str(),
+                settings.progress,
+                settings.turn_reminder
+            ),
+            ("", true, true)
+        );
     }
 
     #[test]

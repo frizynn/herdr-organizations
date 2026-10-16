@@ -15,6 +15,44 @@ fn hp(home: &Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+/// `skill` from a project's folder ends with how to report progress, unless
+/// the project turned `progress` off.
+#[test]
+fn the_skill_leaves_out_progress_for_a_project_that_turned_it_off() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let root_arg = root.to_str().unwrap();
+    assert!(
+        hp(home.path(), &["--root", root_arg, "new", "Demo"])
+            .status
+            .success()
+    );
+    let skill = || {
+        let out = Command::new(BIN)
+            .env_clear()
+            .env("HOME", home.path())
+            .current_dir(root.join("demo"))
+            .args(["--root", root_arg, "skill"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(skill().contains("\n## Progress\n"));
+    let set = hp(
+        home.path(),
+        &["--root", root_arg, "set", "demo", "progress", "false"],
+    );
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let text = skill();
+    assert!(!text.contains("## Progress"), "{text}");
+    assert!(!text.contains(" report --percent"), "{text}");
+}
+
 #[test]
 fn context_prints_a_usable_prefix_in_a_scrubbed_environment() {
     let home = tempfile::tempdir().unwrap();

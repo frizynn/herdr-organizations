@@ -129,7 +129,12 @@ pub fn adopt(
     let briefed = (|| -> Result<()> {
         {
             let _lock = project.lock()?;
-            project::write_atomic(&thread::task_path(&project, &id), task.as_bytes())?;
+            let records = project.records_dir();
+            crate::records::write(
+                &records,
+                &crate::records::task(&records, &id),
+                task.as_bytes(),
+            )?;
         }
         // Two adopted panes in one directory still get separate thread directories.
         let dir = thread::thread_dir(&agent.cwd, slug, &id);

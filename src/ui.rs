@@ -564,18 +564,26 @@ fn text_column(line: Line, node: &Node) -> Line {
     )
 }
 
+/// The folder of a project's reports and status files: the project folder
+/// in a view written before `records` existed.
+fn records_dir(project: &ProjectView) -> std::path::PathBuf {
+    let records = if project.records.is_empty() {
+        &project.dir
+    } else {
+        &project.records
+    };
+    std::path::PathBuf::from(records)
+}
+
 /// The STATUS.md a coordinator keeps: the project's for `root`, its own for
 /// a coordinator node; `None` for a worker.
 fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf> {
-    let dir = std::path::Path::new(&project.dir);
+    let records = records_dir(project);
     if node.id == ROOT_ID {
-        return Some(dir.join(crate::status_file::NAME));
+        return Some(crate::records::root_status(&records));
     }
-    (node.role == NodeRole::Coordinator.as_str()).then(|| {
-        dir.join("nodes")
-            .join(&node.id)
-            .join(crate::status_file::NAME)
-    })
+    (node.role == NodeRole::Coordinator.as_str())
+        .then(|| crate::records::node_status(&records, &node.id))
 }
 
 /// A node as the screens name it: the root is "Coordinator".
@@ -1658,7 +1666,7 @@ impl<'a> App<'a> {
             }
             y += 3;
         }
-        let report_text = report::home_text(std::path::Path::new(&project.dir), &node.id);
+        let report_text = report::home_text(&records_dir(&project), &node.id);
         let verdict = report::verdict(&report_text);
         let summary = report::summary(&report_text);
         let first_line = summary.as_deref().and_then(|s| s.lines().next());
@@ -4698,6 +4706,48 @@ mod tests {
         assert!(!text.contains("STATUS"), "{text}");
         press(&mut app, crossterm::event::KeyCode::Enter);
         assert!(!app.close);
+    }
+
+    /// With `records` set, a coordinator's status file and a thread's report
+    /// are read from there.
+    #[test]
+    fn the_detail_reads_status_files_and_reports_from_the_records_folder() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        let vault = world.home.path().join("vault");
+        std::fs::create_dir_all(dir.join("nodes/t-0001")).unwrap();
+        std::fs::create_dir_all(vault.join("nodes/t-0001")).unwrap();
+        std::fs::create_dir_all(vault.join("threads")).unwrap();
+        std::fs::write(
+            vault.join("nodes/t-0001/STATUS.md"),
+            "Objective: VAULT-NODE\n",
+        )
+        .unwrap();
+        std::fs::write(vault.join("STATUS.md"), "Objective: VAULT-ROOT\n").unwrap();
+        std::fs::write(dir.join("STATUS.md"), "Objective: OLD-ROOT\n").unwrap();
+        std::fs::write(
+            vault.join("threads/t-0004.md"),
+            "Status: done\n## Summary\nVAULT-SUMMARY\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        app.snap.projects[0].records = vault.to_string_lossy().into_owned();
+
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0001");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: VAULT-NODE"), "{text}");
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "root");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("Objective: VAULT-ROOT"), "{text}");
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("VAULT-SUMMARY"), "{text}");
     }
 
     /// A thread's details name its report's verdict and the first line of its

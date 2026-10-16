@@ -214,6 +214,12 @@ pub enum Seat {
 }
 
 impl Seat {
+    pub fn project(&self) -> &crate::project::Project {
+        match self {
+            Seat::Root(project) | Seat::Node(project, _) => project,
+        }
+    }
+
     pub fn role(&self) -> PaneRole {
         match self {
             Seat::Root(_) => PaneRole::Coordinator,
@@ -351,6 +357,42 @@ pub fn note_human_prompt(seat: &Seat, event: &serde_json::Value, now: i64) -> Op
         }
         Seat::Node(..) => None,
     }
+}
+
+/// The hook's whole answer in a project's pane: what [`respond`] gives
+/// while the project has `progress` on, and a coordinator node's stale
+/// status line. After a prompt the user typed, nothing while it has
+/// `turn_reminder` off; the prompt's time is recorded either way.
+pub fn answer(
+    seat: &Seat,
+    settings: &crate::project::Settings,
+    record: &mut Record,
+    event: &serde_json::Value,
+    prefix: &str,
+    now: i64,
+) -> Option<String> {
+    let progress = settings
+        .progress
+        .then(|| respond(record, event, seat.role(), prefix, now))
+        .flatten();
+    let stale = note_human_prompt(seat, event, now);
+    if event["hook_event_name"] == "UserPromptSubmit" && !settings.turn_reminder {
+        return None;
+    }
+    let parts: Vec<String> = [progress, stale].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// Whether `skill` run from `dir` should teach progress reporting: false
+/// only in the folder of a project with `progress` off.
+pub fn taught_in(root: &Path, dir: &Path) -> bool {
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    crate::project::list_slugs(root)
+        .iter()
+        .filter_map(|slug| crate::project::Project::load(root, slug).ok())
+        .find(|project| project.canonical_dir() == dir)
+        .and_then(|project| project.read_project_md().ok())
+        .is_none_or(|(settings, _)| settings.progress)
 }
 
 /// `report --percent N|--unknown --activity "..."`, run by the agent in its
@@ -632,13 +674,12 @@ pub fn hook(ctx: &Ctx, agent: &str) -> Result<()> {
     let prefix = crate::coordinator::current_prefix(&ctx.root)?;
     let before = record.clone();
     let now = now();
-    let mut text = respond(&mut record, &event, seat.role(), &prefix, now);
-    if let Some(line) = note_human_prompt(&seat, &event, now) {
-        text = Some(match text {
-            Some(text) => format!("{text}\n\n{line}"),
-            None => line,
-        });
-    }
+    let settings = seat
+        .project()
+        .read_project_md()
+        .map(|(settings, _)| settings)
+        .unwrap_or_default();
+    let text = answer(&seat, &settings, &mut record, &event, &prefix, now);
     if kind == "SessionStart" {
         record.session_id = event["session_id"].as_str().unwrap_or("").to_string();
     }
@@ -984,6 +1025,139 @@ mod tests {
         note_human_prompt(&seat, &prompt("And the docs"), 300);
         let previous = crate::status_file::previous_ask(&project, crate::status_file::ROOT_KEY);
         assert_eq!(previous, Some(100));
+    }
+
+    /// A coordinator node whose STATUS.md is older than the user's previous
+    /// message.
+    fn stale_node() -> (tempfile::TempDir, Seat) {
+        let home = tempfile::tempdir().unwrap();
+        let project = crate::project::create(home.path(), "demo", "", vec![]).unwrap();
+        let node = crate::thread::Thread {
+            id: "t-0001".into(),
+            role: crate::thread::NodeRole::Coordinator,
+            can_spawn: true,
+            ..Default::default()
+        };
+        crate::status_file::record_ask(&project, "t-0001", 1).unwrap();
+        (home, Seat::Node(project, Box::new(node)))
+    }
+
+    fn settings(progress: bool, turn_reminder: bool) -> crate::project::Settings {
+        crate::project::Settings {
+            progress,
+            turn_reminder,
+            ..Default::default()
+        }
+    }
+
+    /// What every event answers in a project that configures neither switch:
+    /// the same text the hook gave before they existed.
+    #[test]
+    fn with_both_switches_on_the_hook_says_what_it_always_said() {
+        let on = settings(true, true);
+        let (_home, seat) = stale_node();
+        let mut record = Record {
+            pane_id: "w1:p1".into(),
+            ..Record::default()
+        };
+        assert_eq!(
+            answer(&seat, &on, &mut record, &event("SessionStart"), "hp", 1000),
+            Some(instructions("hp", "w1:p1"))
+        );
+        assert_eq!(
+            answer(&seat, &on, &mut record, &prompt("Plan it"), "hp", 2000),
+            Some(format!(
+                "Before task tools or a blocking question, check whether this request starts new work; if so report a fresh estimate. Then report before waiting for the user, for example `hp report --unknown --activity 'Waiting for you'`.\n\n{}",
+                crate::status_file::NODE_STALE
+            ))
+        );
+        let worker = Seat::Root(seat.project().clone());
+        let mut record = Record::default();
+        assert_eq!(
+            answer(&worker, &on, &mut record, &event("PostToolUse"), "hp", 9000),
+            None,
+            "the root gets no check-in"
+        );
+        let node = crate::thread::Thread::default();
+        let worker = Seat::Node(seat.project().clone(), Box::new(node));
+        assert_eq!(
+            answer(&worker, &on, &mut record, &event("PostToolUse"), "hp", 9000),
+            Some(reminder("hp"))
+        );
+    }
+
+    /// `progress = false`: no instructions, no reminder, no check-in, in any
+    /// pane of the project. The stale status line is not progress.
+    #[test]
+    fn progress_off_gives_no_progress_text_anywhere() {
+        let off = settings(false, true);
+        let (_home, seat) = stale_node();
+        let mut record = Record::default();
+        assert_eq!(
+            answer(&seat, &off, &mut record, &event("SessionStart"), "hp", 1000),
+            None
+        );
+        assert_eq!(
+            answer(&seat, &off, &mut record, &prompt("Plan it"), "hp", 2000),
+            Some(crate::status_file::NODE_STALE.to_string())
+        );
+        for seat in [
+            Seat::Root(seat.project().clone()),
+            Seat::Node(seat.project().clone(), Box::default()),
+        ] {
+            let mut record = Record::default();
+            for kind in ["SessionStart", "PostToolUse"] {
+                assert_eq!(
+                    answer(&seat, &off, &mut record, &event(kind), "hp", 9000),
+                    None,
+                    "{kind}"
+                );
+            }
+            assert_eq!(
+                answer(&seat, &off, &mut record, &prompt("Go"), "hp", 9001),
+                None
+            );
+        }
+    }
+
+    /// `turn_reminder = false`: nothing after a prompt the user typed, while
+    /// the time of the prompt is still recorded for `status-stale`.
+    #[test]
+    fn turn_reminder_off_adds_nothing_after_a_typed_prompt_and_still_records_it() {
+        let off = settings(true, false);
+        let (_home, seat) = stale_node();
+        let mut record = Record {
+            pane_id: "w1:p1".into(),
+            ..Record::default()
+        };
+        assert_eq!(
+            answer(&seat, &off, &mut record, &prompt("Plan it"), "hp", 2000),
+            None
+        );
+        assert_eq!(
+            crate::status_file::previous_ask(seat.project(), "t-0001"),
+            Some(1),
+            "the prompt was recorded"
+        );
+        assert_eq!(
+            answer(&seat, &off, &mut record, &event("SessionStart"), "hp", 3000),
+            Some(instructions("hp", "w1:p1")),
+            "progress itself stays on"
+        );
+        let root = Seat::Root(seat.project().clone());
+        assert_eq!(
+            answer(&root, &off, &mut record, &prompt("Next"), "hp", 4000),
+            None
+        );
+        assert_eq!(
+            crate::status_file::previous_ask(seat.project(), crate::status_file::ROOT_KEY),
+            None
+        );
+        answer(&root, &off, &mut record, &prompt("Again"), "hp", 5000);
+        assert_eq!(
+            crate::status_file::previous_ask(seat.project(), crate::status_file::ROOT_KEY),
+            Some(4000)
+        );
     }
 
     #[test]

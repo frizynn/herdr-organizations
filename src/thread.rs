@@ -245,16 +245,16 @@ pub fn record_path(project: &Project, id: &str) -> PathBuf {
 }
 
 pub fn task_path(project: &Project, id: &str) -> PathBuf {
-    threads_dir(project).join(format!("{id}.task.md"))
+    crate::records::task(&project.records_dir(), id)
 }
 
 pub fn home_report_path(project: &Project, id: &str) -> PathBuf {
-    home_report_in(&project.dir(), id)
+    crate::records::report(&project.records_dir(), id)
 }
 
-/// [`home_report_path`] for a project folder.
-pub fn home_report_in(project_dir: &Path, id: &str) -> PathBuf {
-    project_dir.join("threads").join(format!("{id}.md"))
+/// The home copy of the files a thread produced.
+pub fn home_library_path(project: &Project, id: &str) -> PathBuf {
+    crate::records::library(&project.records_dir(), id)
 }
 
 pub fn load(project: &Project, id: &str) -> Result<Thread> {
@@ -351,7 +351,8 @@ pub fn agent_name(slug: &str, id: &str) -> String {
 /// with a timestamp, so a restarted thread re-reads it with its task.
 pub fn append_follow_up(project: &Project, id: &str, text: &str) -> Result<()> {
     let _lock = project.lock()?;
-    let path = task_path(project, id);
+    let records = project.records_dir();
+    let path = crate::records::task(&records, id);
     let mut task = std::fs::read_to_string(&path).unwrap_or_default();
     if !task.ends_with('\n') && !task.is_empty() {
         task.push('\n');
@@ -360,7 +361,25 @@ pub fn append_follow_up(project: &Project, id: &str, text: &str) -> Result<()> {
         task.push_str("\n## Follow-ups\n");
     }
     task.push_str(&format!("\n### {}\n\n{}\n", project::now(), text.trim()));
-    write_atomic(&path, task.as_bytes())
+    crate::records::write(&records, &path, task.as_bytes())
+}
+
+/// Writes the home copy of a thread's report, its path found under the
+/// project lock.
+fn write_home_report(project: &Project, id: &str, bytes: &[u8]) -> Result<()> {
+    let _lock = project.lock()?;
+    let records = project.records_dir();
+    crate::records::write(&records, &crate::records::report(&records, id), bytes)
+}
+
+/// Makes a thread's home library folder, its path found under the project
+/// lock, and returns it.
+fn make_home_library(project: &Project, id: &str) -> Result<PathBuf> {
+    let _lock = project.lock()?;
+    let records = project.records_dir();
+    let library = crate::records::library(&records, id);
+    crate::records::make_folder(&records, &library)?;
+    Ok(library)
 }
 
 /// The lines of a report's `## Next` section: one recommended action per
@@ -399,7 +418,7 @@ pub fn next_lines(report: &str) -> Vec<String> {
 
 /// Lines the coordinator added to a thread's Next list (`threads/<id>.next.md`).
 pub fn extra_next_path(project: &Project, id: &str) -> PathBuf {
-    threads_dir(project).join(format!("{id}.next.md"))
+    crate::records::next(&project.records_dir(), id)
 }
 
 /// The thread's Next list: the report's `## Next` lines, then the coordinator's.
@@ -453,6 +472,8 @@ pub struct BriefInput<'a> {
     /// `<binary> --root <root>` for `report`; empty for a remote thread,
     /// whose machine has its own binary (or none).
     pub report_prefix: &'a str,
+    /// The project's `progress`: off, the brief has no progress section.
+    pub progress: bool,
     /// A spawning coordinator node's status file: it then gets the
     /// coordinator-node brief instead of the thread brief. `None` for every
     /// other node.
@@ -570,12 +591,14 @@ pub fn compose_brief(input: &BriefInput) -> String {
     brief.push_str(input.node_protocol.trim());
     brief.push('\n');
 
-    brief.push_str("\n# Progress\n\n");
-    if input.report_prefix.is_empty() {
-        brief.push_str("Report progress with `herdr-projects report --percent N --activity '...'` if that command exists on this machine (use `--activity 'Waiting for you'` before asking the user something, and `--percent 100` when done); otherwise skip it.\n");
-    } else {
-        brief.push_str(&crate::progress::guidance(input.report_prefix, None));
-        brief.push('\n');
+    if input.progress {
+        brief.push_str("\n# Progress\n\n");
+        if input.report_prefix.is_empty() {
+            brief.push_str("Report progress with `herdr-projects report --percent N --activity '...'` if that command exists on this machine (use `--activity 'Waiting for you'` before asking the user something, and `--percent 100` when done); otherwise skip it.\n");
+        } else {
+            brief.push_str(&crate::progress::guidance(input.report_prefix, None));
+            brief.push('\n');
+        }
     }
     brief.push_str("\n# Task\n\n");
     brief.push_str(input.task.trim());
@@ -620,6 +643,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
         report_path: &thread.report_path(),
         library_path: &thread.library_path(),
         report_prefix,
+        progress: settings.progress,
         status: status.as_ref(),
     }))
 }
@@ -983,16 +1007,13 @@ pub fn copy_home_local(
         Ok(meta) if meta.is_file() => match std::fs::read(&report) {
             Ok(bytes) => {
                 let hash = sha256_hex(&bytes);
-                if hash != thread.report_hash || !home_report_path(project, &thread.id).is_file() {
-                    let written = project.lock().and_then(|_lock| {
-                        write_atomic(&home_report_path(project, &thread.id), &bytes)
-                    });
-                    if let Err(error) = written {
-                        return Copied {
-                            outcome: CopyOutcome::Failed(format!("{error:#}")),
-                            report_hash: None,
-                        };
-                    }
+                let stale =
+                    hash != thread.report_hash || !home_report_path(project, &thread.id).is_file();
+                if stale && let Err(error) = write_home_report(project, &thread.id, &bytes) {
+                    return Copied {
+                        outcome: CopyOutcome::Failed(format!("{error:#}")),
+                        report_hash: None,
+                    };
                 }
                 report_hash = Some(hash);
             }
@@ -1096,10 +1117,7 @@ pub fn copy_home_remote(
         let _ = std::fs::remove_file(&tmp);
         match fetched {
             Ok(bytes) => {
-                let written = project
-                    .lock()
-                    .and_then(|_lock| write_atomic(&home_report_path(project, &thread.id), &bytes));
-                if let Err(error) = written {
+                if let Err(error) = write_home_report(project, &thread.id, &bytes) {
                     return failed(format!("{error:#}"));
                 }
                 report_hash = Some(sha256_hex(&bytes));
@@ -1132,19 +1150,15 @@ pub fn copy_home_remote(
                     .iter()
                     .map(|p| format!("{p} is a symbolic link; it was not copied")),
             );
-            let target_dir = project.dir().join("library").join(&thread.id);
-            let made = project.lock().and_then(|_lock| {
-                if !target_dir.is_dir() {
-                    std::fs::create_dir(&target_dir)?;
+            let target_dir = match make_home_library(project, &thread.id) {
+                Ok(target_dir) => target_dir,
+                Err(error) => {
+                    return Copied {
+                        outcome: CopyOutcome::Failed(format!("{error:#}")),
+                        report_hash,
+                    };
                 }
-                Ok(())
-            });
-            if let Err(error) = made {
-                return Copied {
-                    outcome: CopyOutcome::Failed(format!("{error:#}")),
-                    report_hash,
-                };
-            }
+            };
             if let Err(error) =
                 remote::fetch_dir(runner, target, &thread.library_path(), &target_dir)
             {
@@ -1194,15 +1208,8 @@ fn copy_library_local(
         .map(|p| format!("{p} is a symbolic link; it was not copied"))
         .collect();
 
-    let target = project.dir().join("library").join(&thread.id);
-    {
-        let _lock = project.lock()?;
-        if !target.is_dir() {
-            // `create_dir`, not `create_dir_all`: never recreate a deleted project.
-            std::fs::create_dir(&target)
-                .with_context(|| format!("could not create {}", target.display()))?;
-        }
-    }
+    // Never a records folder that is gone, so never a deleted project.
+    let target = make_home_library(project, &thread.id)?;
     // `-rt` without `-l`: symbolic links are skipped, never followed.
     let out = runner.run(&Cmd::new("rsync", Duration::from_secs(60)).args([
         "-rt".to_string(),
@@ -1706,6 +1713,7 @@ mod tests {
             report_path: "/wt/.herdr-project/demo-t-0001/report.md",
             library_path: "/wt/.herdr-project/demo-t-0001/library",
             report_prefix: "/bin/hp --root /r",
+            progress: true,
             status: None,
         };
         let brief = compose_brief(&input);
@@ -1846,6 +1854,43 @@ mod tests {
         let copied = copy_home_local(&project, &t, true, &RealRunner);
         assert!(matches!(copied.outcome, CopyOutcome::Partial(_)));
         assert!(!project.dir().join("library/t-0001/link").exists());
+    }
+
+    #[test]
+    fn copies_report_and_library_into_the_records_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        // Written by hand: an empty folder, no `threads/` or `library/` yet.
+        let vault = work.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen(
+                "+++\n",
+                &format!("+++\nrecords = \"{}\"\n", vault.display()),
+                1,
+            ),
+        )
+        .unwrap();
+        let dir = work.path().join(".herdr-project/demo-t-0001");
+        let t = local_thread(&project, &dir);
+        std::fs::write(dir.join("report.md"), "## Report\nok\n").unwrap();
+        std::fs::write(dir.join("library/out.txt"), "data").unwrap();
+
+        let copied = copy_home_local(&project, &t, true, &RealRunner);
+        assert_eq!(copied.outcome, CopyOutcome::Complete);
+        assert_eq!(
+            std::fs::read_to_string(vault.join("threads/t-0001.md")).unwrap(),
+            "## Report\nok\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault.join("library/t-0001/out.txt")).unwrap(),
+            "data"
+        );
+        assert!(!project.dir().join("threads/t-0001.md").exists());
+        assert!(!project.dir().join("library/t-0001").exists());
     }
 
     #[test]

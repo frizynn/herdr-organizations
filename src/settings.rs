@@ -11,7 +11,7 @@ use crate::paths::Ctx;
 use crate::project::{self, Project, Settings};
 
 /// The keys `set` accepts, with what they hold.
-pub const KEYS: [(&str, &str); 12] = [
+pub const KEYS: [(&str, &str); 15] = [
     ("name", "text"),
     ("goal", "text"),
     ("icon", "glyph name, empty for the client's pick"),
@@ -22,6 +22,12 @@ pub const KEYS: [(&str, &str); 12] = [
     ("auto_resolve_days", "number (0 = never)"),
     ("nudge", "true/false"),
     ("mute", "true/false"),
+    ("progress", "true/false"),
+    ("turn_reminder", "true/false"),
+    (
+        "records",
+        "absolute folder for reports, task files, libraries and status files; empty for the project folder",
+    ),
     ("repos.add", "PATH or PATH@MACHINE"),
     ("repos.remove", "PATH"),
 ];
@@ -115,7 +121,18 @@ pub fn set_in(text: &str, key: &str, value: &str) -> Result<String> {
             }
             doc[key] = toml_edit::value(n);
         }
-        "nudge" | "mute" => doc[key] = toml_edit::value(parse_bool(value)?),
+        "nudge" | "mute" | "progress" | "turn_reminder" => {
+            doc[key] = toml_edit::value(parse_bool(value)?)
+        }
+        "records" if value.is_empty() => {
+            doc.remove(key);
+        }
+        "records" => {
+            if !Path::new(value).is_absolute() {
+                bail!("records must be an absolute folder, not `{value}`");
+            }
+            doc[key] = toml_edit::value(value);
+        }
         "icon" | "tone" if value.is_empty() => {
             doc.remove(key);
         }
@@ -205,17 +222,20 @@ pub fn set(ctx: &Ctx, slug: &str, key: &str, value: &str) -> Result<()> {
             slug,
         )?;
     }
-    let text = std::fs::read_to_string(project.project_md())?;
-    let edited = set_in(&text, key, value)?;
-    {
+    if key == "records" {
+        // Moves the records with the setting, under the lock.
+        println!("{slug}: {}", crate::records::set(ctx, &project, value)?);
+    } else {
+        let text = std::fs::read_to_string(project.project_md())?;
+        let edited = set_in(&text, key, value)?;
         let _lock = project.lock()?;
         project::write_atomic(&project.project_md(), edited.as_bytes())?;
+        println!("{slug}: {key} = {value}");
     }
-    if key == "name" {
-        // The priming file names the project.
+    if matches!(key, "name" | "records") {
+        // The priming file names the project and its status file.
         let _ = project::write_priming(&project, &crate::coordinator::current_prefix(&ctx.root)?);
     }
-    println!("{slug}: {key} = {value}");
     Ok(())
 }
 

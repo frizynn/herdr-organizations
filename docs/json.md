@@ -56,7 +56,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `counts` | object | Group token to number of threads. Groups with no threads are left out. |
 | `icon` | string | The glyph name the user picked, empty when none was picked. |
 | `tone` | string | The colour name the user picked, empty when none was picked. |
-| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`. `null` when it does not exist. |
+| `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, in the project's records folder. `null` when it does not exist. |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -72,7 +72,8 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `repos` | `[{path, machine}]` | `machine` is empty for this machine. `path` is as it is on that machine. |
 | `coordinator_profile`, `thread_profile` | string | The default profiles. |
 | `max_parallel_threads`, `auto_resolve_days` | number | |
-| `nudge`, `mute` | bool | |
+| `nudge`, `mute`, `progress`, `turn_reminder` | bool | What runs in the project's panes ([operations](operations.md#what-runs-and-where-records-go)). |
+| `records` | string | Absolute path of the folder that holds its reports, task files, libraries and status files: the `records` setting, else `dir`. |
 | `merge_gate` | string | The program of the project's [merge gate](operations.md#merge-gate), without its arguments; empty without one. |
 | `merge_method` | string | `squash`, `merge` or `rebase`: how the popup, auto-merge and `thread merge` without `--method` merge. |
 | `auto_merge` | bool | The ticker auto-merges every thread of the project. |
@@ -113,7 +114,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `state_line` | string | The sidebar's state line as the ticker last computed it (`needs you · ~55%`). |
 | `activity`, `percent` | string, number or `null` | The agent's own last progress report (`report`); local threads only. |
 | `next` | [string] | The `## Next` list of its report, then lines the coordinator added. |
-| `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. |
+| `report` | string or `null` | Absolute path of the home copy of its report, `null` before there is one. It is in the project's records folder. |
 | `library` | string | Absolute path of the folder for files it produced. |
 | `verdict` | `"done"`, `"needs-decision"`, `"blocked"`, `"failed"` or `null` | The `Status:` line of its report, above the first `##` section. Any other value, or no such line, is `null`. |
 | `summary` | string or `null` | The `## Summary` section of its report, trimmed, at most 600 characters. Written by the agent: show it as text. `null` when missing or empty. |
@@ -122,7 +123,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `task` | string | The title of the task it was delegated from (`--from-task`), as written in `TASKS.md` or the tracker when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 | `task_id` | string | The [tracker's](operations.md#tasks-from-a-tracker) id of that task. Present only for a thread started from a tracker's task. |
-| `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md`. `null` for every other node and while the file is missing. |
+| `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md` in the project's records folder. `null` for every other node and while the file is missing. |
 
 ## Status file
 
@@ -210,7 +211,7 @@ With a tracker, `TASKS.md` is not used: a client changes a task in the tracker i
 | `project` | string | The slug. |
 | `generated_at` | string | RFC 3339, when it was computed. |
 | `objective` | string | The status file's `Objective:` line. Empty without one. |
-| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing; with a tracker, when its list was last asked for); `tasks_source`, present only with a tracker (`tracker`, or `unavailable` when it did not answer); `status_file` (`STATUS.md`), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
+| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing; with a tracker, when its list was last asked for); `tasks_source`, present only with a tracker (`tracker`, or `unavailable` when it did not answer); `status_file` (where the root's status file is: `STATUS.md` in the project folder, else its absolute path in the records folder), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
 | `items` | [Status item] | One per task in `TASKS.md` (or the tracker), in its order, then one per thread that is not resolved and that no task names, in id order. |
 | `drift` | object | How many problems of each rule (`status_over_limit`, `status_stale`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
 | `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |

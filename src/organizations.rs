@@ -551,7 +551,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     })?;
 
     let scope = node_scope_dir(project, &record.id);
-    let task_path = thread::task_path(project, &record.id);
+    let records = project.records_dir();
+    let task_path = crate::records::task(&records, &record.id);
     if task_path.exists() {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
@@ -566,15 +567,12 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     };
     // The task line is linked last, still under the lock, so a failure leaves
     // neither a record nor a line naming one.
-    let written =
-        project::write_atomic(&task_path, args.task.as_bytes()).and_then(|()| {
-            match &args.request.from_task {
-                Some(title) if args.request.task_id.is_empty() => {
-                    link_task(project, title, &record.id)
-                }
-                _ => Ok(()),
-            }
-        });
+    let written = crate::records::write(&records, &task_path, args.task.as_bytes()).and_then(
+        |()| match &args.request.from_task {
+            Some(title) if args.request.task_id.is_empty() => link_task(project, title, &record.id),
+            _ => Ok(()),
+        },
+    );
     if let Err(error) = written {
         let _ = std::fs::remove_file(&task_path);
         let _ = std::fs::remove_dir_all(&scope);
@@ -584,6 +582,14 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         return Err(error)
             .with_context(|| format!("could not finish creating node `{}`", record.id));
+    }
+    // Its status file's folder, which in the project folder is its scope.
+    // The agent can make it too, so a failure here is not the node's.
+    if record.is_spawning_coordinator() {
+        let status = crate::records::node_status(&records, &record.id);
+        if let Some(folder) = status.parent() {
+            let _ = crate::records::make_folder(&records, folder);
+        }
     }
     Ok(record)
 }
@@ -841,7 +847,15 @@ pub struct NodeStatus {
 }
 
 pub fn status_path(project: &Project, id: &str) -> PathBuf {
-    node_scope_dir(project, id).join(crate::status_file::NAME)
+    crate::records::node_status(&project.records_dir(), id)
+}
+
+/// Whether a node's status file can be read: its folders are real ones, a
+/// symbolic link is refused. False while they do not exist.
+fn status_dir_exists(path: &Path) -> Result<bool> {
+    let dir = path.parent().context("a status file has no folder")?;
+    let nodes = dir.parent().context("a status folder has no parent")?;
+    Ok(optional_real_directory(nodes)? && optional_real_directory(dir)?)
 }
 
 /// The status file of a spawning coordinator node, read like a scoped memory
@@ -856,9 +870,10 @@ pub fn node_status(project: &Project, record: &Thread) -> Result<Option<NodeStat
     let path = status_path(project, &record.id);
     let label = format!("nodes/{}/{NAME}", record.id);
     let mut budget = ScopedMemoryBudget::new();
-    let mut text = match existing_node_scope(project, &record.id)? {
-        Some(_) => read_scoped_memory_file(&path, &label, &mut budget)?.unwrap_or_default(),
-        None => String::new(),
+    let mut text = if status_dir_exists(&path)? {
+        read_scoped_memory_file(&path, &label, &mut budget)?.unwrap_or_default()
+    } else {
+        String::new()
     };
     if text.chars().count() > MAX_CHARS {
         text.clear();
@@ -880,8 +895,9 @@ pub fn node_status_json(
     if !record.is_spawning_coordinator() {
         return None;
     }
-    existing_node_scope(project, &record.id).ok()??;
-    crate::status_file::read(&status_path(project, &record.id))
+    let path = status_path(project, &record.id);
+    status_dir_exists(&path).ok()?.then_some(())?;
+    crate::status_file::read(&path)
 }
 
 fn optional_real_directory(path: &Path) -> Result<bool> {
@@ -2179,6 +2195,83 @@ mod tests {
         // A restart composes the same brief, status file included.
         let restarted = thread::brief_for(&project, &coordinator, "task", true).unwrap();
         assert!(restarted.contains(&format!("STATUS-SENTINEL-{}", coordinator.id)));
+    }
+
+    /// `progress = false`: neither a worker's nor a coordinator node's brief
+    /// tells it to report progress.
+    #[test]
+    fn a_project_without_progress_briefs_no_progress_section() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        let worker = start(&project, &coordinator.id, NodeRole::Worker, None);
+        for node in [&coordinator, &worker] {
+            assert!(brief(&project, node).contains("\n# Progress\n"));
+        }
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen("+++\n", "+++\nprogress = false\n", 1),
+        )
+        .unwrap();
+        for node in [&coordinator, &worker] {
+            let text = brief(&project, node);
+            assert!(!text.contains("# Progress"), "{text}");
+            assert!(!text.contains(" report --percent"), "{text}");
+            assert!(text.contains("\n# Task\n"), "{text}");
+        }
+    }
+
+    /// With `records` set, a new node's task file is written there, and a
+    /// spawning coordinator's brief names and inlines its status file from
+    /// there; its scope stays in the project folder.
+    #[test]
+    fn a_nodes_task_and_status_file_live_in_the_records_folder() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let vault = world.home.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let text = std::fs::read_to_string(project.project_md()).unwrap();
+        std::fs::write(
+            project.project_md(),
+            text.replacen(
+                "+++\n",
+                &format!("+++\nrecords = \"{}\"\n", vault.display()),
+                1,
+            ),
+        )
+        .unwrap();
+        let coordinator = start(&project, ROOT_ID, NodeRole::Coordinator, None);
+        assert_eq!(
+            std::fs::read_to_string(vault.join(format!("threads/{}.task.md", coordinator.id)))
+                .unwrap(),
+            "task"
+        );
+        assert!(
+            !project
+                .dir()
+                .join("threads")
+                .join(format!("{}.task.md", coordinator.id))
+                .exists()
+        );
+        assert!(
+            node_scope_dir(&project, &coordinator.id)
+                .join("INSTRUCTIONS.md")
+                .is_file()
+        );
+        let status = vault.join("nodes").join(&coordinator.id).join("STATUS.md");
+        assert!(
+            status.parent().unwrap().is_dir(),
+            "its status folder is made"
+        );
+        std::fs::write(&status, "VAULT-STATUS").unwrap();
+        let own = brief(&project, &coordinator);
+        assert!(own.contains(&format!("`{}`", status.display())), "{own}");
+        assert!(own.contains("VAULT-STATUS"), "{own}");
+        assert_eq!(
+            node_status_json(&project, &coordinator).map(|s| s.text),
+            Some("VAULT-STATUS".into())
+        );
     }
 
     #[cfg(unix)]

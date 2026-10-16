@@ -792,13 +792,16 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
             );
             let _ = writeln!(
                 out,
-                "Settings: coordinator_profile={} thread_profile={} max_parallel_threads={} auto_resolve_days={} nudge={} mute={}",
+                "Settings: coordinator_profile={} thread_profile={} max_parallel_threads={} auto_resolve_days={} nudge={} mute={} progress={} turn_reminder={} records={}",
                 settings.coordinator_profile,
                 settings.thread_profile,
                 settings.max_parallel_threads,
                 settings.auto_resolve_days,
                 settings.nudge,
-                settings.mute
+                settings.mute,
+                settings.progress,
+                settings.turn_reminder,
+                crate::records::resolve(&project.dir(), &settings.records).display()
             );
             out.push_str(&crate::profiles::context_text(ctx, project, &settings));
             out.push_str(&crate::assign::context_line(ctx, project));
@@ -864,7 +867,9 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         }
     );
 
-    let _ = writeln!(out, "\n## Status ({})", status_file::NAME);
+    // Relative to the project folder when it is there, as before `records`.
+    let status = crate::records::shown(project, &status_file::root(project));
+    let _ = writeln!(out, "\n## Status ({status})");
     let text = status_file::root_text(project);
     let chars = text.chars().count();
     let bounded: String = text.chars().take(MAX_CHARS).collect();
@@ -872,7 +877,7 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         out,
         "{}",
         if bounded.trim().is_empty() {
-            format!("(none; coordinator must maintain {})", status_file::NAME)
+            format!("(none; coordinator must maintain {status})")
         } else if chars > MAX_CHARS {
             format!(
                 "{}\n\n(truncated after {MAX_CHARS} characters; compact {})",

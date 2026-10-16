@@ -141,7 +141,7 @@ TASK
 
 | What | Where it lives | How to change it |
 | --- | --- | --- |
-| Project settings (name, goal, icon, tone, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
+| Project settings (name, goal, icon, tone, repos, default profiles, `max_parallel_threads`, `auto_resolve_days`, `nudge`, `mute`, `progress`, `turn_reminder`, `records`) | `PROJECT.md` in the project folder | Ask the coordinator, use the Projects popup, or run `herdr-organizations set <slug> <key> <value>` |
 | Agent profiles, and which ones a project may use | `~/.config/herdr-projects/config.toml` | The Projects popup, or `profile add`, `profile allow` and `profile default` at a terminal |
 | Safety settings (yolo mode, who answers trust screens, whether threads start without asking, routine commands) | `~/.config/herdr-projects/config.toml` | The Projects popup, or `safety show`, `safety yolo` and `safety set` at a terminal |
 | Merge settings (a [merge gate](docs/operations.md#merge-gate) command, the merge method, auto-merge for every thread of a project) | The same safety tables of `config.toml` | By hand only |
@@ -149,6 +149,8 @@ TASK
 | Popup keys, dock and notifications | `~/.config/herdr-projects/tui.toml` | The Settings tab of the Organizations popup |
 | Sidebar rows and the popup key | `~/.config/herdr/config.toml` | `configure` and `sidebar install` |
 | Projects root | `~/.herdr-projects` by default | `--root`, `HERDR_PROJECTS_ROOT`, or `config.toml` |
+
+`progress`, `turn_reminder`, `nudge` and `mute` say what runs in a project's panes, and `records` names a folder, such as a notes vault, for its reports, task files, libraries and status files. [What runs, and where records go](docs/operations.md#what-runs-and-where-records-go) explains each.
 
 A profile looks like this in `config.toml`:
 

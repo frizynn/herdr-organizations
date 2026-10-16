@@ -912,11 +912,12 @@ pub fn next(ctx: &Ctx, slug: &str, id: &str, line: Option<usize>, add: Option<&s
         if text.is_empty() || text.contains('\n') {
             bail!("a Next line is one non-empty line");
         }
-        let path = thread::extra_next_path(&project, id);
         let _lock = project.lock()?;
+        let records = project.records_dir();
+        let path = crate::records::next(&records, id);
         let mut current = std::fs::read_to_string(&path).unwrap_or_default();
         current.push_str(&format!("- {text}\n"));
-        project::write_atomic(&path, current.as_bytes())?;
+        crate::records::write(&records, &path, current.as_bytes())?;
         println!("added to {id}'s Next list");
         return Ok(());
     }
@@ -1948,7 +1949,7 @@ pub fn thread_json(
     let t = &row.thread;
     let report_path = thread::home_report_path(project, &t.id);
     let report_text = std::fs::read_to_string(&report_path).unwrap_or_default();
-    let library = project.dir().join("library").join(&t.id);
+    let library = thread::home_library_path(project, &t.id);
     let prs = &state.prs;
     let pr = (!t.pr.is_empty()).then(|| {
         // A summary stored before the counts existed has no head commit.

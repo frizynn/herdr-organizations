@@ -6095,6 +6095,90 @@ fn a_workers_report_wakes_its_coordinator_node_and_only_the_nodes_own_report_rea
     assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report"]);
 }
 
+/// With `records` set to an empty folder, the ticker copies reports there,
+/// wakes a coordinator node with the verdict read from there, names the
+/// copy there in a root inbox item, and a follow-up lands there too.
+#[test]
+fn with_records_the_ticker_copies_reads_and_names_reports_in_the_records_folder() {
+    let (world, project, worker) = nested_world("done");
+    let vault = world.home.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    set_front_matter(&project, &format!("records = \"{}\"", vault.display()));
+    write_report(&worker, "Status: blocked\n## Summary\nNeeds a key.\n");
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    assert!(vault.join("threads/t-0002.md").is_file());
+    assert!(!project.dir().join("threads/t-0002.md").exists());
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("t-0002 blocked"), "{}", woken[0]);
+
+    let node = thread::load(&project, "t-0001").unwrap();
+    write_report(&node, "## Report\narea done\n");
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    let items = items_about(&project, "t-0001");
+    assert_eq!(items.len(), 1, "{items:?}");
+    let copy = vault.join("threads/t-0001.md");
+    assert!(
+        items[0]
+            .summary
+            .ends_with(&format!("has a new report: {}", copy.display())),
+        "{}",
+        items[0].summary
+    );
+
+    thread::append_follow_up(&project, "t-0002", "Use the sandbox key.").unwrap();
+    assert!(
+        std::fs::read_to_string(vault.join("threads/t-0002.task.md"))
+            .unwrap()
+            .contains("Use the sandbox key.")
+    );
+}
+
+/// `nudge = false`: the ticker types nothing into any coordinator of the
+/// project, the root or a coordinator node, and a child's events that would
+/// have woken its node are written to the project inbox instead.
+#[test]
+fn with_nudge_off_no_coordinator_is_typed_to_and_the_inbox_keeps_every_event() {
+    let (world, project, worker) = nested_world("done");
+    set_front_matter(&project, "nudge = false");
+    write_report(&worker, "## Report\ndone\n");
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    // Every guard of a root nudge is met: idle for a minute, an empty box.
+    idle_for_a_minute(&project);
+    let mut state = crate::steps::load_state(&project);
+    state.box_pane = "w1:p1".into();
+    state.box_empty_since = "2026-01-01T00:00:00Z".into();
+    crate::steps::save_state(&project, &state).unwrap();
+    for _ in 0..2 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    assert!(
+        prompts_to(&world, "w2:p1").is_empty(),
+        "the node was typed to"
+    );
+    assert!(
+        prompts_to(&world, "w1:p1").is_empty(),
+        "the root was typed to"
+    );
+    let events: Vec<String> = items_about(&project, "t-0002")
+        .into_iter()
+        .map(|i| i.event)
+        .collect();
+    assert_eq!(events, ["new report"]);
+    assert!(
+        crate::steps::load_state(&project).parent_updates.is_empty(),
+        "nothing waits for a node that nobody wakes"
+    );
+}
+
 #[test]
 fn a_worker_blocked_on_a_prompt_still_reaches_the_root_inbox_and_its_coordinator_node() {
     let (world, project, _) = nested_world("blocked");

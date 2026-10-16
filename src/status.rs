@@ -238,7 +238,7 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
                 tasks::Tasks::File(_) => modified(&dir.join("TASKS.md")),
                 _ => crate::tracker::fetched_at(&project),
             },
-            "status_file": status_file::NAME,
+            "status_file": crate::records::shown(&project, &status_file::root(&project)),
             "status_updated": modified(&status_file::root(&project)),
             "status_chars": status.chars().count(),
             "status_limit": status_file::MAX_CHARS,

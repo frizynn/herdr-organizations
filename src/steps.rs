@@ -308,6 +308,7 @@ pub fn write_thread_items(
     state.session_item_written = false;
 
     let records = thread::list(project);
+    let nudge = nudge_on(project);
     for change in transitions {
         if !matches!(
             change.to,
@@ -318,7 +319,7 @@ pub fn write_thread_items(
         let Ok(t) = thread::load(project, &change.id) else {
             continue;
         };
-        if change.to != Group::WaitingOnYou && owning_coordinator(&records, &t).is_some() {
+        if change.to != Group::WaitingOnYou && nudge && owning_coordinator(&records, &t).is_some() {
             continue;
         }
         let mut summary = format!(
@@ -381,15 +382,19 @@ pub fn write_thread_items(
             continue;
         }
         let notes = copy_notes.get(&t.id);
-        match owning_coordinator(&records, t) {
+        match owning_coordinator(&records, t).filter(|_| nudge) {
             // Its coordinator node reads the report; a partial copy still
             // reaches the project inbox, since only the user can recover it.
             Some(parent) if notes.is_none() => {
                 queue_parent_update(state, &parent.id, &t.id, NEW_REPORT)
             }
             _ => {
-                let mut summary =
-                    format!("{} has a new report: threads/{}.md", thread_label(t), t.id);
+                let report = thread::home_report_path(project, &t.id);
+                let mut summary = format!(
+                    "{} has a new report: {}",
+                    thread_label(t),
+                    crate::records::shown(project, &report)
+                );
                 if let Some(notes) = notes {
                     summary.push_str(&format!(
                         "; not everything was copied: {}",
@@ -541,7 +546,8 @@ pub fn nudge(
 /// coordinator node that may spawn. Those events then wake only that parent
 /// and stay out of the project inbox; escalations (Waiting on you) still
 /// reach both. `None` under `root`, and when the parent is resolved, failed,
-/// remote or missing, so nothing is lost.
+/// remote or missing, so nothing is lost. Callers route to it only while
+/// the project's `nudge` is on (see `nudge_on`).
 fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a Thread> {
     let parent_id = organizations::parent_id(child);
     if parent_id == organizations::ROOT_ID {
@@ -555,7 +561,17 @@ fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a T
 /// True when `t`'s coordinator node handles its routine events instead of
 /// the project inbox (see `owning_coordinator`).
 pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
-    owning_coordinator(&thread::list(project), t).is_some()
+    nudge_on(project) && owning_coordinator(&thread::list(project), t).is_some()
+}
+
+/// The project's `nudge`: whether the ticker may type into its
+/// coordinators, the root and coordinator nodes alike. While it is off
+/// nothing wakes a coordinator node, so its children's routine events go
+/// to the project inbox like any other.
+fn nudge_on(project: &Project) -> bool {
+    project
+        .read_project_md()
+        .map_or(Settings::default().nudge, |(settings, _)| settings.nudge)
 }
 
 const WAITING_ON_YOU: &str = "waiting on you";
@@ -615,11 +631,12 @@ fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phras
 /// receives stale information after the child resumed or was acknowledged.
 pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &[Transition]) {
     let records = thread::list(project);
+    let nudge = nudge_on(project);
     for change in transitions {
         let Some(child) = records.iter().find(|record| record.id == change.id) else {
             continue;
         };
-        let Some(parent) = owning_coordinator(&records, child) else {
+        let Some(parent) = owning_coordinator(&records, child).filter(|_| nudge) else {
             continue;
         };
         match parent_phrase(change) {
@@ -679,7 +696,7 @@ fn parent_update_line(
 /// No report text is injected: the prompt carries only code-derived ids and
 /// fixed phrases, and names the read to use. How to watch children (no
 /// polling, return idle) is in the node brief, so the prompt does not repeat
-/// it.
+/// it. With the project's `nudge` off nothing is typed and nothing waits.
 pub fn nudge_parent_coordinators(
     ctx: &Ctx,
     project: &Project,
@@ -687,7 +704,12 @@ pub fn nudge_parent_coordinators(
     herdr: &Herdr,
     agents: &[Agent],
 ) -> Result<()> {
+    if !nudge_on(project) {
+        state.parent_updates.clear();
+        return Ok(());
+    }
     let records = thread::list(project);
+    let records_dir = project.records_dir();
     let prefix = crate::coordinator::current_prefix(&ctx.root)?;
     let pending_parents: Vec<String> = state.parent_updates.keys().cloned().collect();
 
@@ -705,7 +727,7 @@ pub fn nudge_parent_coordinators(
             .get(&parent_id)
             .map(|updates| {
                 parent_update_line(updates, |id| {
-                    report::verdict(&report::home_text(&project.dir(), id))
+                    report::verdict(&report::home_text(&records_dir, id))
                 })
             })
             .unwrap_or_default();

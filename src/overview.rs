@@ -224,6 +224,10 @@ struct ProjectShowJson {
     auto_resolve_days: u32,
     nudge: bool,
     mute: bool,
+    progress: bool,
+    turn_reminder: bool,
+    /// The folder of the records: `records`, else the project folder.
+    records: String,
     /// The program of the project's merge gate, empty without one.
     merge_gate: String,
     merge_method: &'static str,
@@ -275,6 +279,11 @@ fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
         auto_resolve_days: settings.auto_resolve_days,
         nudge: settings.nudge,
         mute: settings.mute,
+        progress: settings.progress,
+        turn_reminder: settings.turn_reminder,
+        records: crate::records::resolve(&project.dir(), &settings.records)
+            .to_string_lossy()
+            .into_owned(),
         merge_gate: safety.merge_gate.first().cloned().unwrap_or_default(),
         merge_method: safety.merge_method.word(),
         auto_merge: safety.auto_merge,
@@ -324,6 +333,11 @@ pub fn print_project_show(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
             "max_parallel_threads",
             shown.max_parallel_threads.to_string(),
         ),
+        ("nudge", shown.nudge.to_string()),
+        ("mute", shown.mute.to_string()),
+        ("progress", shown.progress.to_string()),
+        ("turn_reminder", shown.turn_reminder.to_string()),
+        ("records", shown.records.clone()),
         ("repos", repos),
         ("instructions", size(&shown.instructions)),
         ("memory", memory),

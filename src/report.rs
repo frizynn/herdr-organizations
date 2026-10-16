@@ -53,9 +53,10 @@ pub struct Deliverable {
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 const DOCUMENT_KINDS: [&str; 2] = ["html", "pdf"];
 
-/// The home copy of a thread's report in a project folder, empty without one.
-pub fn home_text(project_dir: &Path, id: &str) -> String {
-    std::fs::read_to_string(crate::thread::home_report_in(project_dir, id)).unwrap_or_default()
+/// The home copy of a thread's report in a records folder
+/// ([`crate::project::Project::records_dir`]), empty without one.
+pub fn home_text(records: &Path, id: &str) -> String {
+    std::fs::read_to_string(crate::records::report(records, id)).unwrap_or_default()
 }
 
 /// The value of the first `Status:` line above the report's first `##`
