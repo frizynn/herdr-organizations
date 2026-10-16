@@ -473,6 +473,10 @@ fn subagents(main: &Path) -> Vec<PathBuf> {
 /// Reads the lines `file` gained since its offset. A missing transcript
 /// keeps what was read from it (the harness deletes old ones); a shorter one
 /// was rewritten and is read again from its start.
+fn read_lines(path: &Path, file: &mut File, _max: usize) {
+    read(path, file)
+}
+
 fn read(path: &Path, file: &mut File) {
     let Ok(meta) = std::fs::metadata(path) else {
         return;
@@ -917,6 +921,126 @@ mod tests {
             (usage.context, usage.peak_context, usage.compactions),
             (160, 160, 0)
         );
+    }
+
+    /// A subagent's request is written in several rows whose output grows:
+    /// the last row's numbers count, also when its rows span two reads.
+    #[test]
+    fn a_request_written_in_several_rows_counts_its_last_row() {
+        let world = World::new();
+        let (project, transcript) = demo(&world);
+        append(
+            &transcript,
+            &[
+                assistant("m1", "2026-10-16T10:00:00Z", 10, 1, 100, 50),
+                assistant("m1", "2026-10-16T10:00:01Z", 10, 20, 100, 50),
+            ],
+        );
+        let usage = root(&world, &project).unwrap();
+        assert_eq!((usage.input, usage.output, usage.cache_read), (10, 20, 100));
+        append(
+            &transcript,
+            &[assistant("m1", "2026-10-16T10:00:02Z", 10, 50, 100, 50)],
+        );
+        let usage = root(&world, &project).unwrap();
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write
+            ),
+            (10, 50, 100, 50)
+        );
+        assert_eq!((usage.context, usage.peak_context), (160, 160));
+        assert_eq!(usage.updated, "2026-10-16T10:00:02Z");
+        let file = &load(&project).nodes["root"].files[&*transcript.to_string_lossy()];
+        assert_eq!(file.requests, 1);
+    }
+
+    /// A workflow keeps its subagents one level further down,
+    /// `subagents/workflows/<id>/agent-*.jsonl`: they count as the others do.
+    #[test]
+    fn workflow_subagents_count_toward_the_node_but_not_its_context() {
+        let world = World::new();
+        let (project, transcript) = demo(&world);
+        append(
+            &transcript,
+            &[assistant("m1", "2026-10-16T10:00:00Z", 10, 5, 100, 50)],
+        );
+        let workflow = transcript
+            .with_extension("")
+            .join("subagents/workflows/wf_x");
+        std::fs::create_dir_all(&workflow).unwrap();
+        append(
+            &workflow.join("agent-a.jsonl"),
+            &[assistant("w1", "2026-10-16T10:05:00Z", 7, 3, 9000, 40)],
+        );
+        let usage = root(&world, &project).unwrap();
+        assert_eq!(
+            (
+                usage.input,
+                usage.output,
+                usage.cache_read,
+                usage.cache_write
+            ),
+            (17, 8, 9100, 90)
+        );
+        assert_eq!((usage.context, usage.peak_context), (160, 160));
+    }
+
+    /// A line longer than the limit is skipped without being held, even one
+    /// without an end yet; the rows after it count.
+    #[test]
+    fn a_line_longer_than_the_limit_is_skipped_without_holding_it() {
+        let world = World::new();
+        let (_, transcript) = demo(&world);
+        let row = assistant("m1", "2026-10-16T10:00:00Z", 10, 5, 100, 50);
+        let max = row.len() + 1;
+        std::fs::write(&transcript, "x".repeat(3 * max)).unwrap();
+        let mut file = File::new(CLAUDE, "root-1", false);
+        read_lines(&transcript, &mut file, max);
+        assert_eq!((file.offset, file.requests), (3 * max as u64, 0));
+        append(
+            &transcript,
+            &[String::new(), row.clone(), "y".repeat(2 * max), row],
+        );
+        read_lines(&transcript, &mut file, max);
+        assert_eq!(file.requests, 1);
+        assert_eq!(file.offset, std::fs::metadata(&transcript).unwrap().len());
+    }
+
+    /// A `[usage]` table that does not parse stops only the caps: the
+    /// transcripts are still read, the error is reported, and the caps a node
+    /// had reached stay, so fixing the table does not notify again.
+    #[test]
+    fn a_broken_usage_table_still_reads_and_keeps_the_caps_reached() {
+        let world = World::new();
+        world
+            .runner
+            .on("notification show", ok(r#"{"result":{"shown":true}}"#));
+        let (project, transcript) = demo(&world);
+        caps(&world, "[usage.default]\ncontext_warn = 1000\n");
+        append(
+            &transcript,
+            &[assistant("m1", "2026-10-16T10:00:00Z", 10, 5, 1490, 0)],
+        );
+        root(&world, &project);
+        caps(&world, "[usage.default]\ncontext_warn = \"800k\"\n");
+        append(
+            &transcript,
+            &[assistant("m2", "2026-10-16T10:01:00Z", 20, 5, 1490, 0)],
+        );
+        let error = refresh(&world.ctx(), &project).unwrap_err();
+        assert!(format!("{error:#}").contains("usage"), "{error:#}");
+        let usage = load(&project).usage("root").unwrap();
+        assert_eq!(
+            (usage.input, usage.over_cap),
+            (30, vec!["context_warn".to_string()])
+        );
+        caps(&world, "[usage.default]\ncontext_warn = 1000\n");
+        root(&world, &project);
+        assert_eq!(toasts(&world).len(), 1, "{:?}", toasts(&world));
     }
 
     /// Codex writes cumulative totals: each growth is one request, its input

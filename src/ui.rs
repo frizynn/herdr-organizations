@@ -4829,6 +4829,14 @@ mod tests {
         assert!(row.contains("over cap · billing ui text"), "{row}");
         let row = text.lines().find(|l| l.contains("landing")).unwrap();
         assert!(!row.contains("over cap"), "{row}");
+
+        app.snap.projects[0].coordinators[0].over_cap = vec!["compaction_warn".into()];
+        let text = app.render(100, 20).text();
+        let row = text
+            .lines()
+            .find(|l| l.contains("Coordinator text"))
+            .unwrap();
+        assert!(row.contains("over cap · Coordinator text"), "{row}");
     }
 
     #[test]
