@@ -540,12 +540,13 @@ fn counts_header(counts: &Counts) -> Line {
     line
 }
 
-/// A report's verdict: done is green, a decision yellow, blocked and failed red.
+/// A report's verdict: done is green, a decision yellow, blocked, failed and
+/// issues red.
 fn verdict_style(verdict: Verdict) -> Style {
     match verdict {
         Verdict::Done => GREEN,
         Verdict::NeedsDecision => YELLOW,
-        Verdict::Blocked | Verdict::Failed => RED,
+        Verdict::Blocked | Verdict::Failed | Verdict::Issues => RED,
     }
 }
 

@@ -178,6 +178,7 @@ pub struct Node {
     pub resolved: bool,
     pub pr: Option<Pr>,
     /// The `Status:` line of its report, `None` without one and once resolved.
+    #[serde(flatten, with = "verdict_on_disk")]
     pub verdict: Option<report::Verdict>,
     /// Subtree counts; only filled for coordinators.
     pub counts: Counts,
@@ -187,6 +188,42 @@ pub struct Node {
     /// A coordinator's status file while it exists; `None` for a thread and
     /// in a model written before it.
     pub status_file: Option<StatusCard>,
+}
+
+/// A node's verdict in the state file. `issues` is written as `failed` with
+/// `"issues": true` beside it: a binary from before `issues` fails on a
+/// verdict it does not know and would set the whole file aside, so it reads
+/// `failed`, red as well, and ignores the key.
+mod verdict_on_disk {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::report::Verdict;
+
+    #[derive(Serialize, Deserialize)]
+    struct OnDisk {
+        verdict: Option<Verdict>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        issues: bool,
+    }
+
+    pub fn serialize<S: Serializer>(verdict: &Option<Verdict>, to: S) -> Result<S::Ok, S::Error> {
+        let issues = *verdict == Some(Verdict::Issues);
+        let verdict = if issues {
+            Some(Verdict::Failed)
+        } else {
+            *verdict
+        };
+        OnDisk { verdict, issues }.serialize(to)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(from: D) -> Result<Option<Verdict>, D::Error> {
+        let on_disk = OnDisk::deserialize(from)?;
+        Ok(if on_disk.issues {
+            Some(Verdict::Issues)
+        } else {
+            on_disk.verdict
+        })
+    }
 }
 
 /// What a coordinator's status file says besides its asks.

@@ -618,9 +618,10 @@ const PARENT_PHRASES: [&str; 5] = [
 ];
 /// Every phrase a parent nudge says, in the order it names them: what may
 /// need the user first.
-const PARENT_LINE_ORDER: [&str; 9] = [
+const PARENT_LINE_ORDER: [&str; 10] = [
     WAITING_ON_YOU,
     Verdict::Failed.words(),
+    Verdict::Issues.words(),
     Verdict::Blocked.words(),
     Verdict::NeedsDecision.words(),
     STOPPED,

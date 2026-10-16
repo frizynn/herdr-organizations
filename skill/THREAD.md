@@ -16,7 +16,7 @@ When you finish, and whenever you stop to wait for the user, write your report t
 The report format:
 
 - An optional first line `PR: <url>` when you opened a pull request, with the full `https://github.com/<owner>/<repo>/pull/<number>` URL.
-- A line `Status: <value>`, required, before any section, with exactly one of `done`, `needs-decision`, `blocked` or `failed`.
+- A line `Status: <value>`, required, before any section, with exactly one of `done`, `needs-decision`, `blocked` or `failed`. When your task asks for `PASS`, `ISSUES` or `FAIL` instead, write that: they read as done, issues (a review found problems to fix) and failed. Case does not matter.
 - A `## Summary` section, required: at most three plain lines that say what is done or missing, clear to someone who knows nothing about the task. Readers see only its first three lines.
 - A `## Report` section: what you did, what you found, what is left, and anything the user must decide.
 - An optional `## Captures` section: one line per screenshot in the library folder, `- <path relative to the library folder> - <caption>` (png, jpg, webp or gif).

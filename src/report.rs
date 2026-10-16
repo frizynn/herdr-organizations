@@ -27,6 +27,9 @@ pub enum Verdict {
     NeedsDecision,
     Blocked,
     Failed,
+    /// A review found problems to fix, as `Status: ISSUES` says in reports
+    /// other harnesses write.
+    Issues,
 }
 
 impl Verdict {
@@ -37,6 +40,7 @@ impl Verdict {
             Verdict::NeedsDecision => "needs decision",
             Verdict::Blocked => "blocked",
             Verdict::Failed => "failed",
+            Verdict::Issues => "issues",
         }
     }
 }
@@ -65,17 +69,19 @@ pub fn home_text(records: &Path, id: &str) -> String {
 }
 
 /// The value of the first `Status:` line above the report's first `##`
-/// section, when it is exactly one of the verdicts.
+/// section, when it is one of the verdicts in any case. `pass` and `fail`,
+/// which other harnesses write, are done and failed.
 pub fn verdict(report: &str) -> Option<Verdict> {
     let value = report
         .lines()
         .take_while(|line| !(is_heading(line) && line.starts_with("##")))
         .find_map(|line| line.strip_prefix("Status:"))?;
-    match value.trim() {
-        "done" => Some(Verdict::Done),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "done" | "pass" => Some(Verdict::Done),
         "needs-decision" => Some(Verdict::NeedsDecision),
         "blocked" => Some(Verdict::Blocked),
-        "failed" => Some(Verdict::Failed),
+        "failed" | "fail" => Some(Verdict::Failed),
+        "issues" => Some(Verdict::Issues),
         _ => None,
     }
 }
