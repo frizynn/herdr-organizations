@@ -167,11 +167,18 @@ impl Ask {
     }
 }
 
-/// Whether a list of asks shows it: a resolved coordinator can no longer
-/// update its file, so its answered and done asks are history, while what
-/// it left open still shows.
+/// What a resolved coordinator's file still shows, in the list and on its
+/// card. It can no longer update the file or take an answer, so nothing in
+/// it waits on the user (its decisions and `needs-decision` asks), and what
+/// it marked answered or done and that closes is history. What it left open
+/// and what does not close still show.
 pub fn listed(ask: &Ask, coordinator_resolved: bool) -> bool {
-    !(coordinator_resolved && matches!(ask.state, State::Answered | State::Done))
+    let history = match ask.state {
+        State::NeedsDecision => true,
+        State::Answered | State::Done => ask.mismatch.is_empty(),
+        _ => false,
+    };
+    !(coordinator_resolved && history)
 }
 
 /// What a status file says, each ask confirmed against the records.
@@ -206,11 +213,18 @@ impl Records {
     }
 
     /// The thread whose pull request this is; with several, the newest.
+    /// `None` when the matching threads have different pull requests, as
+    /// `#12` of two repositories does.
     fn pr_thread(&self, is_it: impl Fn(&str) -> bool) -> Option<&Thread> {
-        self.threads
+        let mut matching = self
+            .threads
             .iter()
             .rev()
-            .find(|t| !t.pr.is_empty() && is_it(&t.pr))
+            .filter(|t| !t.pr.is_empty() && is_it(&t.pr));
+        let newest = matching.next()?;
+        matching
+            .all(|t| t.pr.eq_ignore_ascii_case(&newest.pr))
+            .then_some(newest)
     }
 }
 
@@ -315,11 +329,7 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
             format!("{} {}", row.coordinator.id, row.coordinator.title)
         };
         let ask = &row.ask;
-        let said = if ask.answer.is_empty() {
-            ask.text.clone()
-        } else {
-            format!("{} : {}", ask.text, ask.answer)
-        };
+        let said = ask.said();
         let links: Vec<String> = ask.links.iter().map(Link::words).collect();
         println!(
             "{}\t{coordinator}\t{}\t{}\t{}\t{said}\t{}",
@@ -620,35 +630,45 @@ fn confirmed(links: &[Link]) -> Confirmed {
 }
 
 /// Why an ask in `state` does not close with its links, one row per case,
-/// the first that matches wins. `None` when it closes, and when nothing
-/// confirms it: an ask with no link is a mismatch only while it is working.
+/// the first that matches wins, with the reason of its first link in that
+/// state. `None` when it closes, and when nothing confirms it: an ask with
+/// no link is a mismatch only while it is working. An answer can be that
+/// the work failed, so only `done` does not close on a failed link.
 fn mismatch(state: State, links: &[Link]) -> Option<&'static str> {
-    let any = |kind: LinkKind, states: &[&str]| {
+    let first = |wanted: &[Confirmed]| {
         links
             .iter()
-            .any(|l| l.kind == kind && states.contains(&l.state.as_str()))
+            .find(|l| wanted.contains(&progress(l)))
+            .and_then(reason)
     };
-    let finished = matches!(confirmed(links), Confirmed::Done | Confirmed::Failed);
-    match state {
-        State::Done | State::Answered if links.iter().any(|l| l.pr_state == "open") => {
-            Some("a linked PR is still open")
-        }
-        State::Done | State::Answered if any(LinkKind::Thread, &["working", "waiting-on-you"]) => {
-            Some("a linked thread is still working")
-        }
-        State::Working if links.is_empty() => Some("no thread, PR or task is linked"),
-        State::Open | State::Working if finished => {
-            links.iter().find_map(|l| match (l.kind, l.state.as_str()) {
-                (LinkKind::Thread, "resolved") => Some("a linked thread is resolved"),
-                (LinkKind::Thread, "failed") => Some("a linked thread failed"),
-                (LinkKind::Pr, "merged") => Some("a linked PR is merged"),
-                (LinkKind::Pr, "closed") => Some("a linked PR is closed"),
-                (LinkKind::Task, "done") => Some("a linked task is done"),
-                _ => None,
-            })
+    match (state, confirmed(links)) {
+        (State::Done | State::Answered, Confirmed::InProgress) => first(&[Confirmed::InProgress]),
+        (State::Done, Confirmed::Failed) => first(&[Confirmed::Failed]),
+        (State::Working, _) if links.is_empty() => Some("no thread, PR or task is linked"),
+        (State::Open | State::Working, Confirmed::Done | Confirmed::Failed) => {
+            first(&[Confirmed::Done, Confirmed::Failed])
         }
         _ => None,
     }
+}
+
+/// What puts a link where `progress` does, in the words of `mismatch`.
+fn reason(link: &Link) -> Option<&'static str> {
+    Some(
+        match (link.kind, link.state.as_str(), link.pr_state.as_str()) {
+            (LinkKind::Thread, "working" | "waiting-on-you", _) => {
+                "a linked thread is still working"
+            }
+            (LinkKind::Thread | LinkKind::Pr, _, "open") => "a linked PR is still open",
+            (LinkKind::Task, "todo", _) => "a linked task is still to do",
+            (LinkKind::Thread, "failed", _) => "a linked thread failed",
+            (LinkKind::Thread | LinkKind::Pr, _, "closed") => "a linked PR is closed",
+            (LinkKind::Thread, "resolved", _) => "a linked thread is resolved",
+            (LinkKind::Pr, _, "merged") => "a linked PR is merged",
+            (LinkKind::Task, "done", _) => "a linked task is done",
+            _ => return None,
+        },
+    )
 }
 
 #[cfg(test)]

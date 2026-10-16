@@ -632,30 +632,18 @@ const ASK_GROUPS: [(&str, &str, Style); 5] = [
     ("OTHER LINES", "·", DIM),
 ];
 
-/// The `## Needs your decision` lines of every coordinator still open.
-fn open_decisions(snap: &Snapshot) -> Vec<(&ProjectView, &Node, &String)> {
+/// The `## Needs your decision` lines that wait on the user, of every
+/// coordinator, as its card counts them.
+fn open_decisions(snap: &Snapshot) -> Vec<(&ProjectView, &Node, String)> {
     snap.projects
         .iter()
         .flat_map(|p| {
-            p.coordinators
-                .iter()
-                .filter(|c| !c.resolved)
-                .flat_map(move |c| {
-                    c.status_file
-                        .iter()
-                        .flat_map(move |s| s.needs_decision.iter().map(move |d| (p, c, d)))
-                })
+            p.coordinators.iter().flat_map(move |c| {
+                let lines = p.card(&c.id).map(|card| card.decision_lines().to_vec());
+                lines.into_iter().flatten().map(move |d| (p, c, d))
+            })
         })
         .collect()
-}
-
-/// `<ask> : <answer>`, or the ask alone.
-fn said(ask: &crate::asks::Ask) -> String {
-    if ask.answer.is_empty() {
-        ask.text.clone()
-    } else {
-        format!("{} : {}", ask.text, ask.answer)
-    }
 }
 
 /// What a row says after the ask: why it does not close, else its answer
@@ -692,7 +680,7 @@ impl<'a> NeedsYou<'a> {
                 since: node.since.clone(),
             });
         }
-        let card = project.card(&node.id).filter(|_| !node.resolved)?;
+        let card = project.card(&node.id)?;
         let text = waits_text(&card);
         (!text.is_empty()).then(|| NeedsYou {
             project,
@@ -2039,18 +2027,7 @@ impl<'a> App<'a> {
                     .at(-2, format!("status updated {age}"), DIM),
             );
         }
-        let waiting: Vec<String> = card
-            .status
-            .map(|s| s.needs_decision.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .chain(
-                card.asks
-                    .iter()
-                    .filter(|a| a.state == crate::asks::State::NeedsDecision)
-                    .map(|a| said(a)),
-            )
-            .collect();
+        let waiting = card.waiting();
         if !waiting.is_empty() {
             lines.push(Line::new());
             lines.push(Line::new().at(1, "WAITS ON YOU", HEAD).at(

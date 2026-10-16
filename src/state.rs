@@ -211,6 +211,8 @@ pub struct AskView {
 /// A coordinator's card: what its status file says, its asks, and its
 /// direct children that are still open, with their pull requests.
 pub struct Card<'a> {
+    /// The coordinator is resolved: `asks::listed` decides what it shows.
+    pub resolved: bool,
     pub status: Option<&'a StatusCard>,
     /// Most pressing first (`asks::Ask::rank`).
     pub asks: Vec<&'a asks::Ask>,
@@ -220,13 +222,21 @@ pub struct Card<'a> {
 }
 
 impl Card<'_> {
-    /// What the coordinator waits on the user for: the lines under
-    /// `## Needs your decision`, then the asks marked `needs-decision`.
+    /// The lines under `## Needs your decision`; none once it is resolved,
+    /// as `asks::listed` says.
+    pub fn decision_lines(&self) -> &[String] {
+        match self.status {
+            Some(status) if !self.resolved => &status.needs_decision,
+            _ => &[],
+        }
+    }
+
+    /// What the coordinator waits on the user for: its decision lines, then
+    /// its asks marked `needs-decision`.
     pub fn waiting(&self) -> Vec<String> {
-        self.status
-            .map(|s| s.needs_decision.clone())
-            .unwrap_or_default()
-            .into_iter()
+        self.decision_lines()
+            .iter()
+            .cloned()
             .chain(
                 self.asks
                     .iter()
@@ -311,7 +321,7 @@ impl ProjectView {
         let mut asks: Vec<&asks::Ask> = self
             .asks
             .iter()
-            .filter(|a| a.coordinator == id)
+            .filter(|a| a.coordinator == id && asks::listed(&a.ask, node.resolved))
             .map(|a| &a.ask)
             .collect();
         asks.sort_by_key(|a| a.rank());
@@ -327,6 +337,7 @@ impl ProjectView {
             .filter_map(|n| n.pr.as_ref().map(|pr| (*n, pr)))
             .collect();
         Some(Card {
+            resolved: node.resolved,
             status: node.status_file.as_ref(),
             asks,
             children,

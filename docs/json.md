@@ -158,23 +158,23 @@ What the user asked a coordinator, as it wrote under `## Asked` in its status fi
 
 | Link field | Type | Meaning |
 | --- | --- | --- |
-| `kind` | `"thread"`, `"pr"`, `"task"` or `"page"` | A thread or node id (`t-0007`); a pull request URL or `#12` (the pull request of the project's thread with that number, when exactly one URL has it); `task:<id>` (a tracker's task by its id, a `TASKS.md` task by its line, as `project status` names them); any other `http(s)://` URL. |
+| `kind` | `"thread"`, `"pr"`, `"task"` or `"page"` | A thread or node id (`t-0007`); a pull request URL or `#12` (the pull request of the project's threads with that number, when they all have the same one; with two repositories it is unresolved, so write the URL); `task:<id>` (a tracker's task by its id, a `TASKS.md` task by its line, as `project status` names them); any other `http(s)://` URL. |
 | `text` | string | As written. |
 | `target` | string | The thread id, the pull request URL, the task id or the page. Empty for a thread id, `#12` or task the records do not know. |
 | `thread`, `title` | string | The thread it names or whose pull request it is, and that thread's title; for a task, empty and its title. |
 | `state` | string | A thread's group token as the ticker last recorded it (see [Thread](#thread)), `failed`, or `missing`; a pull request's `open`, `merged` or `closed`, empty before the ticker read it or when no thread has it; a task's `todo`, `done` or `missing`; empty for a page. |
 | `pr`, `pr_state` | string | The pull request behind a thread or pull request link and its state, in the words of `state`; empty without one. A thread's open pull request keeps it `in-progress`. |
 
-`mismatch` is the first of these that applies, and empty otherwise. An ask with no link is confirmed by nothing: only `working` without one is a mismatch.
+`mismatch` is the first row that applies, with the reason of the first link in that state, and empty otherwise. An ask with no link is confirmed by nothing: only `working` without one is a mismatch. An answer can be that the work failed, so only `done` does not close on a failed link.
 
 | `state` | When | `mismatch` |
 | --- | --- | --- |
-| `done`, `answered` | A linked pull request, or a linked thread's, is open | `a linked PR is still open` |
-| `done`, `answered` | A linked thread is working or waiting on you | `a linked thread is still working` |
+| `done`, `answered` | `confirmed` is `in-progress` | `a linked thread is still working` (it works or waits on you), `a linked PR is still open` (a linked pull request or a linked thread's), `a linked task is still to do` |
+| `done` | `confirmed` is `failed` | `a linked thread failed`, `a linked PR is closed` |
 | `working` | It has no link | `no thread, PR or task is linked` |
-| `open`, `working` | Nothing linked is in progress or stopped, and a linked thread is resolved, a thread failed, a pull request merged or closed, or a task is done | `a linked thread is resolved`, `a linked thread failed`, `a linked PR is merged`, `a linked PR is closed`, `a linked task is done` (the first finished link) |
+| `open`, `working` | `confirmed` is `done` or `failed` | `a linked thread is resolved`, `a linked thread failed`, `a linked PR is merged`, `a linked PR is closed`, `a linked task is done` |
 
-`asks --json` lists every coordinator's asks: of every project that is not archived, or of `--project`. The coordinators are the root (`STATUS.md`) and each local coordinator node that may spawn (`nodes/<id>/STATUS.md`); a resolved node's `answered` and `done` asks are left out, since it can no longer update its file. They are sorted by what the user does next: `needs-decision` first, then a mismatch, then `open` and `working`, then `answered` and `done`, then `unknown`; in each, by project slug, root first then nodes in tree order, then line. Without `--json`, one tab-separated line per ask: project, coordinator (`root` or `<id> <title>`), state, confirmed, mismatch, `<ask> : <answer>`, and the links as `t-0007 working (PR open), #12 open`.
+`asks --json` lists every coordinator's asks: of every project that is not archived, or of `--project`. The coordinators are the root (`STATUS.md`) and each local coordinator node that may spawn (`nodes/<id>/STATUS.md`); a resolved node can no longer update its file or take an answer, so its `needs-decision` asks and its `answered` and `done` asks that close are left out, and what it left open or does not close stays. They are sorted by what the user does next: `needs-decision` first, then a mismatch, then `open` and `working`, then `answered` and `done`, then `unknown`; in each, by project slug, root first then nodes in tree order, then line. Without `--json`, one tab-separated line per ask: project, coordinator (`root` or `<id> <title>`), state, confirmed, mismatch, `<ask> : <answer>`, and the links as `t-0007 working (PR open), #12 open`.
 
 | Ask row field | Type | Meaning |
 | --- | --- | --- |

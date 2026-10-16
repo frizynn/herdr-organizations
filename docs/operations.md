@@ -287,7 +287,8 @@ When the state the coordinator wrote and the links disagree, the ask does not cl
 
 | Written | Does not close when |
 | --- | --- |
-| `done`, `answered` | a linked pull request (or a linked thread's) is still open, or a linked thread is still working or waiting on you |
+| `done`, `answered` | something linked is still going: a pull request (or a linked thread's) is open, a thread is working or waiting on you, or a task is still to do |
+| `done` | nothing linked is still going, and a linked thread failed or a pull request was closed without merging (an answer can be that it failed) |
 | `open`, `working` | nothing linked is still going, and a linked thread is resolved or failed, a pull request merged or closed, or a task is done |
 | `working` | nothing is linked |
 
@@ -297,7 +298,7 @@ An ask with no link and any other state is not confirmed, and not flagged. A lin
 - In the popup, `y` on the launcher opens **Your asks**, grouped the same way, with each coordinator's `## Needs your decision` lines under what waits on you; `↵` opens the coordinator. A coordinator's detail screen is its card: the objective, what waits on you, its asks, its open children with their state and verdict, and their pull requests. A coordinator, the root included, joins NEEDS YOU while its file has a decision for you or an ask that does not close.
 - `context` lists the root's asks that do not close as [`ask-mismatch`](#drift), by line and the binary's reason, so the coordinator fixes the state or the link. The ask's text never goes into a prompt.
 
-A resolved coordinator node's `answered` and `done` asks leave the list, since it can no longer update its file; what it left open stays.
+A resolved coordinator node can no longer update its file or take an answer, so nothing in it waits on you: its decisions and `needs-decision` asks leave the list, its card and NEEDS YOU, and so do its `answered` and `done` asks that close. What it left open and what does not close stay, on the list and on its card, and an ask that does not close keeps it under NEEDS YOU. `#12` resolves only when every thread with that number has the same pull request; with two repositories, write the URL.
 
 ## Drift
 
