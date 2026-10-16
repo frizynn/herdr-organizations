@@ -836,8 +836,9 @@ pub fn priming_problems(project: &Project, prefix: &str) -> Vec<String> {
     problems
 }
 
-/// [`create`] for `new` and the popup's New form: a project that takes its
-/// tasks from a tracker gets no TASKS.md.
+/// Creates a project for `new`, `adopt-workspace` and the popup's New form:
+/// the skeleton, with no TASKS.md when the project takes its tasks from a
+/// tracker.
 pub fn create_for(
     config_dir: &Path,
     root: &Path,
@@ -853,7 +854,10 @@ pub fn create_for(
     create_skeleton(root, name, goal, repos, !tracked)
 }
 
-/// Creates the folder and skeleton files, TASKS.md included.
+/// Creates the folder and skeleton files, TASKS.md included. Tests only:
+/// every command creates projects with [`create_for`], which checks for a
+/// tracker.
+#[cfg(test)]
 pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<Project> {
     create_skeleton(root, name, goal, repos, true)
 }

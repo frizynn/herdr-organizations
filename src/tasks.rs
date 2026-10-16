@@ -167,7 +167,7 @@ pub fn load(ctx: &crate::paths::Ctx, project: &crate::project::Project, fresh: b
             Ok(list) => Tasks::Tracker(list),
             Err(reason) => Tasks::Unavailable(reason),
         },
-        Err(error) => Tasks::Unavailable(format!("tracker unavailable: {error:#}")),
+        Err(error) => Tasks::Unavailable(crate::tracker::config_error(&error)),
     }
 }
 

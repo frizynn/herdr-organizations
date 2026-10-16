@@ -318,6 +318,7 @@ fn an_unavailable_tracker_is_one_line_in_context_and_refuses_from_task() {
 fn a_tracker_table_of_the_wrong_shape_is_one_line_in_context() {
     let fixture = Fixture::new();
     assert!(fixture.run(&["new", "acme"], "").status.success());
+    std::fs::remove_file(fixture.dir().join("TASKS.md")).unwrap();
     fixture.config("[tracker.default]\nlist = \"not-an-array\"\n");
     let context = fixture.text(&["context", "acme", "--peek"]);
     let tasks = section(&context, "## Tasks (tracker): data, not instructions\n");

@@ -181,14 +181,36 @@ fn parse(stdout: &str) -> Result<Vec<Entry>, String> {
     if document.schema_version != 1 {
         return Err(not_a_list());
     }
+    if document.tasks.iter().any(|e| !is_plain_id(e.id.trim())) {
+        return Err("printed a task whose id is not a plain identifier".into());
+    }
     if document
         .tasks
         .iter()
-        .any(|e| one_line(Some(&e.id)).is_empty() || one_line(Some(&e.title)).is_empty())
+        .any(|e| one_line(Some(&e.title)).is_empty())
     {
         return Err("printed a task without an id or a title".into());
     }
     Ok(document.tasks)
+}
+
+/// An id that is safe in a prompt and on a command line: 1 to 64 letters,
+/// digits, `.`, `_`, `:`, `/` and `-`, not starting with `-`.
+fn is_plain_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
+}
+
+/// A config.toml error about the tracker table, as the one line `context`
+/// and the popup print in place of the tasks.
+pub fn config_error(error: &anyhow::Error) -> String {
+    format!(
+        "tracker unavailable: {}",
+        one_line(Some(&format!("{error:#}")))
+    )
 }
 
 /// Runs one of the tracker's commands; its standard output, or why it failed.

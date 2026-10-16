@@ -174,7 +174,7 @@ fn project_tasks(ctx: &Ctx, project: &Project) -> Result<Vec<TaskRow>, String> {
             Some(answer) => answer.map(|tasks| task_rows(&project.slug, tasks)),
             None => Err("tracker tasks not loaded yet; `context` or `task list` loads them".into()),
         },
-        Err(error) => Err(format!("tracker unavailable: {error:#}")),
+        Err(error) => Err(crate::tracker::config_error(&error)),
     }
 }
 
@@ -1884,9 +1884,10 @@ impl<'a> Popup<'a> {
         let Some(RowKind::Task(task)) = self.current().map(|r| r.kind.clone()) else {
             return;
         };
-        // A tracker's task is changed with the tracker's own tool.
-        const IN_TRACKER: &str = "in the tracker, with the tracker's own tool";
-        let sentence = |verb: &str, in_tracker: &str| {
+        // A tracker's title is anyone's text, so a sentence names only the
+        // id; the coordinator reads the title in its digest, marked as data.
+        const WITH_ITS_TOOL: &str = ", with the tracker's own tool";
+        let sentence = |verb: &str, tool: &str| {
             if task.id.is_empty() {
                 format!(
                     "(from the projects popup) {verb} the task \"{}\" in TASKS.md.",
@@ -1894,8 +1895,8 @@ impl<'a> Popup<'a> {
                 )
             } else {
                 format!(
-                    "(from the projects popup) {verb} the task {} \"{}\" {in_tracker}.",
-                    task.id, task.title
+                    "(from the projects popup) {verb} the tracker task {}{tool}.",
+                    task.id
                 )
             }
         };
@@ -1925,13 +1926,13 @@ impl<'a> Popup<'a> {
             },
             KeyCode::Char('i') => self.mode = task_detail(&task),
             KeyCode::Char('d') => {
-                self.coordinator_says(&task.slug, sentence("Please delegate", "from the tracker"))
+                self.coordinator_says(&task.slug, sentence("Please delegate", ""))
             }
             KeyCode::Char('m') => {
-                self.coordinator_says(&task.slug, sentence("Please mark as done", IN_TRACKER))
+                self.coordinator_says(&task.slug, sentence("Please mark as done", WITH_ITS_TOOL))
             }
             KeyCode::Char('D') => {
-                self.coordinator_says(&task.slug, sentence("Please drop", IN_TRACKER))
+                self.coordinator_says(&task.slug, sentence("Please drop", WITH_ITS_TOOL))
             }
             _ => {}
         }
