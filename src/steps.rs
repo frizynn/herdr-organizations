@@ -304,6 +304,7 @@ pub fn write_thread_items(
     }
     state.session_item_written = false;
 
+    let records = thread::list(project);
     for change in transitions {
         if !matches!(
             change.to,
@@ -314,6 +315,9 @@ pub fn write_thread_items(
         let Ok(t) = thread::load(project, &change.id) else {
             continue;
         };
+        if change.to != Group::WaitingOnYou && owning_coordinator(&records, &t).is_some() {
+            continue;
+        }
         let mut summary = format!(
             "{} is now {} ({})",
             thread_label(&t),
@@ -363,7 +367,7 @@ pub fn write_thread_items(
 
     // Ready for review: once per report hash, so an agent that goes back and
     // forth between working and idle on an unchanged report produces nothing.
-    for t in thread::list(project) {
+    for t in &records {
         if t.status != Status::Open
             || t.report_hash.is_empty()
             || t.report_hash == t.last_review_item_hash
@@ -373,14 +377,25 @@ pub fn write_thread_items(
         if t.last_group != Group::ReadyForReview.token() && t.last_group != Group::Landing.token() {
             continue;
         }
-        let mut summary = format!("{} has a new report: threads/{}.md", thread_label(&t), t.id);
-        if let Some(notes) = copy_notes.get(&t.id) {
-            summary.push_str(&format!(
-                "; not everything was copied: {}",
-                notes.join("; ")
-            ));
+        let notes = copy_notes.get(&t.id);
+        match owning_coordinator(&records, t) {
+            // Its coordinator node reads the report; a partial copy still
+            // reaches the project inbox, since only the user can recover it.
+            Some(parent) if notes.is_none() => {
+                queue_parent_update(state, &parent.id, &t.id, NEW_REPORT)
+            }
+            _ => {
+                let mut summary =
+                    format!("{} has a new report: threads/{}.md", thread_label(t), t.id);
+                if let Some(notes) = notes {
+                    summary.push_str(&format!(
+                        "; not everything was copied: {}",
+                        notes.join("; ")
+                    ));
+                }
+                inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
+            }
         }
-        inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
         if notifier.wants_review() {
             notifier.send(
                 &t.id,
@@ -518,11 +533,47 @@ pub fn nudge(
     Ok(())
 }
 
+/// The coordinator node that handles a thread's routine events (a new report,
+/// idle, landing, resolved): its direct parent, when that is an open, local
+/// coordinator node that may spawn. Those events then wake only that parent
+/// and stay out of the project inbox; escalations (Waiting on you) still
+/// reach both. `None` under `root`, and when the parent is resolved, failed,
+/// remote or missing, so nothing is lost.
+fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a Thread> {
+    let parent_id = organizations::parent_id(child);
+    if parent_id == organizations::ROOT_ID {
+        return None;
+    }
+    records.iter().find(|record| {
+        record.id == parent_id
+            && record.status == Status::Open
+            && record.role == thread::NodeRole::Coordinator
+            && record.can_spawn
+            && !record.is_remote()
+    })
+}
+
+/// True when `t`'s coordinator node handles its routine events instead of
+/// the project inbox (see `owning_coordinator`).
+pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
+    owning_coordinator(&thread::list(project), t).is_some()
+}
+
+const NEW_REPORT: &str = "new report";
+
 fn parent_update_is_actionable(group: Group) -> bool {
     matches!(
         group,
         Group::ReadyForReview | Group::WaitingOnYou | Group::Landing | Group::Idle
     )
+}
+
+fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phrase: &str) {
+    state
+        .parent_updates
+        .entry(parent_id.to_string())
+        .or_default()
+        .insert(child_id.to_string(), phrase.to_string());
 }
 
 /// Retains only the latest meaningful state for each direct child. Working
@@ -534,23 +585,12 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         let Some(child) = records.iter().find(|record| record.id == change.id) else {
             continue;
         };
-        let parent_id = organizations::parent_id(child);
-        if parent_id == organizations::ROOT_ID {
-            continue;
-        }
-        let Some(parent) = records.iter().find(|candidate| candidate.id == parent_id) else {
+        let Some(parent) = owning_coordinator(&records, child) else {
             continue;
         };
-        if parent.role != thread::NodeRole::Coordinator || !parent.can_spawn {
-            continue;
-        }
         if parent_update_is_actionable(change.to) {
-            state
-                .parent_updates
-                .entry(parent.id.clone())
-                .or_default()
-                .insert(child.id.clone(), change.to.label().to_string());
-        } else if let Some(pending) = state.parent_updates.get_mut(parent_id) {
+            queue_parent_update(state, &parent.id, &child.id, change.to.label());
+        } else if let Some(pending) = state.parent_updates.get_mut(&parent.id) {
             pending.remove(&child.id);
         }
     }
@@ -1434,14 +1474,16 @@ fn resolve_after_copy(
     } else {
         format!("resolved ({reason})")
     };
-    inbox::write(
-        project,
-        "thread-state",
-        &t.id,
-        "resolved",
-        &format!("{}: {why}: {}", thread_label(t), notes.join("; ")),
-        "",
-    )?;
+    if !handled_by_parent_node(project, t) {
+        inbox::write(
+            project,
+            "thread-state",
+            &t.id,
+            "resolved",
+            &format!("{}: {why}: {}", thread_label(t), notes.join("; ")),
+            "",
+        )?;
+    }
     threads::note_open_task(project, &resolved)?;
     Ok(true)
 }
@@ -1720,7 +1762,7 @@ mod tests {
             .unwrap();
         assert!(prompt.starts_with(PARENT_NUDGE_PREFIX));
         assert!(prompt.contains(&format!(" {} ready for review.", child.id)));
-        assert!(prompt.contains(&format!("node show {} {}", project.slug, child.id)));
+        assert!(prompt.ends_with(&format!(" node show {} <id>`.", project.slug)));
         assert!(!prompt.contains('\n'));
         // The node brief says how to watch children; the nudge does not repeat it.
         assert!(!prompt.contains("Do not poll"));
