@@ -5,8 +5,11 @@
 //! and the popup.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+
+use crate::thread::is_real_dir;
 
 pub const MAX_SUMMARY_CHARS: usize = 600;
 pub const MAX_CAPTURES: usize = 24;
@@ -50,30 +53,210 @@ pub struct Deliverable {
     pub kind: &'static str,
 }
 
-/// The value of the `Status:` line before the report's first heading, when it
-/// is exactly one of the verdicts.
-pub fn verdict(_report: &str) -> Option<Verdict> {
-    None
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
+const DOCUMENT_KINDS: [&str; 3] = ["html", "pdf", "md"];
+/// Entries the newest-images walk looks at, so a large library cannot slow
+/// down every `--json` read.
+const MAX_SCANNED: usize = 4096;
+
+/// The home copy of a thread's report in a project folder, empty without one.
+pub fn home_text(project_dir: &Path, id: &str) -> String {
+    std::fs::read_to_string(crate::thread::home_report_in(project_dir, id)).unwrap_or_default()
+}
+
+/// The value of the first `Status:` line above the report's first `##`
+/// section, when it is exactly one of the verdicts.
+pub fn verdict(report: &str) -> Option<Verdict> {
+    let value = report
+        .lines()
+        .take_while(|line| !(is_heading(line) && line.starts_with("##")))
+        .find_map(|line| line.strip_prefix("Status:"))?;
+    match value.trim() {
+        "done" => Some(Verdict::Done),
+        "needs-decision" => Some(Verdict::NeedsDecision),
+        "blocked" => Some(Verdict::Blocked),
+        "failed" => Some(Verdict::Failed),
+        _ => None,
+    }
 }
 
 /// The `## Summary` section, trimmed and cut to `MAX_SUMMARY_CHARS`.
-pub fn summary(_report: &str) -> Option<String> {
-    None
+pub fn summary(report: &str) -> Option<String> {
+    let text = section(report, "Summary").join("\n");
+    let cut: String = text.trim().chars().take(MAX_SUMMARY_CHARS).collect();
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
 }
 
-/// The images listed under `## Captures`, or the newest images of the
-/// library when the report lists none.
-pub fn captures(_report: &str, _library: &Path) -> Vec<Capture> {
-    Vec::new()
+/// The images listed under `## Captures` as `- <path> - <caption>` (or with
+/// an em dash), the path relative to the library; or the newest images of
+/// the library when the report lists none.
+pub fn captures(report: &str, library: &Path) -> Vec<Capture> {
+    let items: Vec<&str> = section(report, "Captures")
+        .into_iter()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+        })
+        .collect();
+    if items.is_empty() {
+        return newest_images(library);
+    }
+    let mut found: Vec<Capture> = Vec::new();
+    for item in items {
+        let (path, caption) = item
+            .split_once(" \u{2014} ")
+            .or_else(|| item.split_once(" - "))
+            .unwrap_or((item, ""));
+        let Some(path) = library_file(library, path.trim().trim_matches('`')) else {
+            continue;
+        };
+        let path = path.to_string_lossy().into_owned();
+        if !has_extension(&path, &IMAGE_EXTENSIONS) || found.iter().any(|c| c.path == path) {
+            continue;
+        }
+        found.push(Capture {
+            path,
+            caption: caption.trim().to_string(),
+        });
+        if found.len() == MAX_CAPTURES {
+            break;
+        }
+    }
+    found
 }
 
 /// Regular `html`, `pdf` and `md` files at the top of the library, by name.
-pub fn deliverables(_library: &Path) -> Vec<Deliverable> {
-    Vec::new()
+pub fn deliverables(library: &Path) -> Vec<Deliverable> {
+    if !is_real_dir(library) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(library) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Deliverable> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()) && !hidden(entry))
+        .filter_map(|entry| {
+            let path = entry.path().to_string_lossy().into_owned();
+            let kind = DOCUMENT_KINDS
+                .into_iter()
+                .find(|kind| has_extension(&path, &[*kind]))?;
+            Some(Deliverable { path, kind })
+        })
+        .collect();
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    found.truncate(MAX_DELIVERABLES);
+    found
 }
 
-#[allow(dead_code)]
-fn unused(_: PathBuf) {}
+/// A Markdown heading line: one to six `#` and a space (or nothing), so a
+/// line that starts with an issue number such as `#146` is text.
+fn is_heading(line: &str) -> bool {
+    let rest = line.trim_start_matches('#');
+    let level = line.len() - rest.len();
+    (1..=6).contains(&level) && (rest.is_empty() || rest.starts_with(' '))
+}
+
+/// The lines of the first `## <name>` section, up to the next heading.
+fn section<'a>(report: &'a str, name: &str) -> Vec<&'a str> {
+    let heading = format!("## {name}");
+    report
+        .lines()
+        .skip_while(|line| line.trim_end() != heading)
+        .skip(1)
+        .take_while(|line| !is_heading(line))
+        .collect()
+}
+
+/// `relative` inside `library`, when every part of it is a plain name, every
+/// folder on the way (the library included) is a real folder and not a
+/// symbolic link, and the last part is a regular file.
+fn library_file(library: &Path, relative: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut names = Vec::new();
+    for part in Path::new(relative).components() {
+        match part {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    let (file, folders) = names.split_last()?;
+    if !is_real_dir(library) {
+        return None;
+    }
+    let mut path = library.to_path_buf();
+    for folder in folders {
+        path.push(folder);
+        if !is_real_dir(&path) {
+            return None;
+        }
+    }
+    path.push(file);
+    std::fs::symlink_metadata(&path)
+        .is_ok_and(|meta| meta.is_file())
+        .then_some(path)
+}
+
+/// The `NEWEST_CAPTURES` most recently modified images anywhere under the
+/// library, without following symbolic links or entering hidden folders.
+fn newest_images(library: &Path) -> Vec<Capture> {
+    let mut found = Vec::new();
+    if is_real_dir(library) {
+        let mut budget = MAX_SCANNED;
+        walk_images(library, &mut budget, &mut found);
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found
+        .into_iter()
+        .take(NEWEST_CAPTURES)
+        .map(|(_, path)| Capture {
+            path,
+            caption: String::new(),
+        })
+        .collect()
+}
+
+fn walk_images(dir: &Path, budget: &mut usize, found: &mut Vec<(SystemTime, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        // `file_type` and `metadata` of a directory entry do not follow links.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if hidden(&entry) {
+            continue;
+        }
+        let path = entry.path();
+        if kind.is_dir() {
+            walk_images(&path, budget, found);
+        } else if kind.is_file() {
+            let path = path.to_string_lossy().into_owned();
+            if has_extension(&path, &IMAGE_EXTENSIONS) {
+                let modified = entry.metadata().and_then(|m| m.modified());
+                found.push((modified.unwrap_or(SystemTime::UNIX_EPOCH), path));
+            }
+        }
+    }
+}
+
+fn has_extension(path: &str, extensions: &[&str]) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+fn hidden(entry: &std::fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with('.')
+}
 
 #[cfg(test)]
 mod tests {
@@ -135,7 +318,10 @@ mod tests {
         }
         // The first Status line decides.
         assert_eq!(verdict("Status: maybe\nStatus: done\n"), None);
-        assert_eq!(serde_json::to_value(Verdict::NeedsDecision).unwrap(), "needs-decision");
+        assert_eq!(
+            serde_json::to_value(Verdict::NeedsDecision).unwrap(),
+            "needs-decision"
+        );
         assert_eq!(Verdict::NeedsDecision.words(), "needs decision");
     }
 
@@ -195,12 +381,22 @@ mod tests {
         assert_eq!(
             shown(&captures(&report, &library), &library),
             [
-                ("capturas/talles-390.png".into(), "Orden de talles a 390 px".into()),
-                ("capturas/carrito.JPG".into(), "Carrito vacío - sin cupón".into()),
+                (
+                    "capturas/talles-390.png".into(),
+                    "Orden de talles a 390 px".into()
+                ),
+                (
+                    "capturas/carrito.JPG".into(),
+                    "Carrito vacío - sin cupón".into()
+                ),
                 ("b.webp".into(), String::new()),
             ]
         );
-        assert!(captures(&report, &library).iter().all(|c| Path::new(&c.path).is_absolute()));
+        assert!(
+            captures(&report, &library)
+                .iter()
+                .all(|c| Path::new(&c.path).is_absolute())
+        );
         // A list whose files are all gone shows nothing, not the newest images.
         assert!(captures("## Captures\n- gone.png - x\n", &library).is_empty());
     }
@@ -252,7 +448,10 @@ mod tests {
     fn without_a_list_the_twelve_newest_images_show_from_any_subfolder() {
         let home = tempfile::tempdir().unwrap();
         let library = home.path().join("library/t-0001");
-        assert!(captures("## Report\n", &library).is_empty(), "no library yet");
+        assert!(
+            captures("## Report\n", &library).is_empty(),
+            "no library yet"
+        );
         for n in 0..14u64 {
             let rel = if n % 2 == 0 {
                 format!("i{n:02}.png")
@@ -263,7 +462,10 @@ mod tests {
         }
         aged(&put(&library, "newest.pdf"), 100);
         aged(&put(&library, ".hidden.png"), 100);
-        let newest = captures("## Report\nno list\n## Captures\nnone this time\n", &library);
+        let newest = captures(
+            "## Report\nno list\n## Captures\nnone this time\n",
+            &library,
+        );
         let names: Vec<String> = shown(&newest, &library)
             .into_iter()
             .map(|(path, caption)| {

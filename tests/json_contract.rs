@@ -461,9 +461,21 @@ fn a_thread_carries_its_verdict_summary_captures_and_deliverables() {
     for field in ["verdict", "summary", "captures", "deliverables"] {
         assert_eq!(listed[field], thread[field], "{field}");
     }
+    // `node show`, which a parent nudge names, prints the verdict and summary.
+    let shown = fixture.text(&["node", "show", "demo", "t-0002"]);
+    assert!(
+        shown.contains(
+            "# verdict: done\n# summary:\n#   Sizes are in order at 390 px.\n#   Coupons are untouched.\n"
+        ),
+        "{shown}"
+    );
 
     // Any other Status value is no verdict.
-    write(&fixture, "threads/t-0002.md", "Status: mostly done\n## Report\n");
+    write(
+        &fixture,
+        "threads/t-0002.md",
+        "Status: mostly done\n## Report\n",
+    );
     let shown = fixture.json(&["thread", "show", "demo", "t-0002", "--json"]);
     assert_eq!(shown["thread"]["verdict"], Value::Null);
     assert_eq!(shown["thread"]["summary"], Value::Null);

@@ -247,7 +247,12 @@ pub fn task_path(project: &Project, id: &str) -> PathBuf {
 }
 
 pub fn home_report_path(project: &Project, id: &str) -> PathBuf {
-    threads_dir(project).join(format!("{id}.md"))
+    home_report_in(&project.dir(), id)
+}
+
+/// [`home_report_path`] for a project folder.
+pub fn home_report_in(project_dir: &Path, id: &str) -> PathBuf {
+    project_dir.join("threads").join(format!("{id}.md"))
 }
 
 pub fn load(project: &Project, id: &str) -> Result<Thread> {
@@ -885,7 +890,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn is_real_dir(path: &Path) -> bool {
+/// A directory, not a symbolic link to one.
+pub fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
 }
 

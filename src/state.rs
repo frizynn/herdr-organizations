@@ -15,7 +15,7 @@ use crate::organizations::{self, ROOT_ID};
 use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::thread::{self, Group, NodeRole, Thread};
-use crate::{inbox, pr, steps, threads};
+use crate::{inbox, pr, report, steps, threads};
 
 pub const FILE: &str = ".organizations-state.json";
 pub const SCHEMA_VERSION: u32 = 1;
@@ -172,7 +172,7 @@ pub struct Node {
     pub resolved: bool,
     pub pr: Option<Pr>,
     /// The `Status:` line of its report, `None` without one.
-    pub verdict: Option<crate::report::Verdict>,
+    pub verdict: Option<report::Verdict>,
     /// Subtree counts; only filled for coordinators.
     pub counts: Counts,
 }
@@ -534,6 +534,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
             machine: t.machine.clone(),
             resolved: t.status == thread::Status::Resolved,
             pr,
+            verdict: report::verdict(&report::home_text(&project.dir(), &t.id)),
             ..Node::default()
         };
         if let Some(live) = local_live {
@@ -726,7 +727,10 @@ mod tests {
         let report = |id: &str, text: &str| {
             std::fs::write(thread::home_report_path(&project, id), text).unwrap()
         };
-        report("t-0001", "Status: blocked\n## Summary\nWaiting on the API key.\n");
+        report(
+            "t-0001",
+            "Status: blocked\n## Summary\nWaiting on the API key.\n",
+        );
         report("t-0002", "Status: blocked, kind of\n");
         let view = project_view(&project, &[]);
         let verdict = |id: &str| view.node(id).unwrap().verdict;

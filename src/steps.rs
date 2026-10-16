@@ -12,6 +12,7 @@ use crate::organizations;
 use crate::paths::Ctx;
 use crate::pr_actions::{self, Request};
 use crate::project::{self, Project, Settings};
+use crate::report::{self, Verdict};
 use crate::thread::{self, CopyOutcome, Group, Status, Thread};
 use crate::threads;
 use crate::{inbox, pr, routine};
@@ -556,15 +557,27 @@ pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
 }
 
 const NEW_REPORT: &str = "new report";
-/// Every phrase a parent nudge uses, in the order it names them: what may
+const WAITING_ON_YOU: &str = "waiting on you";
+/// The phrases a pending parent update may hold.
+const PARENT_PHRASES: [&str; 4] = [WAITING_ON_YOU, "ready for review", NEW_REPORT, "landing"];
+/// Every phrase a parent nudge says, in the order it names them: what may
 /// need the user first.
-const PARENT_PHRASES: [&str; 4] = ["waiting on you", "ready for review", NEW_REPORT, "landing"];
+const PARENT_LINE_ORDER: [&str; 8] = [
+    WAITING_ON_YOU,
+    Verdict::Failed.words(),
+    Verdict::Blocked.words(),
+    Verdict::NeedsDecision.words(),
+    "ready for review",
+    NEW_REPORT,
+    "landing",
+    Verdict::Done.words(),
+];
 
 /// What a parent nudge says about a direct child that moved to `group`, or
 /// `None` when the parent has nothing to act on (Working, Idle).
 fn parent_phrase(group: Group) -> Option<&'static str> {
     match group {
-        Group::WaitingOnYou => Some("waiting on you"),
+        Group::WaitingOnYou => Some(WAITING_ON_YOU),
         Group::ReadyForReview => Some("ready for review"),
         Group::Landing => Some("landing"),
         Group::Working | Group::Idle | Group::Resolved => None,
@@ -606,18 +619,36 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
 }
 
 /// One line per parent, built from child ids and fixed phrases only, e.g.
-/// `t-0098 waiting on you; t-0094, t-0095 ready for review`. A pending value
-/// with no phrase (an Idle queued by an older version) is dropped; the
-/// comparison ignores case so a pending label from an older version still
-/// counts.
-fn parent_update_line(updates: &BTreeMap<String, String>) -> String {
-    PARENT_PHRASES
+/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done`. A child
+/// whose report has a verdict is named by it, so the parent need not open
+/// the report; waiting on you is live and wins over an older report. A
+/// pending value with no phrase (an Idle queued by an older version) is
+/// dropped; the comparison ignores case so a pending label from an older
+/// version still counts.
+fn parent_update_line(
+    updates: &BTreeMap<String, String>,
+    verdict: impl Fn(&str) -> Option<Verdict>,
+) -> String {
+    let said: Vec<(String, &str)> = updates
+        .iter()
+        .filter_map(|(id, pending)| {
+            let phrase = *PARENT_PHRASES
+                .iter()
+                .find(|phrase| pending.eq_ignore_ascii_case(phrase))?;
+            let phrase = match verdict(id) {
+                Some(verdict) if phrase != WAITING_ON_YOU => verdict.words(),
+                _ => phrase,
+            };
+            Some((inbox::safe_subject(id), phrase))
+        })
+        .collect();
+    PARENT_LINE_ORDER
         .iter()
         .filter_map(|phrase| {
-            let ids: Vec<String> = updates
+            let ids: Vec<&str> = said
                 .iter()
-                .filter(|(_, pending)| pending.eq_ignore_ascii_case(phrase))
-                .map(|(id, _)| inbox::safe_subject(id))
+                .filter(|(_, said)| said == phrase)
+                .map(|(id, _)| id.as_str())
                 .collect();
             (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
         })
@@ -656,7 +687,11 @@ pub fn nudge_parent_coordinators(
         let line = state
             .parent_updates
             .get(&parent_id)
-            .map(parent_update_line)
+            .map(|updates| {
+                parent_update_line(updates, |id| {
+                    report::verdict(&report::home_text(&project.dir(), id))
+                })
+            })
             .unwrap_or_default();
         if line.is_empty() {
             state.parent_updates.remove(&parent_id);
