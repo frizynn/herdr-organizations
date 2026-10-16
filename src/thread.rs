@@ -349,7 +349,8 @@ pub fn agent_name(slug: &str, id: &str) -> String {
 /// with a timestamp, so a restarted thread re-reads it with its task.
 pub fn append_follow_up(project: &Project, id: &str, text: &str) -> Result<()> {
     let _lock = project.lock()?;
-    let path = task_path(project, id);
+    let records = project.records_dir();
+    let path = crate::records::task(&records, id);
     let mut task = std::fs::read_to_string(&path).unwrap_or_default();
     if !task.ends_with('\n') && !task.is_empty() {
         task.push('\n');
@@ -358,7 +359,25 @@ pub fn append_follow_up(project: &Project, id: &str, text: &str) -> Result<()> {
         task.push_str("\n## Follow-ups\n");
     }
     task.push_str(&format!("\n### {}\n\n{}\n", project::now(), text.trim()));
-    write_atomic(&path, task.as_bytes())
+    crate::records::write(&records, &path, task.as_bytes())
+}
+
+/// Writes the home copy of a thread's report, its path found under the
+/// project lock.
+fn write_home_report(project: &Project, id: &str, bytes: &[u8]) -> Result<()> {
+    let _lock = project.lock()?;
+    let records = project.records_dir();
+    crate::records::write(&records, &crate::records::report(&records, id), bytes)
+}
+
+/// Makes a thread's home library folder, its path found under the project
+/// lock, and returns it.
+fn make_home_library(project: &Project, id: &str) -> Result<PathBuf> {
+    let _lock = project.lock()?;
+    let records = project.records_dir();
+    let library = crate::records::library(&records, id);
+    crate::records::make_folder(&records, &library)?;
+    Ok(library)
 }
 
 /// The lines of a report's `## Next` section: one recommended action per
@@ -978,16 +997,13 @@ pub fn copy_home_local(
         Ok(meta) if meta.is_file() => match std::fs::read(&report) {
             Ok(bytes) => {
                 let hash = sha256_hex(&bytes);
-                if hash != thread.report_hash || !home_report_path(project, &thread.id).is_file() {
-                    let written = project.lock().and_then(|_lock| {
-                        write_atomic(&home_report_path(project, &thread.id), &bytes)
-                    });
-                    if let Err(error) = written {
-                        return Copied {
-                            outcome: CopyOutcome::Failed(format!("{error:#}")),
-                            report_hash: None,
-                        };
-                    }
+                let stale =
+                    hash != thread.report_hash || !home_report_path(project, &thread.id).is_file();
+                if stale && let Err(error) = write_home_report(project, &thread.id, &bytes) {
+                    return Copied {
+                        outcome: CopyOutcome::Failed(format!("{error:#}")),
+                        report_hash: None,
+                    };
                 }
                 report_hash = Some(hash);
             }
@@ -1091,10 +1107,7 @@ pub fn copy_home_remote(
         let _ = std::fs::remove_file(&tmp);
         match fetched {
             Ok(bytes) => {
-                let written = project
-                    .lock()
-                    .and_then(|_lock| write_atomic(&home_report_path(project, &thread.id), &bytes));
-                if let Err(error) = written {
+                if let Err(error) = write_home_report(project, &thread.id, &bytes) {
                     return failed(format!("{error:#}"));
                 }
                 report_hash = Some(sha256_hex(&bytes));
@@ -1127,19 +1140,15 @@ pub fn copy_home_remote(
                     .iter()
                     .map(|p| format!("{p} is a symbolic link; it was not copied")),
             );
-            let target_dir = home_library_path(project, &thread.id);
-            let made = project.lock().and_then(|_lock| {
-                if !target_dir.is_dir() {
-                    std::fs::create_dir(&target_dir)?;
+            let target_dir = match make_home_library(project, &thread.id) {
+                Ok(target_dir) => target_dir,
+                Err(error) => {
+                    return Copied {
+                        outcome: CopyOutcome::Failed(format!("{error:#}")),
+                        report_hash,
+                    };
                 }
-                Ok(())
-            });
-            if let Err(error) = made {
-                return Copied {
-                    outcome: CopyOutcome::Failed(format!("{error:#}")),
-                    report_hash,
-                };
-            }
+            };
             if let Err(error) =
                 remote::fetch_dir(runner, target, &thread.library_path(), &target_dir)
             {
@@ -1189,15 +1198,8 @@ fn copy_library_local(
         .map(|p| format!("{p} is a symbolic link; it was not copied"))
         .collect();
 
-    let target = home_library_path(project, &thread.id);
-    {
-        let _lock = project.lock()?;
-        if !target.is_dir() {
-            // `create_dir`, not `create_dir_all`: never recreate a deleted project.
-            std::fs::create_dir(&target)
-                .with_context(|| format!("could not create {}", target.display()))?;
-        }
-    }
+    // Never a records folder that is gone, so never a deleted project.
+    let target = make_home_library(project, &thread.id)?;
     // `-rt` without `-l`: symbolic links are skipped, never followed.
     let out = runner.run(&Cmd::new("rsync", Duration::from_secs(60)).args([
         "-rt".to_string(),

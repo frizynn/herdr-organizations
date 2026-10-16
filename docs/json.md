@@ -203,7 +203,7 @@ EOF
 | `project` | string | The slug. |
 | `generated_at` | string | RFC 3339, when it was computed. |
 | `objective` | string | The status file's `Objective:` line. Empty without one. |
-| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing); `status_file` (`STATUS.md`), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
+| `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing); `status_file` (where the root's status file is: `STATUS.md` in the project folder, else its absolute path in the records folder), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
 | `items` | [Status item] | One per task in `TASKS.md`, in file order, then one per thread that is not resolved and that no task names, in id order. |
 | `drift` | object | How many problems of each rule (`status_over_limit`, `status_stale`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
 | `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |

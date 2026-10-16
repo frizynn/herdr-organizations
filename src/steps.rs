@@ -319,7 +319,7 @@ pub fn write_thread_items(
         let Ok(t) = thread::load(project, &change.id) else {
             continue;
         };
-        if change.to != Group::WaitingOnYou && owning_coordinator(&records, &t, nudge).is_some() {
+        if change.to != Group::WaitingOnYou && nudge && owning_coordinator(&records, &t).is_some() {
             continue;
         }
         let mut summary = format!(
@@ -382,7 +382,7 @@ pub fn write_thread_items(
             continue;
         }
         let notes = copy_notes.get(&t.id);
-        match owning_coordinator(&records, t, nudge) {
+        match owning_coordinator(&records, t).filter(|_| nudge) {
             // Its coordinator node reads the report; a partial copy still
             // reaches the project inbox, since only the user can recover it.
             Some(parent) if notes.is_none() => {
@@ -545,16 +545,12 @@ pub fn nudge(
 /// idle, landing, resolved): its direct parent, when that is an open, local
 /// coordinator node that may spawn. Those events then wake only that parent
 /// and stay out of the project inbox; escalations (Waiting on you) still
-/// reach both. `None` under `root`, when the parent is resolved, failed,
-/// remote or missing, and while the project's `nudge` is off, since nothing
-/// would wake the parent: so nothing is lost.
-fn owning_coordinator<'a>(
-    records: &'a [Thread],
-    child: &Thread,
-    nudge: bool,
-) -> Option<&'a Thread> {
+/// reach both. `None` under `root`, and when the parent is resolved, failed,
+/// remote or missing, so nothing is lost. Callers route to it only while
+/// the project's `nudge` is on (see `nudge_on`).
+fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a Thread> {
     let parent_id = organizations::parent_id(child);
-    if !nudge || parent_id == organizations::ROOT_ID {
+    if parent_id == organizations::ROOT_ID {
         return None;
     }
     records.iter().find(|record| {
@@ -565,11 +561,13 @@ fn owning_coordinator<'a>(
 /// True when `t`'s coordinator node handles its routine events instead of
 /// the project inbox (see `owning_coordinator`).
 pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
-    owning_coordinator(&thread::list(project), t, nudge_on(project)).is_some()
+    nudge_on(project) && owning_coordinator(&thread::list(project), t).is_some()
 }
 
 /// The project's `nudge`: whether the ticker may type into its
-/// coordinators, the root and coordinator nodes alike.
+/// coordinators, the root and coordinator nodes alike. While it is off
+/// nothing wakes a coordinator node, so its children's routine events go
+/// to the project inbox like any other.
 fn nudge_on(project: &Project) -> bool {
     project
         .read_project_md()
@@ -638,7 +636,7 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         let Some(child) = records.iter().find(|record| record.id == change.id) else {
             continue;
         };
-        let Some(parent) = owning_coordinator(&records, child, nudge) else {
+        let Some(parent) = owning_coordinator(&records, child).filter(|_| nudge) else {
             continue;
         };
         match parent_phrase(change) {

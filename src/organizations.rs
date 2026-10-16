@@ -546,7 +546,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
     })?;
 
     let scope = node_scope_dir(project, &record.id);
-    let task_path = thread::task_path(project, &record.id);
+    let records = project.records_dir();
+    let task_path = crate::records::task(&records, &record.id);
     if task_path.exists() {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
@@ -559,22 +560,14 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
                 .with_context(|| format!("could not finish creating node `{}`", record.id));
         }
     };
-    // Its status file's folder, when the records folder is elsewhere (in the
-    // project folder it is the scope). Never a records folder that is gone;
-    // the agent can make it too, so a failure here is not the node's.
-    let records = project.records_dir();
-    if record.is_spawning_coordinator() && records != project.dir() && records.is_dir() {
-        let _ = std::fs::create_dir_all(records.join("nodes").join(&record.id));
-    }
     // The task line is linked last, still under the lock, so a failure leaves
     // neither a record nor a line naming one.
-    let written =
-        project::write_atomic(&task_path, args.task.as_bytes()).and_then(|()| {
-            match &args.request.from_task {
-                Some(title) => link_task(project, title, &record.id),
-                None => Ok(()),
-            }
-        });
+    let written = crate::records::write(&records, &task_path, args.task.as_bytes()).and_then(
+        |()| match &args.request.from_task {
+            Some(title) => link_task(project, title, &record.id),
+            None => Ok(()),
+        },
+    );
     if let Err(error) = written {
         let _ = std::fs::remove_file(&task_path);
         let _ = std::fs::remove_dir_all(&scope);
@@ -584,6 +577,14 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         return Err(error)
             .with_context(|| format!("could not finish creating node `{}`", record.id));
+    }
+    // Its status file's folder, which in the project folder is its scope.
+    // The agent can make it too, so a failure here is not the node's.
+    if record.is_spawning_coordinator() {
+        let status = crate::records::node_status(&records, &record.id);
+        if let Some(folder) = status.parent() {
+            let _ = crate::records::make_folder(&records, folder);
+        }
     }
     Ok(record)
 }

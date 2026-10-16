@@ -49,6 +49,33 @@ pub fn node_status(records: &Path, id: &str) -> PathBuf {
         .join(crate::status_file::NAME)
 }
 
+/// Makes `folder`, inside the records folder `records` (`threads/`,
+/// `library/<id>/`, `nodes/<id>/`), and the folders between them; never
+/// `records` itself, so a records folder that is gone (an unmounted vault,
+/// a deleted project) keeps failing. Writers call it under the project
+/// lock with a path found under that lock, so `set records` cannot move
+/// the records in between.
+pub fn make_folder(records: &Path, folder: &Path) -> Result<()> {
+    if !folder.starts_with(records) {
+        bail!("{} is not inside {}", folder.display(), records.display());
+    }
+    if !records.is_dir() {
+        bail!(
+            "the records folder {} does not exist; make it, or run `set <slug> records` again",
+            records.display()
+        );
+    }
+    std::fs::create_dir_all(folder)
+        .with_context(|| format!("could not create {}", folder.display()))
+}
+
+/// Writes a record, making its folder as [`make_folder`] does. The caller
+/// holds the project lock and found `record` under it.
+pub fn write(records: &Path, record: &Path, bytes: &[u8]) -> Result<()> {
+    make_folder(records, record.parent().context("a record has no folder")?)?;
+    write_atomic(record, bytes)
+}
+
 /// A record's path as a message names it: relative to the project folder
 /// when it is inside it (`threads/t-0001.md`), else absolute.
 pub fn shown(project: &Project, path: &Path) -> String {
@@ -80,7 +107,8 @@ pub fn resolve(project_dir: &Path, value: &str) -> PathBuf {
 /// empty value brings them back to the project folder. Every file is copied
 /// first, keeping its modification time, and the originals are removed
 /// only once all copies and the setting are written; a different file
-/// already at a destination moves nothing. Says what it moved.
+/// already at a destination moves nothing. Says the folder it stored and
+/// what it moved.
 pub fn set(ctx: &Ctx, project: &Project, value: &str) -> Result<String> {
     let wanted = folder(ctx, project, value)?;
     let stored = wanted
@@ -99,11 +127,16 @@ pub fn set(ctx: &Ctx, project: &Project, value: &str) -> Result<String> {
         return Err(error);
     }
     remove_originals(&moves, &from, &project.dir());
+    let setting = if stored.is_empty() {
+        "(the project folder)"
+    } else {
+        &stored
+    };
     Ok(if moves.is_empty() {
-        format!("records are in {}", to.display())
+        format!("records = {setting}\nrecords are in {}", to.display())
     } else {
         format!(
-            "moved {} record files from {} to {}",
+            "records = {setting}\nmoved {} record files from {} to {}",
             moves.len(),
             from.display(),
             to.display()
@@ -114,8 +147,9 @@ pub fn set(ctx: &Ctx, project: &Project, value: &str) -> Result<String> {
 /// The folder `set` would store: `None` for the project folder. It must be
 /// absolute (`~/` expands to the caller's home), without `..`, not a
 /// symbolic link or a file, neither inside the projects root nor holding
-/// it, and outside every project and every other project's records folder. It is made, with its
-/// `threads/` and `library/`, when missing.
+/// it, and outside every project and every other project's records folder.
+/// It is made when missing; a new folder holds nothing a move could
+/// conflict with.
 fn folder(ctx: &Ctx, project: &Project, value: &str) -> Result<Option<PathBuf>> {
     let value = value.trim();
     if value.is_empty() {
@@ -162,10 +196,8 @@ fn folder(ctx: &Ctx, project: &Project, value: &str) -> Result<Option<PathBuf>> 
             );
         }
     }
-    for sub in ["threads", "library"] {
-        std::fs::create_dir_all(path.join(sub))
-            .with_context(|| format!("could not create {}", path.join(sub).display()))?;
-    }
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("could not create {}", path.display()))?;
     Ok(Some(path))
 }
 
@@ -221,9 +253,7 @@ fn plan(from: &Path, to: &Path) -> Result<Vec<Move>> {
         let (source, target) = (from.join(&relative), to.join(&relative));
         let copy = match std::fs::symlink_metadata(&target) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-            Ok(meta) if meta.is_file() && std::fs::read(&target)? == std::fs::read(&source)? => {
-                false
-            }
+            Ok(meta) if meta.is_file() && same_bytes(&source, &target)? => false,
             Ok(_) => {
                 conflicts.push(relative.display().to_string());
                 continue;
@@ -247,6 +277,27 @@ fn plan(from: &Path, to: &Path) -> Result<Vec<Move>> {
         );
     }
     Ok(moves)
+}
+
+/// Whether two files hold the same bytes, read in chunks so a large library
+/// file is never loaded whole.
+fn same_bytes(a: &Path, b: &Path) -> Result<bool> {
+    use std::io::Read;
+    if std::fs::metadata(a)?.len() != std::fs::metadata(b)?.len() {
+        return Ok(false);
+    }
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut left, mut right) = (vec![0; 64 * 1024], vec![0; 64 * 1024]);
+    loop {
+        let n = a.read(&mut left)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        b.read_exact(&mut right[..n])?;
+        if left[..n] != right[..n] {
+            return Ok(false);
+        }
+    }
 }
 
 /// The record files in a records folder, relative to it: reports, task
@@ -323,17 +374,29 @@ fn copy_all(moves: &[Move]) -> Result<Vec<PathBuf>> {
     let mut created = Vec::new();
     for m in moves.iter().filter(|m| m.copy) {
         let copied = (|| -> Result<()> {
-            make_dirs(
-                m.to.parent().context("a record has no folder")?,
-                &mut created,
-            )?;
-            let modified = std::fs::metadata(&m.from)?.modified()?;
-            write_atomic(&m.to, &std::fs::read(&m.from)?)?;
+            let folder = m.to.parent().context("a record has no folder")?;
+            make_dirs(folder, &mut created)?;
+            // Through a temporary file beside it and a rename, as
+            // `write_atomic` does, without reading the file into memory.
+            let name = m.to.file_name().context("a record has no name")?;
+            let tmp = folder.join(format!(
+                ".{}.{}.tmp",
+                name.to_string_lossy(),
+                std::process::id()
+            ));
+            let renamed = (|| -> Result<()> {
+                std::fs::copy(&m.from, &tmp)?;
+                let file = std::fs::File::options().write(true).open(&tmp)?;
+                file.set_modified(std::fs::metadata(&m.from)?.modified()?)?;
+                file.sync_all()?;
+                std::fs::rename(&tmp, &m.to)?;
+                Ok(())
+            })();
+            if renamed.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            renamed?;
             created.push(m.to.clone());
-            std::fs::File::options()
-                .write(true)
-                .open(&m.to)?
-                .set_modified(modified)?;
             Ok(())
         })();
         if let Err(error) = copied {

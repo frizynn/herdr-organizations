@@ -674,11 +674,14 @@ pub const SUBDIRS: [&str; 9] = [
 /// working directory, and tab threads run under `threads/<id>/`, so it says
 /// who is who by working directory. `prefix` is `<absolute binary> --root
 /// <root>`: bare `hp` is on no harness's `PATH`.
-pub fn agents_md(name: &str, slug: &str, prefix: &str, status: &str) -> String {
+pub fn agents_md(name: &str, slug: &str, prefix: &str, status: Option<&str>) -> String {
+    let status = status
+        .map(|path| format!(" Your status file is `{path}`."))
+        .unwrap_or_default();
     format!(
         "# {name}\n\n\
          This folder is the home of the Herdr project \"{name}\" (`{slug}`). Written by herdr-projects; `doctor --fix` refreshes it.\n\n\
-         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, and run `{prefix} context {slug}` now and whenever you need project state. Your status file is `{status}`.\n\n\
+         If your working directory is exactly this folder, you are the coordinator of {name}: run `{prefix} skill` now and follow what it prints, and run `{prefix} context {slug}` now and whenever you need project state.{status}\n\n\
          If your working directory is under `threads/`, you are a thread: your brief is in your own folder (`.herdr-project/{slug}-<id>/brief.md`); ignore the rest of this file.\n"
     )
 }
@@ -727,11 +730,12 @@ pub fn write_priming(project: &Project, prefix: &str) -> Result<()> {
             std::fs::rename(&agents, &kept)?;
         }
     }
+    // Named only when it is not the STATUS.md beside it, in a records folder.
     let status = crate::status_file::root(project);
-    let shown = crate::records::shown(project, &status);
+    let elsewhere = (!status.starts_with(&dir)).then(|| status.display().to_string());
     write_atomic(
         &agents,
-        agents_md(&name, &project.slug, prefix, &shown).as_bytes(),
+        agents_md(&name, &project.slug, prefix, elsewhere.as_deref()).as_bytes(),
     )?;
     let claude = dir.join("CLAUDE.md");
     let link_ok = std::fs::read_link(&claude).is_ok_and(|target| target == Path::new("AGENTS.md"));
@@ -752,7 +756,10 @@ pub fn write_priming(project: &Project, prefix: &str) -> Result<()> {
         std::fs::create_dir(dir.join("uploads"))?;
     }
     if let Some(handoff) = handoff_to_rename(&dir, &status) {
-        std::fs::rename(handoff, &status)?;
+        // A records folder on another disk cannot take a rename.
+        std::fs::rename(&handoff, &status).or_else(|_| {
+            std::fs::copy(&handoff, &status).and_then(|_| std::fs::remove_file(&handoff))
+        })?;
     }
     write_default_routine(project)?;
     Ok(())
@@ -1039,7 +1046,7 @@ mod tests {
             "Demo Project",
             "demo-project",
             "/no/such/binary --root /r",
-            "STATUS.md",
+            None,
         );
         std::fs::write(project.dir().join("AGENTS.md"), stale).unwrap();
         let problems = priming_problems(&project, &prefix);

@@ -224,15 +224,7 @@ pub fn set(ctx: &Ctx, slug: &str, key: &str, value: &str) -> Result<()> {
     }
     if key == "records" {
         // Moves the records with the setting, under the lock.
-        let moved = crate::records::set(ctx, &project, value)?;
-        println!("{slug}: {key} = {}\n{moved}", {
-            let value = value.trim();
-            if value.is_empty() {
-                "(the project folder)"
-            } else {
-                value
-            }
-        });
+        println!("{slug}: {}", crate::records::set(ctx, &project, value)?);
     } else {
         let text = std::fs::read_to_string(project.project_md())?;
         let edited = set_in(&text, key, value)?;
