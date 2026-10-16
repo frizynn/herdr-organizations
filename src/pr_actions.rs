@@ -899,11 +899,9 @@ mod tests {
             (t.pr.as_str(), t.pr_state.as_str()),
             (created.pr.as_str(), "OPEN")
         );
-        assert!(
-            s.items()
-                .iter()
-                .any(|item| item.event == "PR created" && item.summary.contains(&created.pr))
-        );
+        assert!(s.items().iter().any(|item| item.event == "PR created"
+            && item.summary.contains(&created.pr)
+            && item.audience == inbox::Audience::User));
 
         let again = create(&ctx, "demo", "t-0001").unwrap();
         assert!(!again.ok);

@@ -1783,7 +1783,8 @@ impl<'a> App<'a> {
         let verdict = report::verdict(&report_text);
         let summary = report::summary(&report_text);
         let first_line = summary.as_deref().and_then(|s| s.lines().next());
-        if verdict.is_some() || first_line.is_some() {
+        let remember = report::remember(&report_text);
+        if verdict.is_some() || first_line.is_some() || !remember.is_empty() {
             frame.put(1, y, "REPORT", HEAD);
             let mut x = 1;
             if let Some(verdict) = verdict {
@@ -1794,6 +1795,13 @@ impl<'a> App<'a> {
             }
             if let Some(line) = first_line {
                 frame.put(x, y + 1, line, Style::PLAIN);
+            }
+            // What it proposes to keep: how many lines, and the first.
+            if let Some(line) = remember.first() {
+                let label = format!("remember {} ·", remember.len());
+                let x = frame.put(1, y + 2, &label, DIM) + 1;
+                frame.put(x, y + 2, line, Style::PLAIN);
+                y += 1;
             }
             y += 3;
         }
@@ -1857,7 +1865,7 @@ impl<'a> App<'a> {
                         .at(17, state::age(&item.created), DIM)
                         .at(
                             22,
-                            term::fit(&item.summary, frame.width.saturating_sub(24)),
+                            term::fit(&item.shown_summary(), frame.width.saturating_sub(24)),
                             Style::PLAIN,
                         )
                         .target(Target::Inbox(item.id.clone())),
@@ -2844,7 +2852,7 @@ impl<'a> App<'a> {
                 );
                 lines.push(Line::new().at(
                     1,
-                    term::fit(&item.summary, width.saturating_sub(2)),
+                    term::fit(&item.shown_summary(), width.saturating_sub(2)),
                     DIM,
                 ));
             }
@@ -5328,6 +5336,45 @@ mod tests {
             !row.contains("· billing ui text"),
             "no verdict, no prefix: {row}"
         );
+    }
+
+    /// A thread's details show what its report proposes to remember, and
+    /// mark the inbox items that are for the user rather than the
+    /// coordinator.
+    #[test]
+    fn the_detail_shows_what_to_remember_and_which_items_are_for_the_user() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("threads")).unwrap();
+        std::fs::write(
+            dir.join("threads/t-0004.md"),
+            "Status: done\n## Summary\nShipped.\n## Remember\n- FIRST-LESSON\n- SECOND-LESSON\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        let item = |id: &str, summary: &str, audience| state::InboxItem {
+            id: id.into(),
+            kind: "pr".into(),
+            subject: "t-0004".into(),
+            created: crate::project::now(),
+            summary: summary.into(),
+            audience,
+        };
+        app.snap.projects[0].inbox = vec![
+            item("a", "USER-ITEM", crate::inbox::Audience::User),
+            item("b", "COORDINATOR-ITEM", crate::inbox::Audience::Coordinator),
+        ];
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("remember 2 · FIRST-LESSON"), "{text}");
+        assert!(!text.contains("SECOND-LESSON"), "{text}");
+        let line = |needle: &str| text.lines().find(|l| l.contains(needle)).unwrap();
+        assert!(line("USER-ITEM").contains("for you · USER-ITEM"), "{text}");
+        assert!(!line("COORDINATOR-ITEM").contains("for you"), "{text}");
     }
 
     #[test]
