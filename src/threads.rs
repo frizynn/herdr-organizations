@@ -1901,7 +1901,7 @@ pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> Thread
     let t = &row.thread;
     let report_path = thread::home_report_path(project, &t.id);
     let report_text = std::fs::read_to_string(&report_path).unwrap_or_default();
-    let library = project.dir().join("library").join(&t.id);
+    let library = thread::home_library_path(project, &t.id);
     let prs = &state.prs;
     let pr = (!t.pr.is_empty()).then(|| {
         // A summary stored before the counts existed has no head commit.

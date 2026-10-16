@@ -601,7 +601,9 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
     );
     let context = fixture.text(&["context", "demo", "--peek"]);
     assert!(
-        context.contains(&format!("## Status ({v}/STATUS.md)\nObjective: Ship it")),
+        context.contains(&format!(
+            "## Status ({v}/STATUS.md)\n# Status\nObjective: Ship it"
+        )),
         "{context}"
     );
     assert!(context.contains(&format!(" records={v}")), "{context}");

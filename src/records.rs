@@ -9,12 +9,12 @@
 //! Every reader and writer of a record builds its path here, from
 //! [`Project::records_dir`].
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::paths::Ctx;
-use crate::project::Project;
+use crate::project::{Project, write_atomic};
 
 /// The home copy of a thread's report.
 pub fn report(records: &Path, id: &str) -> PathBuf {
@@ -49,20 +49,343 @@ pub fn node_status(records: &Path, id: &str) -> PathBuf {
         .join(crate::status_file::NAME)
 }
 
+/// A record's path as a message names it: relative to the project folder
+/// when it is inside it (`threads/t-0001.md`), else absolute.
+pub fn shown(project: &Project, path: &Path) -> String {
+    path.strip_prefix(project.dir())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 /// The folder `records` names in PROJECT.md: empty, or a value that is not
 /// an absolute path, is the project folder. `~/` is the user's home, for a
 /// hand edit; `set` stores the expanded path.
 pub fn resolve(project_dir: &Path, value: &str) -> PathBuf {
-    let _ = value;
-    project_dir.to_path_buf()
+    let value = value.trim();
+    let path = match value.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map_or_else(PathBuf::new, |home| PathBuf::from(home).join(rest)),
+        None => PathBuf::from(value),
+    };
+    if path.is_absolute() {
+        path.components().collect()
+    } else {
+        project_dir.to_path_buf()
+    }
 }
 
 /// `set <slug> records <folder>`: validates the folder, moves the existing
 /// records there and writes the setting, all under the project lock. An
-/// empty value brings them back to the project folder.
+/// empty value brings them back to the project folder. Every file is copied
+/// first, keeping its modification time, and the originals are removed
+/// only once all copies and the setting are written; a different file
+/// already at a destination moves nothing. Says what it moved.
 pub fn set(ctx: &Ctx, project: &Project, value: &str) -> Result<String> {
-    let _ = (ctx, project, value);
-    bail!("records cannot be set yet")
+    let wanted = folder(ctx, project, value)?;
+    let stored = wanted
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let _lock = project.lock()?;
+    let from = project.records_dir();
+    let to = wanted.unwrap_or_else(|| project.dir());
+    let text = std::fs::read_to_string(project.project_md())?;
+    let edited = crate::settings::set_in(&text, "records", &stored)?;
+    let moves = plan(&from, &to)?;
+    let created = copy_all(&moves)?;
+    if let Err(error) = write_atomic(&project.project_md(), edited.as_bytes()) {
+        undo(&created);
+        return Err(error);
+    }
+    remove_originals(&moves, &from, &project.dir());
+    Ok(if moves.is_empty() {
+        format!("records are in {}", to.display())
+    } else {
+        format!(
+            "moved {} record files from {} to {}",
+            moves.len(),
+            from.display(),
+            to.display()
+        )
+    })
+}
+
+/// The folder `set` would store: `None` for the project folder. It must be
+/// absolute (`~/` expands to the caller's home), without `..`, not a
+/// symbolic link or a file, outside the projects root, and outside every
+/// project and every other project's records folder. It is made, with its
+/// `threads/` and `library/`, when missing.
+fn folder(ctx: &Ctx, project: &Project, value: &str) -> Result<Option<PathBuf>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let path = ctx.env.expand_tilde(value);
+    if !path.is_absolute() {
+        bail!("records must be an absolute folder or start with `~/`, not `{value}`");
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        bail!("records may not contain `..`: `{value}`");
+    }
+    let path: PathBuf = path.components().collect();
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => bail!(
+            "{} is a symbolic link; name the folder it points to",
+            path.display()
+        ),
+        Ok(meta) if !meta.is_dir() => bail!("{} is not a folder", path.display()),
+        _ => {}
+    }
+    let real = real_path(&path);
+    let root = real_path(&ctx.root);
+    if real.starts_with(&root) {
+        bail!(
+            "{} is inside the projects root {}; records go outside it",
+            path.display(),
+            ctx.root.display()
+        );
+    }
+    for slug in crate::project::list_slugs(&ctx.root) {
+        let Ok(other) = Project::load(&ctx.root, &slug) else {
+            continue;
+        };
+        if real.starts_with(other.canonical_dir()) {
+            bail!("{} is inside project `{slug}`", path.display());
+        }
+        let theirs = other.records_dir();
+        if slug != project.slug && theirs != other.dir() && real.starts_with(real_path(&theirs)) {
+            bail!(
+                "{} is inside the records folder of project `{slug}` ({})",
+                path.display(),
+                theirs.display()
+            );
+        }
+    }
+    for sub in ["threads", "library"] {
+        std::fs::create_dir_all(path.join(sub))
+            .with_context(|| format!("could not create {}", path.join(sub).display()))?;
+    }
+    Ok(Some(path))
+}
+
+/// `path` with its longest existing ancestor's symbolic links resolved, so
+/// a folder that is not made yet still compares with real ones.
+fn real_path(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(current) {
+            return missing
+                .iter()
+                .rev()
+                .fold(real, |path, name| path.join(name));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// One record file to move; `copy` is false when the same bytes are
+/// already at `to`.
+struct Move {
+    from: PathBuf,
+    to: PathBuf,
+    copy: bool,
+}
+
+/// What moving every record from one folder to another takes. Refuses,
+/// before anything changes, a record that is not a regular file, a
+/// different file already at a destination, and a destination inside the
+/// current folder.
+fn plan(from: &Path, to: &Path) -> Result<Vec<Move>> {
+    let (real_from, real_to) = (real_path(from), real_path(to));
+    if real_from == real_to {
+        return Ok(Vec::new());
+    }
+    if real_to.starts_with(&real_from) {
+        bail!(
+            "{} is inside the current records folder {}",
+            to.display(),
+            from.display()
+        );
+    }
+    let mut moves = Vec::new();
+    let mut conflicts = Vec::new();
+    for relative in record_files(from)? {
+        let (source, target) = (from.join(&relative), to.join(&relative));
+        let copy = match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Ok(meta) if meta.is_file() && std::fs::read(&target)? == std::fs::read(&source)? => {
+                false
+            }
+            Ok(_) => {
+                conflicts.push(relative.display().to_string());
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not inspect {}", target.display()));
+            }
+        };
+        moves.push(Move {
+            from: source,
+            to: target,
+            copy,
+        });
+    }
+    if !conflicts.is_empty() {
+        bail!(
+            "{} already holds a different {}; nothing was moved. Move it away, then run `set` again",
+            to.display(),
+            conflicts.join(", ")
+        );
+    }
+    Ok(moves)
+}
+
+/// The record files in a records folder, relative to it: reports, task
+/// files and Next lines in `threads/`, every file under `library/<id>/`,
+/// `STATUS.md` and `nodes/<id>/STATUS.md`. Anything else there (thread
+/// state, tab threads' folders, node scopes) is not a record.
+fn record_files(records: &Path) -> Result<Vec<PathBuf>> {
+    let is_id = |name: &str| crate::thread::validate_id(name).is_ok();
+    let mut files = Vec::new();
+    for name in names(&records.join("threads")) {
+        let id = [".task.md", ".next.md", ".md"]
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix));
+        if id.is_some_and(is_id) {
+            files.push(Path::new("threads").join(name));
+        }
+    }
+    for name in names(&records.join("library"))
+        .into_iter()
+        .filter(|n| is_id(n))
+    {
+        walk(records, &Path::new("library").join(name), &mut files);
+    }
+    let status = PathBuf::from(crate::status_file::NAME);
+    let nodes = names(&records.join("nodes"))
+        .into_iter()
+        .filter(|n| is_id(n))
+        .map(|id| Path::new("nodes").join(id).join(&status));
+    files.extend(
+        std::iter::once(status.clone())
+            .chain(nodes)
+            .filter(|path| std::fs::symlink_metadata(records.join(path)).is_ok()),
+    );
+    for relative in &files {
+        if !std::fs::symlink_metadata(records.join(relative))?.is_file() {
+            bail!(
+                "{} is not a regular file; move it by hand, then run `set` again",
+                records.join(relative).display()
+            );
+        }
+    }
+    Ok(files)
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// Every file under `relative`, a link included so the caller refuses it.
+fn walk(base: &Path, relative: &Path, files: &mut Vec<PathBuf>) {
+    let is_dir = std::fs::symlink_metadata(base.join(relative)).is_ok_and(|m| m.is_dir());
+    if !is_dir {
+        files.push(relative.to_path_buf());
+        return;
+    }
+    for name in names(&base.join(relative)) {
+        walk(base, &relative.join(name), files);
+    }
+}
+
+/// Copies every move that needs it, keeping modification times, and
+/// returns the files and folders it made. On a failure it removes them
+/// again and nothing changed.
+fn copy_all(moves: &[Move]) -> Result<Vec<PathBuf>> {
+    let mut created = Vec::new();
+    for m in moves.iter().filter(|m| m.copy) {
+        let copied = (|| -> Result<()> {
+            make_dirs(
+                m.to.parent().context("a record has no folder")?,
+                &mut created,
+            )?;
+            let modified = std::fs::metadata(&m.from)?.modified()?;
+            write_atomic(&m.to, &std::fs::read(&m.from)?)?;
+            created.push(m.to.clone());
+            std::fs::File::options()
+                .write(true)
+                .open(&m.to)?
+                .set_modified(modified)?;
+            Ok(())
+        })();
+        if let Err(error) = copied {
+            undo(&created);
+            return Err(error.context(format!(
+                "could not copy {}; nothing was moved",
+                m.from.display()
+            )));
+        }
+    }
+    Ok(created)
+}
+
+fn make_dirs(dir: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    make_dirs(dir.parent().context("no folder to make it in")?, created)?;
+    std::fs::create_dir(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    created.push(dir.to_path_buf());
+    Ok(())
+}
+
+/// Removes what `copy_all` made, newest first.
+fn undo(created: &[PathBuf]) {
+    for path in created.iter().rev() {
+        let _ = std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path));
+    }
+}
+
+/// Removes the originals once their copies and the setting are written, and
+/// the folders that leaves empty, except the project folder's own
+/// `threads/`, `library/` and `nodes/`.
+fn remove_originals(moves: &[Move], from: &Path, project_dir: &Path) {
+    let kept = |dir: &Path| {
+        from == project_dir
+            && dir.strip_prefix(from).is_ok_and(|relative| {
+                relative == Path::new("threads")
+                    || relative == Path::new("library")
+                    || relative.starts_with("nodes")
+            })
+    };
+    for m in moves {
+        let _ = std::fs::remove_file(&m.from);
+        let mut dir = m.from.parent();
+        while let Some(current) = dir {
+            if current == from || kept(current) || std::fs::remove_dir(current).is_err() {
+                break;
+            }
+            dir = current.parent();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +437,11 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// `set <slug> records <value>`, as the CLI and the popup run it.
+    fn set_records(ctx: &Ctx, project: &Project, value: &str) -> Result<()> {
+        crate::settings::set(ctx, &project.slug, "records", value)
     }
 
     fn records_setting(project: &Project) -> String {
@@ -271,7 +599,7 @@ mod tests {
             .modified()
             .unwrap();
 
-        set(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
+        set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
         assert_eq!(records_setting(&project), vault.to_string_lossy());
         for path in MOVED {
             assert!(vault.join(path).is_file(), "{path} was not moved");
@@ -300,13 +628,13 @@ mod tests {
         );
 
         // Again: nothing changes.
-        set(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
+        set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
         for path in MOVED {
             assert!(vault.join(path).is_file(), "{path}");
         }
 
         // Empty brings them home by the same rule.
-        set(&setup.ctx(), &project, "").unwrap();
+        set_records(&setup.ctx(), &project, "").unwrap();
         assert_eq!(records_setting(&project), "");
         for path in MOVED {
             assert!(dir.join(path).is_file(), "{path} did not come back");
@@ -329,7 +657,7 @@ mod tests {
         // The same content already there is not a conflict.
         write(&vault.join("threads/t-0001.md"), "Status: done\n");
 
-        let error = set(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap_err();
+        let error = set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap_err();
         let error = format!("{error:#}");
         assert!(error.contains("threads/t-0001.task.md"), "{error}");
         assert_eq!(records_setting(&project), "");
@@ -343,7 +671,7 @@ mod tests {
         assert!(!vault.join("STATUS.md").exists(), "nothing was copied");
 
         std::fs::remove_file(vault.join("threads/t-0001.task.md")).unwrap();
-        set(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
+        set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
         assert_eq!(read(&vault.join("threads/t-0001.md")), "Status: done\n");
         assert!(!project.dir().join("threads/t-0001.md").exists());
     }
@@ -355,7 +683,7 @@ mod tests {
         let project = setup.project("demo");
         let other = setup.project("other");
         let refused = |value: &str, why: &str| {
-            let error = format!("{:#}", set(&ctx, &project, value).unwrap_err());
+            let error = format!("{:#}", set_records(&ctx, &project, value).unwrap_err());
             assert!(error.contains(why), "{value}: {error}");
             assert_eq!(records_setting(&project), "", "{value}");
         };
@@ -371,12 +699,12 @@ mod tests {
         refused(&file.to_string_lossy(), "not a folder");
 
         let shared = setup.home.path().join("vault/shared");
-        set(&ctx, &other, &shared.to_string_lossy()).unwrap();
+        set_records(&ctx, &other, &shared.to_string_lossy()).unwrap();
         refused(&shared.to_string_lossy(), "other");
         refused(&shared.join("sub").to_string_lossy(), "other");
 
         // `~/` is the home of the user running `set`, and the folder is made.
-        set(&ctx, &project, "~/notes/demo").unwrap();
+        set_records(&ctx, &project, "~/notes/demo").unwrap();
         let made = setup.home.path().join("notes/demo");
         assert_eq!(records_setting(&project), made.to_string_lossy());
         assert!(made.join("threads").is_dir() && made.join("library").is_dir());

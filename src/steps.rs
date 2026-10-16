@@ -388,8 +388,12 @@ pub fn write_thread_items(
                 queue_parent_update(state, &parent.id, &t.id, NEW_REPORT)
             }
             _ => {
-                let mut summary =
-                    format!("{} has a new report: threads/{}.md", thread_label(t), t.id);
+                let report = thread::home_report_path(project, &t.id);
+                let mut summary = format!(
+                    "{} has a new report: {}",
+                    thread_label(t),
+                    crate::records::shown(project, &report)
+                );
                 if let Some(notes) = notes {
                     summary.push_str(&format!(
                         "; not everything was copied: {}",
@@ -688,6 +692,7 @@ pub fn nudge_parent_coordinators(
     agents: &[Agent],
 ) -> Result<()> {
     let records = thread::list(project);
+    let records_dir = project.records_dir();
     let prefix = crate::coordinator::current_prefix(&ctx.root)?;
     let pending_parents: Vec<String> = state.parent_updates.keys().cloned().collect();
 
@@ -705,7 +710,7 @@ pub fn nudge_parent_coordinators(
             .get(&parent_id)
             .map(|updates| {
                 parent_update_line(updates, |id| {
-                    report::verdict(&report::home_text(&project.dir(), id))
+                    report::verdict(&report::home_text(&records_dir, id))
                 })
             })
             .unwrap_or_default();

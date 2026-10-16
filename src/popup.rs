@@ -659,11 +659,15 @@ pub fn build(ctx: &Ctx, section: Section, scope: Option<&str>) -> Vec<Row> {
                         ("auto_resolve_days", s.auto_resolve_days.to_string()),
                         ("nudge", s.nudge.to_string()),
                         ("mute", s.mute.to_string()),
+                        ("progress", s.progress.to_string()),
+                        ("turn_reminder", s.turn_reminder.to_string()),
+                        ("records", s.records.clone()),
                         ("repos.add", crate::settings::repos_text(&s)),
                         ("repos.remove", crate::settings::repos_text(&s)),
                     ];
                     for (key, value) in values {
                         let label = match key {
+                            "records" if value.is_empty() => "records (project folder)".to_string(),
                             "repos.add" => "repos (↵ add)".to_string(),
                             "repos.remove" => "repos (↵ remove)".to_string(),
                             k => k.to_string(),
@@ -2081,7 +2085,7 @@ impl<'a> Popup<'a> {
                         }
                         "thread_profiles" => self.allow_toggle(&slug, Role::Thread),
                         "coordinator_profiles" => self.allow_toggle(&slug, Role::Coordinator),
-                        "nudge" | "mute" => {
+                        "nudge" | "mute" | "progress" | "turn_reminder" => {
                             let mut action = action;
                             action.push("{}".into());
                             Mode::Pick {
@@ -2114,6 +2118,11 @@ impl<'a> Popup<'a> {
                         "repos.add" => Mode::Edit {
                             label: "add repo (PATH or PATH@MACHINE)".into(),
                             buffer: String::new(),
+                            action,
+                        },
+                        "records" => Mode::Edit {
+                            label: "records folder (absolute; empty for the project folder)".into(),
+                            buffer: value,
                             action,
                         },
                         _ => Mode::Edit {
@@ -2588,7 +2597,7 @@ fn detail(root: &Path, row: &ThreadRow) -> Mode {
     }
     let mut files = Vec::new();
     for dir in [
-        project.dir().join("library").join(&t.id),
+        thread::home_library_path(&project, &t.id),
         project.dir().join("uploads"),
     ] {
         let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)

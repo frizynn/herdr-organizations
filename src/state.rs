@@ -414,6 +414,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         .read_project_md()
         .map(|(s, _)| s)
         .unwrap_or_default();
+    let records_dir = crate::records::resolve(&project.dir(), &settings.records);
     let record = project.coordinator().unwrap_or_default();
     let live = lives.iter().find(|l| l.socket == record.socket);
     let now = jiff::Timestamp::now();
@@ -539,7 +540,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
             pr,
             // Only open rows show it, and every pass would read every report.
             verdict: (t.status != thread::Status::Resolved)
-                .then(|| report::verdict(&report::home_text(&project.dir(), &t.id)))
+                .then(|| report::verdict(&report::home_text(&records_dir, &t.id)))
                 .flatten(),
             ..Node::default()
         };
@@ -595,7 +596,7 @@ pub fn project_view(project: &Project, lives: &[Live]) -> ProjectView {
         slug: project.slug.clone(),
         name: project::display_name(&settings.name, &project.slug),
         dir: project.dir().to_string_lossy().into_owned(),
-        records: String::new(),
+        records: records_dir.to_string_lossy().into_owned(),
         repo: settings
             .repos
             .first()

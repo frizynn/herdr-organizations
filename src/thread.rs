@@ -243,21 +243,16 @@ pub fn record_path(project: &Project, id: &str) -> PathBuf {
 }
 
 pub fn task_path(project: &Project, id: &str) -> PathBuf {
-    threads_dir(project).join(format!("{id}.task.md"))
+    crate::records::task(&project.records_dir(), id)
 }
 
 pub fn home_report_path(project: &Project, id: &str) -> PathBuf {
-    home_report_in(&project.dir(), id)
-}
-
-/// [`home_report_path`] for a project folder.
-pub fn home_report_in(project_dir: &Path, id: &str) -> PathBuf {
-    project_dir.join("threads").join(format!("{id}.md"))
+    crate::records::report(&project.records_dir(), id)
 }
 
 /// The home copy of the files a thread produced.
 pub fn home_library_path(project: &Project, id: &str) -> PathBuf {
-    project.dir().join("library").join(id)
+    crate::records::library(&project.records_dir(), id)
 }
 
 pub fn load(project: &Project, id: &str) -> Result<Thread> {
@@ -402,7 +397,7 @@ pub fn next_lines(report: &str) -> Vec<String> {
 
 /// Lines the coordinator added to a thread's Next list (`threads/<id>.next.md`).
 pub fn extra_next_path(project: &Project, id: &str) -> PathBuf {
-    threads_dir(project).join(format!("{id}.next.md"))
+    crate::records::next(&project.records_dir(), id)
 }
 
 /// The thread's Next list: the report's `## Next` lines, then the coordinator's.
@@ -1127,7 +1122,7 @@ pub fn copy_home_remote(
                     .iter()
                     .map(|p| format!("{p} is a symbolic link; it was not copied")),
             );
-            let target_dir = project.dir().join("library").join(&thread.id);
+            let target_dir = home_library_path(project, &thread.id);
             let made = project.lock().and_then(|_lock| {
                 if !target_dir.is_dir() {
                     std::fs::create_dir(&target_dir)?;
@@ -1189,7 +1184,7 @@ fn copy_library_local(
         .map(|p| format!("{p} is a symbolic link; it was not copied"))
         .collect();
 
-    let target = project.dir().join("library").join(&thread.id);
+    let target = home_library_path(project, &thread.id);
     {
         let _lock = project.lock()?;
         if !target.is_dir() {

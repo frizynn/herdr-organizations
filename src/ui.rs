@@ -564,18 +564,26 @@ fn text_column(line: Line, node: &Node) -> Line {
     )
 }
 
+/// The folder of a project's reports and status files: the project folder
+/// in a view written before `records` existed.
+fn records_dir(project: &ProjectView) -> std::path::PathBuf {
+    let records = if project.records.is_empty() {
+        &project.dir
+    } else {
+        &project.records
+    };
+    std::path::PathBuf::from(records)
+}
+
 /// The STATUS.md a coordinator keeps: the project's for `root`, its own for
 /// a coordinator node; `None` for a worker.
 fn status_path(project: &ProjectView, node: &Node) -> Option<std::path::PathBuf> {
-    let dir = std::path::Path::new(&project.dir);
+    let records = records_dir(project);
     if node.id == ROOT_ID {
-        return Some(dir.join(crate::status_file::NAME));
+        return Some(crate::records::root_status(&records));
     }
-    (node.role == NodeRole::Coordinator.as_str()).then(|| {
-        dir.join("nodes")
-            .join(&node.id)
-            .join(crate::status_file::NAME)
-    })
+    (node.role == NodeRole::Coordinator.as_str())
+        .then(|| crate::records::node_status(&records, &node.id))
 }
 
 /// A node as the screens name it: the root is "Coordinator".
@@ -1660,7 +1668,7 @@ impl<'a> App<'a> {
             }
             y += 3;
         }
-        let report_text = report::home_text(std::path::Path::new(&project.dir), &node.id);
+        let report_text = report::home_text(&records_dir(&project), &node.id);
         let verdict = report::verdict(&report_text);
         let summary = report::summary(&report_text);
         let first_line = summary.as_deref().and_then(|s| s.lines().next());

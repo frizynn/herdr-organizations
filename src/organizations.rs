@@ -559,6 +559,13 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
                 .with_context(|| format!("could not finish creating node `{}`", record.id));
         }
     };
+    // Its status file's folder, when the records folder is elsewhere (in the
+    // project folder it is the scope). Never a records folder that is gone;
+    // the agent can make it too, so a failure here is not the node's.
+    let records = project.records_dir();
+    if record.is_spawning_coordinator() && records != project.dir() && records.is_dir() {
+        let _ = std::fs::create_dir_all(records.join("nodes").join(&record.id));
+    }
     // The task line is linked last, still under the lock, so a failure leaves
     // neither a record nor a line naming one.
     let written =
@@ -834,7 +841,15 @@ pub struct NodeStatus {
 }
 
 pub fn status_path(project: &Project, id: &str) -> PathBuf {
-    node_scope_dir(project, id).join(crate::status_file::NAME)
+    crate::records::node_status(&project.records_dir(), id)
+}
+
+/// Whether a node's status file can be read: its folders are real ones, a
+/// symbolic link is refused. False while they do not exist.
+fn status_dir_exists(path: &Path) -> Result<bool> {
+    let dir = path.parent().context("a status file has no folder")?;
+    let nodes = dir.parent().context("a status folder has no parent")?;
+    Ok(optional_real_directory(nodes)? && optional_real_directory(dir)?)
 }
 
 /// The status file of a spawning coordinator node, read like a scoped memory
@@ -849,9 +864,10 @@ pub fn node_status(project: &Project, record: &Thread) -> Result<Option<NodeStat
     let path = status_path(project, &record.id);
     let label = format!("nodes/{}/{NAME}", record.id);
     let mut budget = ScopedMemoryBudget::new();
-    let mut text = match existing_node_scope(project, &record.id)? {
-        Some(_) => read_scoped_memory_file(&path, &label, &mut budget)?.unwrap_or_default(),
-        None => String::new(),
+    let mut text = if status_dir_exists(&path)? {
+        read_scoped_memory_file(&path, &label, &mut budget)?.unwrap_or_default()
+    } else {
+        String::new()
     };
     if text.chars().count() > MAX_CHARS {
         text.clear();
@@ -873,8 +889,9 @@ pub fn node_status_json(
     if !record.is_spawning_coordinator() {
         return None;
     }
-    existing_node_scope(project, &record.id).ok()??;
-    crate::status_file::read(&status_path(project, &record.id))
+    let path = status_path(project, &record.id);
+    status_dir_exists(&path).ok()?.then_some(())?;
+    crate::status_file::read(&path)
 }
 
 fn optional_real_directory(path: &Path) -> Result<bool> {
