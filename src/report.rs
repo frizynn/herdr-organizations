@@ -269,7 +269,6 @@ mod tests {
             assert_eq!(verdict(&format!("Status:  {value} \n")), Some(expected));
         }
         for report in [
-            "Status: Done\n",
             "Status: done, mostly\n",
             "Status: needs decision\n",
             "Status: done | blocked\n",
@@ -289,6 +288,42 @@ mod tests {
             "needs-decision"
         );
         assert_eq!(Verdict::NeedsDecision.words(), "needs decision");
+    }
+
+    /// Case does not matter, and the words other harnesses write read too:
+    /// `pass` is done, `fail` is failed and `issues` is a verdict of its own.
+    #[test]
+    fn the_verdict_ignores_case_and_reads_pass_issues_and_fail() {
+        for (value, words, json) in [
+            ("Done", "done", "done"),
+            ("PASS", "done", "done"),
+            ("pass", "done", "done"),
+            ("Pass", "done", "done"),
+            ("NEEDS-DECISION", "needs decision", "needs-decision"),
+            ("Blocked", "blocked", "blocked"),
+            ("BLOCKED", "blocked", "blocked"),
+            ("FAILED", "failed", "failed"),
+            ("fail", "failed", "failed"),
+            ("FAIL", "failed", "failed"),
+            ("issues", "issues", "issues"),
+            ("ISSUES", "issues", "issues"),
+            ("Issues", "issues", "issues"),
+        ] {
+            let found = verdict(&format!("Status: {value}\n## Summary\nx\n"));
+            assert_eq!(found.map(Verdict::words), Some(words), "{value}");
+            assert_eq!(serde_json::to_value(found).unwrap(), json, "{value}");
+        }
+        for value in [
+            "passed",
+            "issue",
+            "failure",
+            "ok",
+            "PASS, mostly",
+            "ISSUES | PASS",
+            "NEEDS DECISION",
+        ] {
+            assert_eq!(verdict(&format!("Status: {value}\n")), None, "{value}");
+        }
     }
 
     #[test]

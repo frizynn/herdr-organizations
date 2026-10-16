@@ -5380,6 +5380,33 @@ mod tests {
         );
     }
 
+    /// A report that says `ISSUES` starts its tree row with `issues` in red,
+    /// like failed and blocked, and one that says `PASS` with `done` in green.
+    #[test]
+    fn issues_and_pass_start_a_tree_row_in_their_colors() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        app.snap.projects[0].threads[2].verdict = report::verdict("Status: ISSUES\n");
+        app.snap.projects[0].threads[1].verdict = report::verdict("Status: PASS\n");
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_tree("acme", None);
+        let frame = app.render(100, 20);
+        let text = frame.text();
+        let style = |said: &str| {
+            let (y, row) = text
+                .lines()
+                .enumerate()
+                .find(|(_, row)| row.contains(said))
+                .unwrap_or_else(|| panic!("{said}: {text}"));
+            let x = row[..row.find(said).unwrap()].chars().count();
+            frame.style_at(x, y).fg
+        };
+        assert_eq!(style("issues · billing api text"), RED.fg);
+        assert_eq!(style("done · landing text"), GREEN.fg);
+    }
+
     /// A node at or above a token cap is marked on its tree row.
     #[test]
     fn a_node_over_a_token_cap_is_marked_on_its_tree_row() {

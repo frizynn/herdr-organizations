@@ -1099,7 +1099,7 @@ mod tests {
     fn a_node_carries_the_verdict_of_its_report() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
-        for id in ["t-0001", "t-0002", "t-0003", "t-0004"] {
+        for id in ["t-0001", "t-0002", "t-0003", "t-0004", "t-0005", "t-0006"] {
             node_record(&project, id, "root", NodeRole::Worker, Group::Idle);
         }
         thread::update(&project, "t-0004", |t| t.status = thread::Status::Resolved).unwrap();
@@ -1112,13 +1112,71 @@ mod tests {
         );
         report("t-0002", "Status: blocked, kind of\n");
         report("t-0004", "Status: done\n");
+        report("t-0005", "Status: ISSUES\n");
+        report("t-0006", "Status: PASS\n");
         let view = project_view(&project, &[], &Default::default());
         let verdict = |id: &str| view.node(id).unwrap().verdict;
         assert_eq!(verdict("t-0001"), Some(crate::report::Verdict::Blocked));
         assert_eq!(verdict("t-0002"), None);
         assert_eq!(verdict("t-0003"), None);
         assert_eq!(verdict("t-0004"), None, "a resolved row shows none");
+        assert_eq!(verdict("t-0005").map(|v| v.words()), Some("issues"));
+        assert_eq!(verdict("t-0006"), Some(crate::report::Verdict::Done));
         assert_eq!(view.node("root").unwrap().verdict, None);
+    }
+
+    /// The state file holds an `issues` verdict as `failed` with `"issues":
+    /// true` beside it: a binary from before `issues` fails on a verdict it
+    /// does not know and would set the whole file aside, so it reads `failed`
+    /// and ignores the key. This binary reads `issues` back.
+    #[test]
+    fn an_issues_verdict_is_written_so_an_older_binary_still_reads_the_file() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        for (id, status) in [
+            ("t-0001", "ISSUES"),
+            ("t-0002", "failed"),
+            ("t-0003", "PASS"),
+        ] {
+            node_record(&project, id, "root", NodeRole::Worker, Group::Idle);
+            std::fs::write(
+                thread::home_report_path(&project, id),
+                format!("Status: {status}\n"),
+            )
+            .unwrap();
+        }
+        let snapshot = Snapshot {
+            schema_version: SCHEMA_VERSION,
+            projects: vec![project_view(&project, &[], &Default::default())],
+            ..Snapshot::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_if_changed(dir.path(), &snapshot).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path(dir.path())).unwrap()).unwrap();
+        let node = |id: &str| {
+            written["projects"][0]["threads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(node("t-0001")["verdict"], "failed");
+        assert_eq!(node("t-0001")["issues"], true);
+        assert_eq!(node("t-0002")["verdict"], "failed");
+        assert_eq!(node("t-0002").get("issues"), None);
+        assert_eq!(node("t-0003")["verdict"], "done");
+        assert_eq!(node("t-0003").get("issues"), None);
+
+        let back = read(dir.path()).unwrap();
+        let verdict = |id: &str| back.project("demo").unwrap().node(id).unwrap().verdict;
+        assert_eq!(verdict("t-0001").map(|v| v.words()), Some("issues"));
+        assert_eq!(verdict("t-0002"), Some(crate::report::Verdict::Failed));
+        assert_eq!(verdict("t-0003"), Some(crate::report::Verdict::Done));
+        assert_eq!(back, snapshot, "the file reads back as it was built");
     }
 
     #[test]
