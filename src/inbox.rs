@@ -1,4 +1,5 @@
-//! Inbox items: events the ticker leaves for the coordinator.
+//! Inbox items: events the ticker and the CLI leave for the coordinator, or
+//! for the user when the coordinator could not act on them.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -14,13 +15,51 @@ const MAX_CONSUME_CHARS: usize = 12_000;
 const MAX_INLINE_SUMMARY_CHARS: usize = 600;
 const MAX_INLINE_BODY_CHARS: usize = 2_000;
 
+/// Who an item is for. Every item is written and shown to the user (the
+/// popup, Nenu, `inbox list`); only the coordinator's wake the coordinator
+/// and reach it through `context` and `inbox consume`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Audience {
     User,
+    /// Also an item written before this field, or with a value this version
+    /// does not know: nothing that once reached the coordinator is hidden.
     #[default]
     #[serde(other)]
     Coordinator,
+}
+
+/// The items the coordinator cannot act on, by kind and event: the user
+/// merges, and these say what the user or the binary already did or what
+/// the user alone decides next. Everything else is the coordinator's.
+const FOR_THE_USER: [(&str, &str); 14] = [
+    ("thread-state", "landing"),
+    // Idle again after its report was read; a thread that stops without a
+    // new report is `stopped without a new report`, the coordinator's.
+    ("thread-state", "idle"),
+    ("thread-state", "resolved"),
+    ("pr", "PR opened"),
+    ("pr", "PR created"),
+    ("pr", "PR review activity"),
+    ("pr", "auto-fix"),
+    ("pr", "fix CI already asked"),
+    ("pr", "address comments already asked"),
+    ("pr", "resolve conflicts already asked"),
+    ("pr", "auto-merged"),
+    ("pr", "auto-merge refused"),
+    ("pr", "merge gate refused"),
+    // Merged by the user with `thread merge` or the popup. The ticker's own
+    // `PR merged` stays the coordinator's.
+    ("pr", "merged"),
+];
+
+/// Who an item of this kind and event is for.
+pub fn audience(kind: &str, event: &str) -> Audience {
+    if FOR_THE_USER.contains(&(kind, event)) {
+        Audience::User
+    } else {
+        Audience::Coordinator
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -35,6 +74,7 @@ pub struct Item {
     /// a prompt"). The nudge line is built from subjects and events only, never
     /// from summaries, which may quote text from reports or GitHub.
     pub event: String,
+    /// Decided from `kind` and `event` when the item is written (`audience`).
     pub audience: Audience,
     /// Empty except for `routine` items.
     #[serde(skip)]
@@ -78,8 +118,9 @@ pub fn safe_subject(subject: &str) -> String {
 
 /// Writes one item. The id is `<UTC timestamp>-<kind>-<subject>-<n>`, where
 /// `<n>` is a counter allocated under the project lock, so two events in one
-/// tick never share a name. `event` is a fixed phrase from this binary. `body`
-/// is empty except for `routine` items.
+/// tick never share a name. `event` is a fixed phrase from this binary, and
+/// with `kind` decides the item's audience. `body` is empty except for
+/// `routine` items.
 pub fn write(
     project: &Project,
     kind: &str,
@@ -107,7 +148,7 @@ pub fn write(
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect(),
         event: event.to_string(),
-        audience: Audience::Coordinator,
+        audience: audience(kind, event),
         body: String::new(),
     };
     let mut text = format!("+++\n{}+++\n", toml::to_string(&item)?);
@@ -154,6 +195,14 @@ pub fn unhandled(project: &Project) -> Vec<Item> {
         .filter_map(|text| parse(&text))
         .collect();
     items.sort_by(|a, b| a.id.cmp(&b.id));
+    items
+}
+
+/// Unhandled items for the coordinator, oldest first: what wakes it and what
+/// `context` and `inbox consume` deliver.
+pub fn for_coordinator(project: &Project) -> Vec<Item> {
+    let mut items = unhandled(project);
+    items.retain(|item| item.audience == Audience::Coordinator);
     items
 }
 
@@ -227,6 +276,7 @@ pub fn list_json(project: &Project) -> serde_json::Value {
                 "summary": item.summary,
                 "body": item.body,
                 "seen": seen.contains(&item.id),
+                "audience": item.audience,
             })
         })
         .collect();
@@ -281,11 +331,12 @@ fn render_item(item: &Item) -> String {
     rendered
 }
 
-/// Prints one bounded batch of new events and archives exactly that batch only
-/// after stdout has accepted and flushed the complete payload. A failed write
-/// therefore leaves every item available for a safe retry.
+/// Prints one bounded batch of the coordinator's new events and archives
+/// exactly that batch only after stdout has accepted and flushed the complete
+/// payload. A failed write therefore leaves every item available for a safe
+/// retry. Items for the user stay for the user.
 pub fn consume(project: &Project, out: &mut dyn Write) -> Result<usize> {
-    let all = unhandled(project);
+    let all = for_coordinator(project);
     if all.is_empty() {
         writeln!(out, "No new inbox events.")?;
         out.flush()?;
@@ -507,7 +558,7 @@ mod tests {
         assert!(text.contains("t-0002: read it"), "{text}");
         assert!(!text.contains("asked it"), "{text}");
         let left: Vec<String> = unhandled(&project).into_iter().map(|i| i.id).collect();
-        assert_eq!(left, [for_user.clone()]);
+        assert_eq!(left, std::slice::from_ref(&for_user));
         let mut out = Vec::new();
         assert_eq!(consume(&project, &mut out).unwrap(), 0);
         assert_eq!(String::from_utf8(out).unwrap(), "No new inbox events.\n");

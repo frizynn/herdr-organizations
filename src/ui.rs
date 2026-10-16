@@ -1670,7 +1670,8 @@ impl<'a> App<'a> {
         let verdict = report::verdict(&report_text);
         let summary = report::summary(&report_text);
         let first_line = summary.as_deref().and_then(|s| s.lines().next());
-        if verdict.is_some() || first_line.is_some() {
+        let remember = report::remember(&report_text);
+        if verdict.is_some() || first_line.is_some() || !remember.is_empty() {
             frame.put(1, y, "REPORT", HEAD);
             let mut x = 1;
             if let Some(verdict) = verdict {
@@ -1681,6 +1682,13 @@ impl<'a> App<'a> {
             }
             if let Some(line) = first_line {
                 frame.put(x, y + 1, line, Style::PLAIN);
+            }
+            // What it proposes to keep: how many lines, and the first.
+            if let Some(line) = remember.first() {
+                let label = format!("remember {} ·", remember.len());
+                let x = frame.put(1, y + 2, &label, DIM) + 1;
+                frame.put(x, y + 2, line, Style::PLAIN);
+                y += 1;
             }
             y += 3;
         }
@@ -1730,7 +1738,7 @@ impl<'a> App<'a> {
                         .at(17, state::age(&item.created), DIM)
                         .at(
                             22,
-                            term::fit(&item.summary, frame.width.saturating_sub(24)),
+                            term::fit(&item.shown_summary(), frame.width.saturating_sub(24)),
                             Style::PLAIN,
                         )
                         .target(Target::Inbox(item.id.clone())),
@@ -2491,7 +2499,7 @@ impl<'a> App<'a> {
                 );
                 lines.push(Line::new().at(
                     1,
-                    term::fit(&item.summary, width.saturating_sub(2)),
+                    term::fit(&item.shown_summary(), width.saturating_sub(2)),
                     DIM,
                 ));
             }

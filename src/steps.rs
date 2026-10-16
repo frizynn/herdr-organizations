@@ -401,7 +401,9 @@ pub fn write_thread_items(
                         notes.join("; ")
                     ));
                 }
-                inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
+                let text = std::fs::read_to_string(&report).unwrap_or_default();
+                let event = with_remember(NEW_REPORT, &text);
+                inbox::write(project, "thread-state", &t.id, &event, &summary, "")?;
             }
         }
         if notifier.wants_review() {
@@ -418,14 +420,18 @@ pub fn write_thread_items(
     Ok(())
 }
 
-/// A thread-state item's event, from the group it moved to.
+/// A thread-state item's event, from the group it moved to. Idle straight
+/// from Working is a stop without a new report, which only the coordinator
+/// would notice; any other Idle (its report was read) is not news for it,
+/// as `parent_phrase` says for a coordinator node.
 fn transition_event(change: &Transition) -> &'static str {
     match (change.to, change.note.as_str()) {
         (Group::WaitingOnYou, "blocked") => "blocked on a prompt",
         (Group::WaitingOnYou, "pane closed") => "pane closed",
         (Group::WaitingOnYou, "no agent") => "agent gone",
-        (Group::WaitingOnYou, _) => "waiting on you",
-        (Group::Landing, _) => "landing",
+        (Group::WaitingOnYou, _) => WAITING_ON_YOU,
+        (Group::Landing, _) => LANDING,
+        (Group::Idle, _) if change.from == Some(Group::Working) => STOPPED,
         (Group::Idle, _) => "idle",
         _ => "changed state",
     }
@@ -496,7 +502,9 @@ fn hash_ids(ids: &BTreeSet<String>) -> String {
 }
 
 /// Step 6. A given set of unseen items is announced once; there is no timed
-/// re-nudge. With `nudge = false` the user gets a herdr notification instead
+/// re-nudge. Only the coordinator's items count (`inbox::for_coordinator`):
+/// one for the user waits in the popup and never wakes it. With
+/// `nudge = false` the user gets a herdr notification instead
 /// of a prompt in the coordinator; with no live coordinator the same.
 /// `coordinator_ready` is a coordinator idle long enough to be prompted (see
 /// `coordinator::nudge_target`). A prompt is typed only into an input box
@@ -511,7 +519,7 @@ pub fn nudge(
     now: jiff::Timestamp,
 ) -> Result<()> {
     let seen = inbox::seen(project);
-    let unseen: Vec<inbox::Item> = inbox::unhandled(project)
+    let unseen: Vec<inbox::Item> = inbox::for_coordinator(project)
         .into_iter()
         .filter(|i| !seen.contains(&i.id))
         .collect();
@@ -572,6 +580,21 @@ fn nudge_on(project: &Project) -> bool {
     project
         .read_project_md()
         .map_or(Settings::default().nudge, |(settings, _)| settings.nudge)
+}
+
+/// The word a wake line adds after a report's phrase when the report
+/// proposes what to remember (`report::remember`).
+const REMEMBER: &str = "remember";
+
+/// `phrase`, followed by `remember` when `report` has a `## Remember`
+/// section. Only the fixed word reaches a prompt, never the section's text:
+/// `node show` and `--json` carry it.
+fn with_remember(phrase: &str, report: &str) -> String {
+    if report::remember(report).is_empty() {
+        phrase.to_string()
+    } else {
+        format!("{phrase}, {REMEMBER}")
+    }
 }
 
 const WAITING_ON_YOU: &str = "waiting on you";
@@ -654,36 +677,40 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
 }
 
 /// One line per parent, built from child ids and fixed phrases only, e.g.
-/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done`. A phrase
-/// about a report gives way to the report's verdict, so the parent need not
-/// open it; waiting on you and stopped are live and win over an older report.
-/// A pending value with no phrase (an Idle queued by an older version) is
-/// dropped; the comparison ignores case so a pending label from an older
-/// version still counts.
+/// `t-0098 waiting on you; t-0101 blocked; t-0094, t-0095 done; t-0096 done,
+/// remember`. A phrase about a report gives way to the report's verdict, so
+/// the parent need not open it, and adds `remember` when the report proposes
+/// what to keep; waiting on you and stopped are live and win over an older
+/// report. A pending value with no phrase (an Idle queued by an older
+/// version) is dropped; the comparison ignores case so a pending label from
+/// an older version still counts. `report` is a child's report text.
 fn parent_update_line(
     updates: &BTreeMap<String, String>,
-    verdict: impl Fn(&str) -> Option<Verdict>,
+    report: impl Fn(&str) -> String,
 ) -> String {
-    let said: Vec<(String, &str)> = updates
+    let said: Vec<(String, String)> = updates
         .iter()
         .filter_map(|(id, pending)| {
             let phrase = *PARENT_PHRASES
                 .iter()
                 .find(|phrase| pending.eq_ignore_ascii_case(phrase))?;
-            let phrase = REPORT_PHRASES
-                .contains(&phrase)
-                .then(|| verdict(id))
-                .flatten()
-                .map_or(phrase, Verdict::words);
-            Some((inbox::safe_subject(id), phrase))
+            let said = if REPORT_PHRASES.contains(&phrase) {
+                let text = report(id);
+                let phrase = report::verdict(&text).map_or(phrase, Verdict::words);
+                with_remember(phrase, &text)
+            } else {
+                phrase.to_string()
+            };
+            Some((inbox::safe_subject(id), said))
         })
         .collect();
     PARENT_LINE_ORDER
         .iter()
+        .flat_map(|phrase| [phrase.to_string(), format!("{phrase}, {REMEMBER}")])
         .filter_map(|phrase| {
             let ids: Vec<&str> = said
                 .iter()
-                .filter(|(_, said)| said == phrase)
+                .filter(|(_, said)| *said == phrase)
                 .map(|(id, _)| id.as_str())
                 .collect();
             (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
@@ -725,11 +752,7 @@ pub fn nudge_parent_coordinators(
         let line = state
             .parent_updates
             .get(&parent_id)
-            .map(|updates| {
-                parent_update_line(updates, |id| {
-                    report::verdict(&report::home_text(&records_dir, id))
-                })
-            })
+            .map(|updates| parent_update_line(updates, |id| report::home_text(&records_dir, id)))
             .unwrap_or_default();
         if line.is_empty() {
             state.parent_updates.remove(&parent_id);

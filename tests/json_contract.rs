@@ -438,7 +438,7 @@ fn inbox_list_json_says_who_each_item_is_for() {
     assert!(!context.contains("auto-fix asked it"), "{context}");
     assert!(context.contains("## Inbox (1 unhandled)"), "{context}");
     assert!(
-        context.contains("\n1 more item is for the user, not for you: leave it.\n"),
+        context.contains("\n1 more item(s) for the user, not for you: leave them.\n"),
         "{context}"
     );
 }

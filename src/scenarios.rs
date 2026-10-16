@@ -6603,10 +6603,10 @@ fn an_item_for_the_user_never_wakes_the_coordinator_or_reaches_its_context() {
         assert!(digest.contains("## Inbox (1 unhandled)"), "{digest}");
         assert!(digest.contains(&theirs), "{digest}");
         assert!(
-            digest.contains("\n1 more item is for the user, not for you: leave it.\n"),
+            digest.contains("\n1 more item(s) for the user, not for you: leave them.\n"),
             "{digest}"
         );
-        assert_eq!(shown, [theirs.clone()]);
+        assert_eq!(shown, std::slice::from_ref(&theirs));
 
         let listed = inbox::list_json(&project);
         let audience = |id: &str| {
