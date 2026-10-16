@@ -762,10 +762,15 @@ fn an_agent_pane_cannot_merge_through_the_gate_or_change_the_merge_settings() {
     assert!(fixture.gh_calls().is_empty(), "{:?}", fixture.gh_calls());
 
     for (key, value) in [
-        ("merge_gate", "./approve.sh"),
+        ("merge_gate", "/opt/gates/approve.sh"),
         ("merge_gate_timeout", "5"),
         ("merge_method", "merge"),
         ("auto_merge", "on"),
+        // `default` removes the key, which can turn a project's opt-out off.
+        ("merge_gate", "default"),
+        ("merge_gate_timeout", "default"),
+        ("merge_method", "default"),
+        ("auto_merge", "default"),
     ] {
         for pane in ["w2:p1", ""] {
             let out = fixture.run_in_pane(pane, &["safety", "set", "demo", key, value]);
@@ -813,4 +818,61 @@ fn context_and_project_show_name_the_gate_program_method_and_auto_merge() {
         "{safety}"
     );
     assert!(!safety.contains("--strict"), "only the program: {safety}");
+}
+
+#[test]
+fn a_relative_merge_gate_is_a_config_error_and_nothing_runs() {
+    let fixture = Fixture::new();
+    let repo = fixture.home.path().join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let record = fixture.record() + &format!("repo = \"{}\"\n", repo.display());
+    std::fs::write(fixture.root.join("demo/threads/t-0001.toml"), record).unwrap();
+    // An agent's script in the thread's repository, under the gate's name.
+    let ran = fixture.home.path().join("agent-script-ran");
+    let script = repo.join("approve.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nexit 0\n", ran.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.configure("merge_gate = [\"./approve.sh\"]\n");
+    fixture.serve("REVIEW_REQUIRED", "");
+
+    let out = fixture.run(&["thread", "merge", "demo", "t-0001"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("absolute"), "{}", stderr(&out));
+    assert!(!ran.exists(), "the repository's script ran");
+    assert!(fixture.gh_calls().is_empty(), "{:?}", fixture.gh_calls());
+}
+
+#[test]
+fn an_unreadable_config_fails_the_merge_instead_of_skipping_the_gate() {
+    let fixture = Fixture::new();
+    fixture.gate("exit 1", "");
+    // Valid TOML, then one byte that is not UTF-8 in a comment.
+    let path = fixture
+        .home
+        .path()
+        .join(".config/herdr-projects/config.toml");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"# caf\xe9\n");
+    std::fs::write(&path, bytes).unwrap();
+    fixture.serve("APPROVED", r#"{"name":"build","conclusion":"SUCCESS"}"#);
+
+    let out = fixture.run(&["thread", "merge", "demo", "t-0001"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("could not be read"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        fixture
+            .gh_calls()
+            .iter()
+            .all(|c| !c.starts_with("pr merge")),
+        "{:?}",
+        fixture.gh_calls()
+    );
 }

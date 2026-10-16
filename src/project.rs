@@ -1157,6 +1157,10 @@ mod tests {
         for bad in [
             "merge_gate = []\n",
             "merge_gate = [\"\"]\n",
+            // A relative path resolves in the thread's repository or the
+            // project folder, which agents write.
+            "merge_gate = [\"./approve.sh\"]\n",
+            "merge_gate = [\"bin/approve.sh\"]\n",
             "merge_gate = \"./approve.sh\"\n",
             "merge_gate_timeout = 0\n",
             "merge_gate_timeout = 86400\n",
@@ -1165,7 +1169,8 @@ mod tests {
         ] {
             assert!(load(bad).is_err(), "{bad}");
         }
-        load("merge_gate = [\"./approve.sh\", \"--pr\"]\nmerge_gate_timeout = 30\nmerge_method = \"rebase\"\nauto_merge = true\n").unwrap();
+        load("merge_gate = [\"/opt/gates/approve.sh\", \"--pr\"]\nmerge_gate_timeout = 30\nmerge_method = \"rebase\"\nauto_merge = true\n").unwrap();
+        load("merge_gate = [\"approve-merge\"]\n").unwrap();
         // A key a later version adds is ignored, so this binary keeps reading
         // a config.toml written for a newer one, as an older binary reads ours.
         load("a_later_setting = [1, 2]\n").unwrap();

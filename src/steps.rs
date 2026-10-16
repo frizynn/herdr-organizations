@@ -2416,6 +2416,36 @@ mod tests {
         }
 
         #[test]
+        fn a_refusing_gate_with_auto_merge_still_lets_auto_fix_ask_the_thread() {
+            let setup = Setup::new("idle", |t| {
+                t.auto_merge = true;
+                t.auto_fix_ci = true;
+            });
+            let ctx = setup.world.ctx();
+            std::fs::create_dir_all(&ctx.config_dir).unwrap();
+            std::fs::write(
+                ctx.config_dir.join("config.toml"),
+                format!(
+                    "[safety.\"{}\"]\nmerge_gate = [\"review-gate\"]\n",
+                    setup.project.canonical_dir().display()
+                ),
+            )
+            .unwrap();
+            setup.world.runner.on("review-gate", fail(1, ""));
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", GREEN, 10, 2);
+            let mut state = State::default();
+            setup.check(&mut state);
+            setup.check(&mut state);
+            assert_eq!(setup.world.runner.count("review-gate"), 2);
+            assert_eq!(setup.world.runner.count("gh pr merge"), 0);
+            assert_eq!(
+                setup.world.runner.count("agent prompt"),
+                1,
+                "the reviewer's comments reach the thread while the gate refuses"
+            );
+        }
+
+        #[test]
         fn auto_fix_treats_more_comments_or_a_change_request_as_news_but_not_an_approval() {
             let pending = r#"{"name":"build","status":"IN_PROGRESS"}"#;
             let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
