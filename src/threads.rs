@@ -1824,6 +1824,9 @@ pub struct ThreadJson {
     /// The TASKS.md task it was delegated from, and `task`, `chat` or empty.
     pub task: String,
     pub task_origin: String,
+    /// A spawning coordinator node's STATUS.md, `null` for every other node
+    /// and while it is missing.
+    pub status_file: Option<crate::status_file::StatusJson>,
 }
 
 /// A thread's pull request as the ticker last saw it (every two minutes).
@@ -1979,6 +1982,7 @@ pub fn thread_json(project: &Project, row: &Row, state: &steps::State) -> Thread
             .into_owned(),
         task: t.task.clone(),
         task_origin: t.task_origin.clone(),
+        status_file: organizations::node_status_json(project, t),
     }
 }
 
@@ -2120,10 +2124,10 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
         println!("# home copy of the report: {}", report.display());
     }
     if record.is_spawning_coordinator() {
-        let handoff = organizations::handoff_path(&project, id);
-        let written = std::fs::symlink_metadata(&handoff).is_ok_and(|m| m.is_file());
+        let status = organizations::status_path(&project, id);
+        let written = std::fs::symlink_metadata(&status).is_ok_and(|m| m.is_file());
         let note = if written { "" } else { " (not written yet)" };
-        println!("# handoff: {}{note}", handoff.display());
+        println!("# status: {}{note}", status.display());
     }
     let next = thread::all_next(&project, id);
     if !next.is_empty() {

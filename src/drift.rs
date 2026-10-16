@@ -1,4 +1,5 @@
-//! Drift: where TASKS.md and HANDOFF.md disagree with the thread records.
+//! Drift: where TASKS.md and the root's STATUS.md disagree with the thread
+//! records and the user's messages.
 //! `context` lists it for the coordinator every turn. It is computed from the
 //! files on each call; nothing is stored, and nothing here changes a file.
 
@@ -6,18 +7,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::project::Project;
+use crate::status_file::{self, MAX_CHARS};
 use crate::tasks::{self, Owner, Task};
 use crate::thread::{self, Status, Thread};
 
-/// What `context` prints of `HANDOFF.md`.
-pub const MAX_HANDOFF_CHARS: usize = 8_000;
 /// Lines of the drift section, the "more" line included.
 const MAX_LINES: usize = 10;
 
 /// In the order `context` lists them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
-    HandoffOverLimit,
+    StatusOverLimit,
+    StatusRename,
+    StatusStale,
     ThreadResolved,
     ThreadMissing,
     DoneNotDeleted,
@@ -26,8 +28,10 @@ pub enum Rule {
 }
 
 impl Rule {
-    pub const ALL: [Rule; 6] = [
-        Rule::HandoffOverLimit,
+    pub const ALL: [Rule; 8] = [
+        Rule::StatusOverLimit,
+        Rule::StatusRename,
+        Rule::StatusStale,
         Rule::ThreadResolved,
         Rule::ThreadMissing,
         Rule::DoneNotDeleted,
@@ -37,7 +41,9 @@ impl Rule {
 
     pub fn name(self) -> &'static str {
         match self {
-            Rule::HandoffOverLimit => "handoff-over-limit",
+            Rule::StatusOverLimit => "status-over-limit",
+            Rule::StatusRename => "status-rename",
+            Rule::StatusStale => "status-stale",
             Rule::ThreadResolved => "thread-resolved",
             Rule::ThreadMissing => "thread-missing",
             Rule::DoneNotDeleted => "done-not-deleted",
@@ -45,14 +51,22 @@ impl Rule {
             Rule::DuplicateTitle => "duplicate-title",
         }
     }
+
+    /// About the root's status file rather than a TASKS.md line.
+    pub fn about_status(self) -> bool {
+        matches!(
+            self,
+            Rule::StatusOverLimit | Rule::StatusRename | Rule::StatusStale
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub rule: Rule,
-    /// The TASKS.md line, from 1; 0 for the handoff.
+    /// The TASKS.md line, from 1; 0 for the status file.
     pub line: usize,
-    /// The task's title, empty for the handoff.
+    /// The task's title, empty for the status file.
     pub task: String,
     /// The thread the task line names, empty when none.
     pub thread: String,
@@ -74,8 +88,8 @@ impl Problem {
 
     /// One line of the digest's drift section.
     pub fn text(&self) -> String {
-        if self.rule == Rule::HandoffOverLimit {
-            return format!("- [{}] HANDOFF.md: {}", self.rule.name(), self.detail);
+        if self.rule.about_status() {
+            return format!("- [{}] {}", self.rule.name(), self.detail);
         }
         let thread = if self.thread.is_empty() {
             String::new()
@@ -98,26 +112,51 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// `HANDOFF.md`'s length in characters when it is over what `context`
-/// prints, `None` within it.
-pub fn handoff_over(project: &Project) -> Option<usize> {
-    let text = std::fs::read_to_string(project.dir().join("HANDOFF.md")).unwrap_or_default();
-    let chars = text.chars().count();
-    (chars > MAX_HANDOFF_CHARS).then_some(chars)
+/// The root's status file and its length in characters when it is over
+/// what `context` prints, `None` within it.
+pub fn status_over(project: &Project) -> Option<(&'static str, usize)> {
+    let file = status_file::root(project);
+    let chars = file.text().chars().count();
+    (chars > MAX_CHARS).then_some((file.name, chars))
+}
+
+/// The root's status file problems: too long, still under its old name, or
+/// older than the user's previous message.
+fn status_problems(project: &Project) -> Vec<Problem> {
+    let problem = |rule: Rule, detail: String| Problem {
+        rule,
+        line: 0,
+        task: String::new(),
+        thread: String::new(),
+        detail,
+    };
+    let file = status_file::root(project);
+    let mut found = Vec::new();
+    if let Some((name, chars)) = status_over(project) {
+        found.push(problem(
+            Rule::StatusOverLimit,
+            format!("{name} has {chars} characters, this digest shows the first {MAX_CHARS}"),
+        ));
+    }
+    if file.legacy() {
+        found.push(problem(
+            Rule::StatusRename,
+            format!("rename {} to {}", status_file::OLD_NAME, status_file::NAME),
+        ));
+    }
+    let previous = status_file::previous_ask(project, status_file::ROOT_KEY);
+    if status_file::stale(&file.path, previous) {
+        found.push(problem(
+            Rule::StatusStale,
+            format!("{} is older than the user's last message", file.name),
+        ));
+    }
+    found
 }
 
 /// Every problem in the project's files, in listing order.
 pub fn problems(project: &Project) -> Vec<Problem> {
-    let mut found = Vec::new();
-    if let Some(chars) = handoff_over(project) {
-        found.push(Problem {
-            rule: Rule::HandoffOverLimit,
-            line: 0,
-            task: String::new(),
-            thread: String::new(),
-            detail: format!("{chars} characters, this digest shows the first {MAX_HANDOFF_CHARS}"),
-        });
-    }
+    let mut found = status_problems(project);
     let records: BTreeMap<String, Thread> = thread::list(project)
         .into_iter()
         .map(|t| (t.id.clone(), t))
@@ -242,7 +281,7 @@ pub fn section(problems: &[Problem], slug: &str) -> String {
 pub fn task_lint(project: &Project) -> Vec<Problem> {
     problems(project)
         .into_iter()
-        .filter(|p| p.rule != Rule::HandoffOverLimit)
+        .filter(|p| !p.rule.about_status())
         .collect()
 }
 

@@ -766,9 +766,9 @@ pub fn scoped_context(project: &Project, target: &Thread) -> Result<ScopedContex
     })
 }
 
-/// A spawning coordinator node's own state file, as its brief inlines it.
+/// A spawning coordinator node's own status file, as its brief inlines it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeHandoff {
+pub struct NodeStatus {
     pub path: PathBuf,
     /// Empty when the node has not written it yet or it was left out.
     pub text: String,
@@ -776,33 +776,47 @@ pub struct NodeHandoff {
     pub omitted: Option<String>,
 }
 
-pub fn handoff_path(project: &Project, id: &str) -> PathBuf {
-    node_scope_dir(project, id).join("HANDOFF.md")
+pub fn status_path(project: &Project, id: &str) -> PathBuf {
+    node_scope_dir(project, id).join(crate::status_file::NAME)
 }
 
-/// The handoff of a spawning coordinator node, read like a scoped memory file
-/// (a regular file, never through a symbolic link, at most 8 KiB). Only the
-/// node's own brief reads it: unlike its memory, descendants never inherit it.
-pub fn node_handoff(project: &Project, record: &Thread) -> Result<Option<NodeHandoff>> {
+/// The status file of a spawning coordinator node, read like a scoped memory
+/// file (a regular file, never through a symbolic link, at most 8 KiB). Only
+/// the node's own brief reads it: unlike its memory, descendants never
+/// inherit it.
+pub fn node_status(project: &Project, record: &Thread) -> Result<Option<NodeStatus>> {
     if !record.is_spawning_coordinator() {
         return Ok(None);
     }
-    let path = handoff_path(project, &record.id);
+    let path = status_path(project, &record.id);
     let mut budget = ScopedMemoryBudget::new();
     let text = match existing_node_scope(project, &record.id)? {
         Some(_) => read_scoped_memory_file(
             &path,
-            &format!("nodes/{}/HANDOFF.md", record.id),
+            &format!("nodes/{}/{}", record.id, crate::status_file::NAME),
             &mut budget,
         )?
         .unwrap_or_default(),
         None => String::new(),
     };
-    Ok(Some(NodeHandoff {
+    Ok(Some(NodeStatus {
         path,
         text,
         omitted: budget.omissions.into_iter().next(),
     }))
+}
+
+/// A spawning coordinator node's status file in the `--json` contract;
+/// `None` for every other node, and while the file is missing or unsafe.
+pub fn node_status_json(
+    project: &Project,
+    record: &Thread,
+) -> Option<crate::status_file::StatusJson> {
+    if !record.is_spawning_coordinator() {
+        return None;
+    }
+    existing_node_scope(project, &record.id).ok()??;
+    crate::status_file::read(&status_path(project, &record.id))
 }
 
 fn optional_real_directory(path: &Path) -> Result<bool> {
@@ -833,7 +847,7 @@ fn read_regular_file(path: &Path) -> Result<String> {
     Ok(contents)
 }
 
-fn open_regular_file_no_follow(path: &Path) -> Result<File> {
+pub fn open_regular_file_no_follow(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

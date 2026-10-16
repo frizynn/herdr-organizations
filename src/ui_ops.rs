@@ -2,7 +2,7 @@
 //! action: these are the only places the views call Herdr, git or gh, and
 //! every one reuses the CLI mechanic of the same name.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -66,6 +66,12 @@ pub enum Jump {
     Coordinator { slug: String },
     /// Stop the project's coordinator and start one on `profile`
     Replace { slug: String, profile: String },
+    /// Open a file in a new tab, as `open-file` does (a coordinator's STATUS.md)
+    File {
+        path: String,
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 impl Jump {
@@ -75,6 +81,13 @@ impl Jump {
             Jump::Node { slug, id } => vec!["jump", "node", slug, id],
             Jump::Coordinator { slug } => vec!["jump", "coordinator", slug],
             Jump::Replace { slug, profile } => vec!["jump", "replace", slug, profile],
+            Jump::File { path, workspace } => {
+                let mut args = vec!["jump", "file", path.as_str()];
+                if let Some(workspace) = workspace {
+                    args.extend(["--workspace", workspace.as_str()]);
+                }
+                args
+            }
         }
     }
 
@@ -87,6 +100,9 @@ impl Jump {
             Jump::Replace { slug, profile } => {
                 replace_coordinator(ctx, slug, profile, &Default::default()).map(|_| ())
             }
+            Jump::File { path, workspace } => term::quiet(|| {
+                crate::settings::open_file(ctx, Path::new(path), workspace.as_deref())
+            }),
         }
     }
 

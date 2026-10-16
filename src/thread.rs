@@ -205,7 +205,7 @@ impl Thread {
     }
 
     /// A local coordinator node that may create children: it gets the
-    /// coordinator-node brief and keeps a handoff, and its children's routine
+    /// coordinator-node brief and keeps a status file, and its children's routine
     /// events go to it instead of the project inbox.
     pub fn is_spawning_coordinator(&self) -> bool {
         self.role == NodeRole::Coordinator && self.can_spawn && !self.is_remote()
@@ -443,9 +443,10 @@ pub struct BriefInput<'a> {
     /// `<binary> --root <root>` for `report`; empty for a remote thread,
     /// whose machine has its own binary (or none).
     pub report_prefix: &'a str,
-    /// A spawning coordinator node's handoff: it then gets the coordinator-node
-    /// brief instead of the thread brief. `None` for every other node.
-    pub handoff: Option<&'a organizations::NodeHandoff>,
+    /// A spawning coordinator node's status file: it then gets the
+    /// coordinator-node brief instead of the thread brief. `None` for every
+    /// other node.
+    pub status: Option<&'a organizations::NodeStatus>,
 }
 
 /// The header block every brief opens with: what the worker acts on, never
@@ -491,21 +492,21 @@ fn brief_header(input: &BriefInput) -> String {
         input.library_path
     ));
     out.push_str(&format!("- Report: `{}`\n", input.report_path));
-    if let Some(handoff) = input.handoff {
-        out.push_str(&handoff_line(handoff));
+    if let Some(status) = input.status {
+        out.push_str(&status_line(status));
     }
     out
 }
 
-fn handoff_line(handoff: &organizations::NodeHandoff) -> String {
-    format!("- Handoff, your state file: `{}`\n", handoff.path.display())
+fn status_line(status: &organizations::NodeStatus) -> String {
+    format!("- Status, your status file: `{}`\n", status.path.display())
 }
 
 pub fn compose_brief(input: &BriefInput) -> String {
     let mut brief = brief_header(input);
     brief.push('\n');
     brief.push_str(
-        match input.handoff {
+        match input.status {
             Some(_) => include_str!("../skill/COORDINATOR_NODE.md"),
             None => include_str!("../skill/THREAD.md"),
         }
@@ -541,11 +542,11 @@ pub fn compose_brief(input: &BriefInput) -> String {
         ));
     }
 
-    if let Some(handoff) = input.handoff {
+    if let Some(status) = input.status {
         brief.push_str(
-            "\n# Your handoff\n\nWhat your handoff file held when this brief was written:\n\n",
+            "\n# Your status\n\nWhat your status file held when this brief was written:\n\n",
         );
-        match (&handoff.omitted, handoff.text.trim()) {
+        match (&status.omitted, status.text.trim()) {
             (Some(reason), _) => brief.push_str(&format!(
                 "Left out ({reason}). Rewrite it as a regular file under 4,000 characters.\n"
             )),
@@ -571,8 +572,8 @@ pub fn compose_brief(input: &BriefInput) -> String {
         "\n\n# Paths\n\n- Report: `{}`\n- Library folder for files meant for the user: `{}`\n- Uploads from the user: `{}`\n",
         input.report_path, input.library_path, input.uploads_path
     ));
-    if let Some(handoff) = input.handoff {
-        brief.push_str(&handoff_line(handoff));
+    if let Some(status) = input.status {
+        brief.push_str(&status_line(status));
     }
     brief
 }
@@ -591,7 +592,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
     };
     let context = organizations::scoped_context(project, thread)?;
     let protocol = organizations::node_protocol(thread, &command_prefix, &project.slug);
-    let handoff = organizations::node_handoff(project, thread)?;
+    let status = organizations::node_status(project, thread)?;
     Ok(compose_brief(&BriefInput {
         project_name: &project_name,
         slug: &project.slug,
@@ -608,7 +609,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
         report_path: &thread.report_path(),
         library_path: &thread.library_path(),
         report_prefix,
-        handoff: handoff.as_ref(),
+        status: status.as_ref(),
     }))
 }
 
@@ -1662,7 +1663,7 @@ mod tests {
             report_path: "/wt/.herdr-project/demo-t-0001/report.md",
             library_path: "/wt/.herdr-project/demo-t-0001/library",
             report_prefix: "/bin/hp --root /r",
-            handoff: None,
+            status: None,
         };
         let brief = compose_brief(&input);
         let pos = |needle: &str| {

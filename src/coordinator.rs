@@ -14,12 +14,12 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_profile::{AgentProfile, ProfileOverrides};
-use crate::drift::MAX_HANDOFF_CHARS;
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::paths::{self, Ctx, SessionFlags};
 use crate::profiles::{Profile, Role};
 use crate::project::{self, Coordinator, Project, Status};
 use crate::remote::quote;
+use crate::status_file::{self, MAX_CHARS};
 use crate::{inbox, names, organizations, ticker};
 
 /// A coordinator counts as idle for a nudge once its `(agent_status,
@@ -767,10 +767,10 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = writeln!(out, "Commands: {prefix}");
     let _ = writeln!(out, "Project: {slug} ({})", project.status());
     let _ = writeln!(out, "Folder: {}", project.dir().display());
-    if let Some(chars) = crate::drift::handoff_over(project) {
+    if let Some((name, chars)) = crate::drift::status_over(project) {
         let _ = writeln!(
             out,
-            "HANDOFF.md has {chars} characters and this digest shows only the first {MAX_HANDOFF_CHARS}; compact it before anything else."
+            "{name} has {chars} characters and this digest shows only the first {MAX_CHARS}; compact it before anything else."
         );
     }
 
@@ -859,22 +859,24 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         }
     );
 
-    let _ = writeln!(out, "\n## Current handoff (HANDOFF.md)");
-    let handoff = std::fs::read_to_string(project.dir().join("HANDOFF.md")).unwrap_or_default();
-    let handoff_chars = handoff.chars().count();
-    let bounded_handoff: String = handoff.chars().take(MAX_HANDOFF_CHARS).collect();
+    let status = status_file::root(project);
+    let _ = writeln!(out, "\n## Status ({})", status.name);
+    let text = status.text();
+    let chars = text.chars().count();
+    let bounded: String = text.chars().take(MAX_CHARS).collect();
     let _ = writeln!(
         out,
         "{}",
-        if bounded_handoff.trim().is_empty() {
-            "(none; coordinator must maintain HANDOFF.md)".to_string()
-        } else if handoff_chars > MAX_HANDOFF_CHARS {
+        if bounded.trim().is_empty() {
+            format!("(none; coordinator must maintain {})", status_file::NAME)
+        } else if chars > MAX_CHARS {
             format!(
-                "{}\n\n(truncated after {MAX_HANDOFF_CHARS} characters; compact HANDOFF.md)",
-                bounded_handoff.trim()
+                "{}\n\n(truncated after {MAX_CHARS} characters; compact {})",
+                bounded.trim(),
+                status.name
             )
         } else {
-            bounded_handoff.trim().to_string()
+            bounded.trim().to_string()
         }
     );
 
