@@ -133,7 +133,8 @@ pub fn require_slug(ctx: &Ctx, slug: Option<&str>) -> Result<String> {
     }
 }
 
-fn visible_slugs(ctx: &Ctx) -> Vec<String> {
+/// Every project that is not archived.
+pub fn visible_slugs(ctx: &Ctx) -> Vec<String> {
     project::list_slugs(&ctx.root)
         .into_iter()
         .filter(|slug| Project::load(&ctx.root, slug).is_ok_and(|p| p.status() != Status::Archived))
@@ -187,9 +188,39 @@ pub struct ProjectJson {
     pub usage: Option<crate::usage::Usage>,
     /// The root coordinator's STATUS.md, `null` while it does not exist.
     pub status_file: Option<crate::status_file::StatusJson>,
+    /// Left out for a project that was never opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<CoordinatorJson>,
 }
 
-pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
+/// The project's root coordinator, from its record and the ticker's last
+/// look at its pane.
+#[derive(Serialize)]
+pub struct CoordinatorJson {
+    pub pane_id: String,
+    pub agent: String,
+    pub model: String,
+    /// The agent state Herdr reported (`working`, `blocked`, `idle`,
+    /// `done`), empty before the ticker saw the pane.
+    pub state: String,
+}
+
+fn coordinator_json(project: &Project) -> Option<CoordinatorJson> {
+    let record = project.coordinator()?;
+    let state = crate::coordinator::live(project)
+        .into_iter()
+        .find(|pane| pane.pane_id == record.pane_id)
+        .map(|pane| pane.agent_status)
+        .unwrap_or_default();
+    Some(CoordinatorJson {
+        pane_id: record.pane_id,
+        agent: record.agent,
+        model: record.model,
+        state,
+    })
+}
+
+pub fn project_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> ProjectJson {
     let settings = project
         .read_project_md()
         .map(|(s, _)| s)
@@ -207,7 +238,9 @@ pub fn project_json(project: &Project, rows: &[Row]) -> ProjectJson {
         icon: settings.icon,
         tone: settings.tone,
         usage: crate::usage::load(project).usage(crate::organizations::ROOT_ID),
-        status_file: crate::status_file::read(&crate::status_file::root(project)),
+        status_file: crate::status_file::read(&crate::status_file::root(project))
+            .map(|status| status.confirmed(&crate::asks::Records::load(ctx, project))),
+        coordinator: coordinator_json(project),
     }
 }
 
@@ -264,7 +297,7 @@ fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
         })
         .collect();
     Ok(ProjectShowJson {
-        project: project_json(&project, &threads::rows(ctx, &project)),
+        project: project_json(ctx, &project, &threads::rows(ctx, &project)),
         instructions,
         memory: std::fs::read_to_string(project.dir().join("MEMORY.md")).unwrap_or_default(),
         memory_files,
@@ -371,7 +404,7 @@ pub fn run_json(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
     for slug in slugs {
         let project = Project::load(&ctx.root, &slug)?;
         let rows = threads::rows(ctx, &project);
-        let mut value = serde_json::to_value(project_json(&project, &rows))?;
+        let mut value = serde_json::to_value(project_json(ctx, &project, &rows))?;
         value["threads"] = serde_json::to_value(threads::threads_json(ctx, &project, &rows))?;
         projects.push(value);
     }

@@ -37,6 +37,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
 | `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
+| `asks [--project slug] --json` | `{schema_version, asks: [Ask row]}`, see [Asks](#asks) |
 | `profile list --project <slug> --json` | `{schema_version, project, coordinator: Choices, thread: Choices}`, see [Profile choices](#profile-choices) |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
@@ -59,6 +60,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `tone` | string | The colour name the user picked, empty when none was picked. |
 | `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, in the project's records folder. `null` when it does not exist. |
 | `usage` | [Usage](#usage) or `null` | The root coordinator's token use as last read. |
+| `coordinator` | object | The root coordinator: `pane_id`, `agent` (the Herdr agent kind it started as), `model` (empty for the harness's default) and `state`, the agent state Herdr reported when the ticker last looked at its pane (`working`, `blocked`, `idle`, `done`; empty before it saw the pane). Present only for a project that was opened. |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -138,8 +140,50 @@ The plain Markdown file a coordinator writes about its own work, for a person or
 | `path` | string | Absolute path. |
 | `text` | string | Its first 4,000 characters. |
 | `updated` | string | RFC 3339 modification time. |
+| `objective` | string | Its `Objective:` line. Present only when it has one; the template's `(none)` counts as none. |
+| `asks` | [Ask] | The lines under `## Asked`, in file order. Present only when there is one. |
+| `needs_decision` | [string] | The lines under `## Needs your decision`, without the bullet. Present only when there is one. |
 
-A symbolic link or anything else that is not a regular file is `null`, like a missing file.
+A symbolic link or anything else that is not a regular file is `null`, like a missing file. These three are read from `text`, so a file over 4,000 characters is read as far as that. A line that is only `(none)` or `none` under a heading is not an item. A status file without them prints what it printed before they existed.
+
+## Asks
+
+What the user asked a coordinator, as it wrote under `## Asked` in its status file (`- [state] <ask> : <answer> (<links>)`, see `skill/COORDINATOR.md`), with the state its links confirm. Confirming reads only records that already exist: a thread's record (its state, and the pull request state the ticker cached on it) and the tasks on disk (`TASKS.md`, or the tracker's last cached list). Reading asks never runs `gh`, Herdr or a tracker command, so a confirmed state is as old as the ticker's last look. An ask's text is the user's and the coordinator's: show it as text.
+
+| Ask field | Type | Meaning |
+| --- | --- | --- |
+| `line` | number | Its line in the status file, from 1. |
+| `state` | string | What the coordinator wrote: `open`, `working`, `needs-decision`, `answered` or `done`; `unknown` for a line that does not follow the format, whose whole text is then `text`. |
+| `text`, `answer` | string | The ask, and what follows ` : ` (empty without one). |
+| `links` | [Link] | The links of its final parenthesis, in order. Other words in it are dropped; a parenthesis with no link stays part of `answer`. |
+| `confirmed` | string | What the links confirm, the least finished one winning: `in-progress` (a linked thread works or waits on you, a linked pull request is open, a linked task is to do), `stopped` (a linked thread stopped without being resolved, and nothing is in progress), `failed` (nothing in progress or stopped, and a thread failed or a pull request closed without merging), `done` (every linked thread resolved, pull request merged and task done), or empty when no link has a state the records know. |
+| `mismatch` | string | Why `state` does not close with the links, one of the fixed reasons below; empty when it closes. |
+
+| Link field | Type | Meaning |
+| --- | --- | --- |
+| `kind` | `"thread"`, `"pr"`, `"task"` or `"page"` | A thread or node id (`t-0007`); a pull request URL or `#12` (the pull request of the project's threads with that number, when they all have the same one; with two repositories it is unresolved, so write the URL); `task:<id>` (a tracker's task by its id, a `TASKS.md` task by its line, as `project status` names them); any other `http(s)://` URL. |
+| `text` | string | As written. |
+| `target` | string | The thread id, the pull request URL, the task id or the page. Empty for a thread id, `#12` or task the records do not know. |
+| `thread`, `title` | string | The thread it names or whose pull request it is, and that thread's title; for a task, empty and its title. |
+| `state` | string | A thread's group token as the ticker last recorded it (see [Thread](#thread)), `failed`, or `missing`; a pull request's `open`, `merged` or `closed`, empty before the ticker read it or when no thread has it; a task's `todo`, `done` or `missing`; empty for a page. |
+| `pr`, `pr_state` | string | The pull request behind a thread or pull request link and its state, in the words of `state`; empty without one. A thread's open pull request keeps it `in-progress`. |
+
+`mismatch` is the first row that applies, with the reason of the first link in that state, and empty otherwise. An ask with no link is confirmed by nothing: only `working` without one is a mismatch. An answer can be that the work failed, so only `done` does not close on a failed link.
+
+| `state` | When | `mismatch` |
+| --- | --- | --- |
+| `done`, `answered` | `confirmed` is `in-progress` | `a linked thread is still working` (it works or waits on you), `a linked PR is still open` (a linked pull request or a linked thread's), `a linked task is still to do` |
+| `done` | `confirmed` is `failed` | `a linked thread failed`, `a linked PR is closed` |
+| `working` | It has no link | `no thread, PR or task is linked` |
+| `open`, `working` | `confirmed` is `done` or `failed` | `a linked thread is resolved`, `a linked thread failed`, `a linked PR is merged`, `a linked PR is closed`, `a linked task is done` |
+
+`asks --json` lists every coordinator's asks: of every project that is not archived, or of `--project`. The coordinators are the root (`STATUS.md`) and each local coordinator node that may spawn (`nodes/<id>/STATUS.md`); a resolved node can no longer update its file, so its `answered` and `done` asks that close are left out, and what it left open or does not close stays. They are sorted by what the user does next: `needs-decision` first (a resolved node's goes with `open`, since it takes no answer), then a mismatch, then `open` and `working`, then `answered` and `done`, then `unknown`; in each, by project slug, root first then nodes in tree order, then line. Without `--json`, one tab-separated line per ask: project, coordinator (`root` or `<id> <title>`), state, confirmed, mismatch, `<ask> : <answer>`, and the links as `t-0007 working (PR open), #12 open`.
+
+| Ask row field | Type | Meaning |
+| --- | --- | --- |
+| `project` | string | The slug. |
+| `coordinator` | object | `{id, title}`: `root` with an empty title, or the node's id and title. |
+| the [Ask](#asks) fields | | |
 
 ## Usage
 
@@ -234,7 +278,7 @@ With a tracker, `TASKS.md` is not used: a client changes a task in the tracker i
 | `sources` | object | `tasks_updated` (RFC 3339 modification time, empty when the file is missing; with a tracker, when its list was last asked for); `tasks_source`, present only with a tracker (`tracker`, or `unavailable` when it did not answer); `status_file` (where the root's status file is: `STATUS.md` in the project folder, else its absolute path in the records folder), `status_updated`, `status_chars` and `status_limit` (what `context` shows of it, 4,000); and `pr_checked` (RFC 3339, the ticker's last pull request pass; empty before one). |
 | `items` | [Status item] | One per task in `TASKS.md` (or the tracker), in its order, then one per thread that is not resolved and that no task names, in id order. |
 | `drift` | object | How many problems of each rule (`status_over_limit`, `status_stale`, `thread_resolved`, `thread_missing`, `done_not_deleted`, `status_in_owner`, `duplicate_title`, each present even at 0), and `inbox_unhandled`. |
-| `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap. |
+| `problems` | [Problem] | The problems themselves, as `context` lists them under `## Drift`, without its 10-line cap and without `ask-mismatch`, which is in the status file's [asks](#asks). |
 | `next` | `[{thread, line}]` | The Next lines of every thread that is not resolved, in id order. |
 
 | Status item field | Type | Meaning |
@@ -258,7 +302,7 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `rule` | string | `status-over-limit` or `status-stale` (the root's status file; not in `task lint`), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. |
+| `rule` | string | `status-over-limit` or `status-stale` (the root's status file; not in `task lint`), `thread-resolved`, `thread-missing`, `done-not-deleted`, `status-in-owner` or `duplicate-title`. More may come. `context` also lists `ask-mismatch`, which no document carries. |
 | `line` | number | The task's line in `TASKS.md`, from 1; 0 for the status file and a tracker's task. |
 | `id` | string | The tracker's id of the task. Present only for a tracker's task. |
 | `task` | string | The task's title, empty for the status file. |

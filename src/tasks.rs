@@ -585,6 +585,31 @@ pub fn open_in(tasks: &[Task], id: &str, task_id: &str) -> Vec<Task> {
         .collect()
 }
 
+/// The tasks as they are on disk, without asking a tracker: TASKS.md's, or
+/// the tracker's last cached list (none before its first answer or while
+/// it failed).
+pub fn on_disk(ctx: &crate::paths::Ctx, project: &crate::project::Project) -> Vec<Task> {
+    match project.tracker(&ctx.config_dir) {
+        Ok(None) => parse(&read(&project.dir())),
+        Ok(Some(config)) => crate::tracker::cached(project, &config)
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The task a status file links as `task:<id>`, named the way `project
+/// status` names tasks: a tracker's by its id, a TASKS.md task by its line.
+pub fn linked<'a>(tasks: &'a [Task], id: &str) -> Option<&'a Task> {
+    tasks.iter().find(|t| {
+        if t.id.is_empty() {
+            t.line.to_string() == id
+        } else {
+            t.id == id
+        }
+    })
+}
+
 /// The `--profile` and `--machine` a delegated task starts with: its owner's,
 /// unless the command line gives its own. A flag that contradicts the owner is
 /// refused, so the task line and the thread never disagree, and so is a

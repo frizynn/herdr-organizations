@@ -23,7 +23,7 @@ Your status file (the path `context` prints in its `## Status` heading: `STATUS.
 # Status
 Objective: <one line>
 ## Asked
-- [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<link: thread id, PR or page>)
+- [open|working|needs-decision|answered|done] <what the user asked, short> : <one-line answer or next step> (<links: thread id, PR, task or page>)
 ## Needs your decision
 - <decision> : <options in a few words> (<link to captures or designboard>)
 ## Decisions
@@ -31,6 +31,8 @@ Objective: <one line>
 ```
 
 - Every message from the user gets a line under Asked, kept until it is answered or done.
+- End an Asked line with its links in parentheses, separated by commas or spaces: the thread or node id (`t-0007`), the pull request (`#12` or its URL), the task as `project status` names it (`task:<line>` for a `TASKS.md` task, `task:<id>` for a tracker's) or a page URL. Link every ask that has a thread, PR or task. The binary reads the state from the link, never from your words, and `context` lists an ask that does not close as `ask-mismatch` with its line: marked done or answered while something linked is still going (an open PR, a thread at work, a task to do); marked done on a failed thread or a PR closed without merging; marked open or working once its thread is resolved or failed, its PR merged or closed or its task done; marked working with no link at all. With two repositories, link a PR by its URL, not `#12`. Fix the state or the link.
+- The user reads every coordinator's asks in one list, with the state you wrote and the one the links confirm: `hp asks`, the popup (**y**, Your asks) and Nenu. Your decisions and asks that do not close put you under NEEDS YOU there.
 - What is in progress or done is computed (the tree in `context`, `node show`, Nenu): do not keep a second list of threads in it.
 - Update it before you answer, only when something changed for the user, with small edits rather than a rewrite. Never paste reports or transcripts into it; link the thread, PR or page.
 - Woken by the ticker or a child: update the file and write the user no report. Speak to the user only for a decision, a failure, or when one of their Asked lines changed state, in at most three lines.

@@ -15,7 +15,7 @@ use crate::organizations::{self, ROOT_ID};
 use crate::paths::Ctx;
 use crate::project::{self, Project};
 use crate::thread::{self, Group, NodeRole, Thread};
-use crate::{inbox, merge_gate, pr, report, steps, threads};
+use crate::{asks, inbox, merge_gate, pr, report, steps, threads};
 
 pub const FILE: &str = ".organizations-state.json";
 pub const SCHEMA_VERSION: u32 = 1;
@@ -184,6 +184,85 @@ pub struct Node {
     /// The token caps it reached at its last read (`usage.rs`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub over_cap: Vec<String>,
+    /// A coordinator's status file while it exists; `None` for a thread and
+    /// in a model written before it.
+    pub status_file: Option<StatusCard>,
+}
+
+/// What a coordinator's status file says besides its asks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct StatusCard {
+    pub path: String,
+    /// RFC 3339 modification time.
+    pub updated: String,
+    pub objective: String,
+    /// The lines under `## Needs your decision`.
+    pub needs_decision: Vec<String>,
+}
+
+/// An ask, and the coordinator whose status file holds it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct AskView {
+    /// `root` or the coordinator node's id.
+    pub coordinator: String,
+    #[serde(flatten)]
+    pub ask: asks::Ask,
+}
+
+/// A coordinator's card: what its status file says, its asks, and its
+/// direct children that are still open, with their pull requests.
+pub struct Card<'a> {
+    /// The coordinator is resolved: `asks::listed` decides what it shows.
+    pub resolved: bool,
+    /// The token caps the coordinator reached (`Node::over_cap`).
+    pub over_cap: &'a [String],
+    pub status: Option<&'a StatusCard>,
+    /// Most pressing first (`asks::Ask::rank`), as `asks::listed` shows them.
+    pub asks: Vec<&'a asks::Ask>,
+    /// In tree order.
+    pub children: Vec<&'a Node>,
+    pub prs: Vec<(&'a Node, &'a Pr)>,
+}
+
+impl Card<'_> {
+    /// The lines under `## Needs your decision`; none once it is resolved,
+    /// as `asks::listed` says.
+    pub fn decision_lines(&self) -> &[String] {
+        match self.status {
+            Some(status) if !self.resolved => &status.needs_decision,
+            _ => &[],
+        }
+    }
+
+    /// What the coordinator waits on the user for: its decision lines, then
+    /// its asks marked `needs-decision`. Nothing once it is resolved: it
+    /// takes no answer.
+    pub fn waiting(&self) -> Vec<String> {
+        if self.resolved {
+            return Vec::new();
+        }
+        self.decision_lines()
+            .iter()
+            .cloned()
+            .chain(
+                self.asks
+                    .iter()
+                    .filter(|a| a.state == asks::State::NeedsDecision)
+                    .map(|a| a.said()),
+            )
+            .collect()
+    }
+
+    pub fn decisions(&self) -> usize {
+        self.waiting().len()
+    }
+
+    /// Asks that do not close with what their links confirm.
+    pub fn mismatches(&self) -> usize {
+        self.asks.iter().filter(|a| !a.mismatch.is_empty()).count()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -232,6 +311,9 @@ pub struct ProjectView {
     /// Seconds until a blocked agent counts as "needs you" (the 30 s
     /// debounce), so the ticker can look again exactly then.
     pub recheck_in: Option<u64>,
+    /// Every coordinator's asks: the root's, then each node's in tree
+    /// order, each in line order.
+    pub asks: Vec<AskView>,
 }
 
 impl ProjectView {
@@ -240,6 +322,44 @@ impl ProjectView {
             .iter()
             .chain(&self.threads)
             .find(|n| n.id == id)
+    }
+
+    /// Where a list puts one of its asks (`asks::Ask::rank`), as its
+    /// coordinator stands.
+    pub fn ask_rank(&self, ask: &AskView) -> u8 {
+        ask.ask
+            .rank(self.node(&ask.coordinator).is_some_and(|n| n.resolved))
+    }
+
+    /// The card of coordinator `id`; `None` for a thread or an unknown id.
+    pub fn card(&self, id: &str) -> Option<Card<'_>> {
+        let node = self.coordinators.iter().find(|c| c.id == id)?;
+        let mut asks: Vec<&asks::Ask> = self
+            .asks
+            .iter()
+            .filter(|a| a.coordinator == id && asks::listed(&a.ask, node.resolved))
+            .map(|a| &a.ask)
+            .collect();
+        asks.sort_by_key(|a| a.rank(node.resolved));
+        let mut children: Vec<&Node> = self
+            .coordinators
+            .iter()
+            .chain(&self.threads)
+            .filter(|n| n.id != ROOT_ID && n.parent == id && !n.resolved)
+            .collect();
+        children.sort_by_key(|n| n.tree_order);
+        let prs = children
+            .iter()
+            .filter_map(|n| n.pr.as_ref().map(|pr| (*n, pr)))
+            .collect();
+        Some(Card {
+            resolved: node.resolved,
+            over_cap: &node.over_cap,
+            status: node.status_file.as_ref(),
+            asks,
+            children,
+            prs,
+        })
     }
 }
 
@@ -291,6 +411,22 @@ impl Snapshot {
 
     pub fn project(&self, slug: &str) -> Option<&ProjectView> {
         self.projects.iter().find(|p| p.slug == slug)
+    }
+
+    /// The asks a list shows (`asks::listed`), of every project, most
+    /// pressing first, else in project, coordinator and line order.
+    pub fn asks(&self) -> Vec<(&ProjectView, &AskView)> {
+        let mut all: Vec<(&ProjectView, &AskView)> = self
+            .projects
+            .iter()
+            .flat_map(|p| p.asks.iter().map(move |a| (p, a)))
+            .filter(|(p, a)| {
+                let resolved = p.node(&a.coordinator).is_some_and(|n| n.resolved);
+                asks::listed(&a.ask, resolved)
+            })
+            .collect();
+        all.sort_by_key(|(p, a)| p.ask_rank(a));
+        all
     }
 }
 
@@ -397,7 +533,8 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         if project.status() == project::Status::Archived {
             continue;
         }
-        let view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
+        let mut view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
+        add_status_files(&mut view, &project, &asks::Records::load(ctx, &project));
         for node in view.coordinators.iter().chain(&view.threads) {
             if !node.workspace_id.is_empty() && node.machine.is_empty() {
                 owners.insert(
@@ -642,6 +779,31 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
         inbox,
         pending,
         recheck_in,
+        asks: Vec::new(),
+    }
+}
+
+/// Each coordinator's status file: its card, and its asks confirmed
+/// against `records`.
+fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::Records) {
+    for sheet in asks::sheets(project, records) {
+        let status = sheet.status;
+        if let Some(node) = view
+            .coordinators
+            .iter_mut()
+            .find(|c| c.id == sheet.coordinator)
+        {
+            node.status_file = Some(StatusCard {
+                path: status.path,
+                updated: status.updated,
+                objective: status.objective,
+                needs_decision: status.needs_decision,
+            });
+        }
+        view.asks.extend(status.asks.into_iter().map(|ask| AskView {
+            coordinator: sheet.coordinator.clone(),
+            ask,
+        }));
     }
 }
 
@@ -686,6 +848,7 @@ pub fn age(since: &str) -> String {
 mod tests {
     use super::*;
     use crate::scenarios::World;
+    use crate::status_file;
 
     fn node_record(project: &Project, id: &str, parent: &str, role: NodeRole, group: Group) {
         let t = Thread {
@@ -754,6 +917,182 @@ mod tests {
         assert_eq!(root.counts.total(), 3);
         assert_eq!(view.counts.total(), 3);
         assert_eq!(view.counts.need, 1);
+    }
+
+    /// The view model carries every coordinator's asks and what its card
+    /// shows: objective, decisions, asks, open children and their PRs.
+    #[test]
+    fn the_view_carries_each_coordinators_asks_and_card() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        node_record(
+            &project,
+            "t-0001",
+            "root",
+            NodeRole::Coordinator,
+            Group::Working,
+        );
+        node_record(
+            &project,
+            "t-0002",
+            "t-0001",
+            NodeRole::Worker,
+            Group::Working,
+        );
+        node_record(
+            &project,
+            "t-0003",
+            "root",
+            NodeRole::Worker,
+            Group::ReadyForReview,
+        );
+        node_record(
+            &project,
+            "t-0004",
+            "root",
+            NodeRole::Worker,
+            Group::Resolved,
+        );
+        thread::update(&project, "t-0003", |t| {
+            t.pr = "https://github.com/o/r/pull/9".into();
+            t.pr_state = "OPEN".into();
+        })
+        .unwrap();
+        thread::update(&project, "t-0004", |t| t.status = thread::Status::Resolved).unwrap();
+        std::fs::write(
+            status_file::root(&project),
+            "# Status\nObjective: Ship it\n## Asked\n- [done] Ship : merged (t-0003)\n- [needs-decision] Pilot : yes or no\n## Needs your decision\n- Budget : pick one\n",
+        )
+        .unwrap();
+        let node_status = organizations::status_path(&project, "t-0001");
+        std::fs::create_dir_all(node_status.parent().unwrap()).unwrap();
+        std::fs::write(
+            &node_status,
+            "# Status\nObjective: Area\n## Asked\n- [working] Copy : writing (t-0002)\n",
+        )
+        .unwrap();
+
+        let snapshot = build(&world.ctx(), &[]);
+        let view = snapshot.project("demo").unwrap();
+        let asks: Vec<(&str, &str)> = view
+            .asks
+            .iter()
+            .map(|a| (a.coordinator.as_str(), a.ask.text.as_str()))
+            .collect();
+        assert_eq!(
+            asks,
+            [("root", "Ship"), ("root", "Pilot"), ("t-0001", "Copy")]
+        );
+
+        let card = view.card("root").unwrap();
+        let status = card.status.unwrap();
+        assert_eq!(status.objective, "Ship it");
+        assert_eq!(status.needs_decision, ["Budget : pick one"]);
+        assert_eq!(status.path, status_file::root(&project).to_string_lossy());
+        let texts: Vec<&str> = card.asks.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, ["Pilot", "Ship"], "most pressing first");
+        assert_eq!(card.asks[1].mismatch, "a linked PR is still open");
+        assert_eq!((card.decisions(), card.mismatches()), (2, 1));
+        let children: Vec<&str> = card.children.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(children, ["t-0001", "t-0003"], "open direct children");
+        let prs: Vec<(&str, &str)> = card
+            .prs
+            .iter()
+            .map(|(n, pr)| (n.id.as_str(), pr.number.as_str()))
+            .collect();
+        assert_eq!(prs, [("t-0003", "9")]);
+
+        let node = view.card("t-0001").unwrap();
+        assert_eq!(node.status.unwrap().objective, "Area");
+        assert_eq!(node.children.len(), 1);
+        assert!(view.card("t-0002").is_none(), "a worker has no card");
+
+        let listed: Vec<&str> = snapshot
+            .asks()
+            .iter()
+            .map(|(_, a)| a.ask.text.as_str())
+            .collect();
+        assert_eq!(listed, ["Pilot", "Ship", "Copy"]);
+    }
+
+    /// A project whose coordinators keep no asks has none in its view, and
+    /// a resolved coordinator's finished asks leave the list.
+    #[test]
+    fn a_project_without_asks_has_none_and_finished_ones_of_a_resolved_coordinator_leave_the_list()
+    {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        node_record(
+            &project,
+            "t-0001",
+            "root",
+            NodeRole::Coordinator,
+            Group::Resolved,
+        );
+        let snapshot = build(&world.ctx(), &[]);
+        let view = snapshot.project("demo").unwrap();
+        assert!(view.asks.is_empty());
+        let root = view.card("root").unwrap();
+        assert_eq!(
+            root.status.unwrap().objective,
+            "",
+            "the template says nothing"
+        );
+        assert_eq!((root.decisions(), root.mismatches()), (0, 0));
+
+        thread::update(&project, "t-0001", |t| t.status = thread::Status::Resolved).unwrap();
+        node_record(
+            &project,
+            "t-0002",
+            "root",
+            NodeRole::Worker,
+            Group::ReadyForReview,
+        );
+        thread::update(&project, "t-0002", |t| {
+            t.pr = "https://github.com/o/r/pull/3".into();
+            t.pr_state = "OPEN".into();
+        })
+        .unwrap();
+        let node_status = organizations::status_path(&project, "t-0001");
+        std::fs::create_dir_all(node_status.parent().unwrap()).unwrap();
+        std::fs::write(
+            &node_status,
+            "## Asked\n- [done] Old : shipped\n- [open] Left : never answered\n- [done] Card tokens : shipped (t-0002)\n- [needs-decision] Which bank : two options\n## Needs your decision\n- Old decision : a or b\n",
+        )
+        .unwrap();
+        let snapshot = build(&world.ctx(), &[]);
+        let listed: Vec<&str> = snapshot
+            .asks()
+            .iter()
+            .map(|(_, a)| a.ask.text.as_str())
+            .collect();
+        // What does not close stays and what it left open stays, its
+        // unanswered decision ask too, but with the open ones: nothing in a
+        // resolved coordinator's file waits on the user any more.
+        assert_eq!(listed, ["Card tokens", "Left", "Which bank"]);
+        let view = snapshot.project("demo").unwrap();
+        let card = view.card("t-0001").unwrap();
+        let shown: Vec<&str> = card.asks.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(shown, listed, "the card shows what the list shows");
+        assert!(card.waiting().is_empty());
+        assert_eq!((card.decisions(), card.mismatches()), (0, 1));
+    }
+
+    /// A model a binary from before asks wrote reads, with no asks and no
+    /// status file on its coordinators, so the popup shows the file itself.
+    #[test]
+    fn a_model_written_before_asks_reads_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            path(dir.path()),
+            r#"{"schema_version":1,"generated":"2026-10-10T10:00:00Z","projects":[{"slug":"demo","coordinators":[{"id":"root","role":"coordinator"}]}]}"#,
+        )
+        .unwrap();
+        let snapshot = read(dir.path()).unwrap();
+        let view = snapshot.project("demo").unwrap();
+        assert!(view.asks.is_empty());
+        assert_eq!(view.coordinators[0].status_file, None);
+        assert!(view.card("root").unwrap().status.is_none());
     }
 
     #[test]

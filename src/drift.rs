@@ -20,6 +20,10 @@ const MAX_LINES: usize = 10;
 pub enum Rule {
     StatusOverLimit,
     StatusStale,
+    /// An ask of the root's status file that does not close (`crate::asks`).
+    /// Only `context` lists it: `task lint` and `project status` keep to
+    /// the rules of `ALL`.
+    AskMismatch,
     ThreadResolved,
     ThreadMissing,
     DoneNotDeleted,
@@ -28,6 +32,7 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// What `problems` checks; `ask-mismatch` is `context_problems`' own.
     pub const ALL: [Rule; 7] = [
         Rule::StatusOverLimit,
         Rule::StatusStale,
@@ -42,6 +47,7 @@ impl Rule {
         match self {
             Rule::StatusOverLimit => "status-over-limit",
             Rule::StatusStale => "status-stale",
+            Rule::AskMismatch => "ask-mismatch",
             Rule::ThreadResolved => "thread-resolved",
             Rule::ThreadMissing => "thread-missing",
             Rule::DoneNotDeleted => "done-not-deleted",
@@ -52,14 +58,18 @@ impl Rule {
 
     /// About the root's status file rather than a TASKS.md line.
     pub fn about_status(self) -> bool {
-        matches!(self, Rule::StatusOverLimit | Rule::StatusStale)
+        matches!(
+            self,
+            Rule::StatusOverLimit | Rule::StatusStale | Rule::AskMismatch
+        )
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Problem {
     pub rule: Rule,
-    /// The TASKS.md line, from 1; 0 for the status file and a tracker task.
+    /// The TASKS.md line, from 1; 0 for the status file and a tracker task;
+    /// the status file's line for `ask-mismatch`.
     pub line: usize,
     /// A tracker task's id, empty otherwise.
     pub id: String,
@@ -177,6 +187,36 @@ pub fn problems(project: &Project, tasks: &Tasks) -> Vec<Problem> {
         }
         Tasks::Unavailable(_) => {}
     }
+    found.sort_by_key(|p| (p.rule, p.line));
+    found
+}
+
+/// What `context` lists: `problems`, and the root's asks that do not close,
+/// each named by its line and the binary's reason, never by its text.
+pub fn context_problems(project: &Project, tasks: &Tasks) -> Vec<Problem> {
+    let mut found = problems(project, tasks);
+    let records = crate::asks::Records::new(thread::list(project), tasks.list().to_vec());
+    let asks = status_file::read(&status_file::root(project))
+        .map(|status| status.confirmed(&records).asks)
+        .unwrap_or_default();
+    found.extend(
+        asks.iter()
+            .filter(|ask| !ask.mismatch.is_empty())
+            .map(|ask| Problem {
+                rule: Rule::AskMismatch,
+                line: ask.line,
+                id: String::new(),
+                task: String::new(),
+                thread: String::new(),
+                detail: format!(
+                    "{}:{} is marked {}, but {}",
+                    status_file::NAME,
+                    ask.line,
+                    ask.state.word(),
+                    ask.mismatch
+                ),
+            }),
+    );
     found.sort_by_key(|p| (p.rule, p.line));
     found
 }

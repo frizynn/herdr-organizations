@@ -1947,6 +1947,8 @@ pub fn merge_blocker(t: &Thread, summary: &pr::Summary, policy: pr::Policy) -> O
     pr::merge_blocker(summary, policy).or_else(|| pr::base_blocker(&t.base, &summary.base_ref))
 }
 
+/// One thread's document; its status file as read, without what it says
+/// (`confirm_status` adds that).
 pub fn thread_json(
     project: &Project,
     row: &Row,
@@ -2056,13 +2058,36 @@ pub fn thread_json(
     }
 }
 
+/// Adds what a coordinator node's status file says to its document: its
+/// asks are confirmed against the project's records, which `thread_json`
+/// does not read. `records` is loaded on the first status file.
+fn confirm_status(
+    ctx: &Ctx,
+    project: &Project,
+    records: &std::cell::OnceCell<crate::asks::Records>,
+    mut json: ThreadJson,
+) -> ThreadJson {
+    json.status_file = json.status_file.map(|status| {
+        status.confirmed(records.get_or_init(|| crate::asks::Records::load(ctx, project)))
+    });
+    json
+}
+
 /// Every thread of a project in the `--json` contract, in id order.
 pub fn threads_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
     let state = steps::load_state(project);
     let rule = merge_gate::Rule::load(ctx, project);
     let usage = crate::usage::load(project);
+    let records = std::cell::OnceCell::new();
     rows.iter()
-        .map(|row| thread_json(project, row, &state, &rule, &usage))
+        .map(|row| {
+            confirm_status(
+                ctx,
+                project,
+                &records,
+                thread_json(project, row, &state, &rule, &usage),
+            )
+        })
         .collect()
 }
 
@@ -2096,12 +2121,18 @@ pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     let state = steps::load_state(&project);
     let rule = merge_gate::Rule::load(ctx, &project);
     let usage = crate::usage::load(&project);
+    let records = std::cell::OnceCell::new();
     let nodes: Vec<NodeJson> = entries
         .iter()
         .filter_map(|entry| {
             let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
             Some(NodeJson {
-                thread: thread_json(&project, row, &state, &rule, &usage),
+                thread: confirm_status(
+                    ctx,
+                    &project,
+                    &records,
+                    thread_json(&project, row, &state, &rule, &usage),
+                ),
                 depth: entry.depth,
                 tree_order: entry.tree_order,
             })
@@ -2138,7 +2169,14 @@ pub fn row_json(ctx: &Ctx, project: &Project, row: &Row) -> serde_json::Value {
     let state = steps::load_state(project);
     let rule = merge_gate::Rule::load(ctx, project);
     let usage = crate::usage::load(project);
-    serde_json::to_value(thread_json(project, row, &state, &rule, &usage)).unwrap_or_default()
+    let json = thread_json(project, row, &state, &rule, &usage);
+    serde_json::to_value(confirm_status(
+        ctx,
+        project,
+        &std::cell::OnceCell::new(),
+        json,
+    ))
+    .unwrap_or_default()
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
