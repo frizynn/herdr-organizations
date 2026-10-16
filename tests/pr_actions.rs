@@ -257,11 +257,11 @@ fn thread_merge_merges_the_checked_commit_and_leaves_an_inbox_item() {
     );
     assert!(fixture.record().contains("pr_state = \"MERGED\""));
     assert!(fixture.inbox().contains("was merged with `thread merge`"));
-    // The user merged it: the item is theirs, and the coordinator hears of
-    // the merge from the ticker's next read of the pull request.
+    // The thread is usually resolved before the ticker reads the pull
+    // request again, so this item is how the coordinator hears of the merge.
     let out = fixture.run(&["inbox", "list", "demo", "--json"]);
     let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(listed["items"][0]["audience"], "user", "{listed}");
+    assert_eq!(listed["items"][0]["audience"], "coordinator", "{listed}");
 }
 
 #[test]

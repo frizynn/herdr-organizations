@@ -6653,6 +6653,66 @@ fn a_root_thread_that_stops_without_a_new_report_wakes_the_coordinator() {
     );
 }
 
+/// A thread that stops without ever writing a report (here right after a
+/// prompt on its screen was answered, within one tick) is the coordinator's
+/// too: there is no report the user could have read.
+#[test]
+fn a_root_thread_idle_without_any_report_wakes_the_coordinator() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    thread::update(&project, "t-0001", |t| {
+        t.last_group = thread::Group::WaitingOnYou.token().into();
+        t.last_state = "blocked".into();
+    })
+    .unwrap();
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    quiet_box(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [(
+            "stopped without a new report".to_string(),
+            Audience::Coordinator
+        )]
+    );
+    assert_eq!(
+        nudges(&world),
+        ["[hp inbox] t-0001 stopped without a new report"]
+    );
+}
+
+/// `thread merge` and the popup's merge usually resolve the thread before the
+/// ticker reads the pull request again, so their `merged` item is how the
+/// coordinator learns a slot was freed.
+#[test]
+fn a_merge_made_by_hand_wakes_the_coordinator() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    settle(&project);
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    idle_for_a_minute(&project);
+    let id = inbox::write(
+        &project,
+        "pr",
+        "t-0001",
+        "merged",
+        "t-0001 \"Task\": pull request was merged with `thread merge`",
+        "",
+    )
+    .unwrap();
+    quiet_box(&project);
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(nudges(&world), ["[hp inbox] t-0001 merged"]);
+    let (digest, _) = coordinator::digest(&ctx, &project, "hp").unwrap();
+    assert!(digest.contains(&id), "{digest}");
+}
+
 /// What the root coordinator cannot act on in a thread's state is the
 /// user's: idle once its report was read, landing (only the user merges) and
 /// resolved.
