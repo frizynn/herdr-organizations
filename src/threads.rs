@@ -1248,18 +1248,20 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
     for note in &notes {
         println!("  - {note}");
     }
-    crate::inbox::write(
-        &project,
-        "thread-state",
-        id,
-        "resolved",
-        &format!(
-            "{id} \"{}\" was resolved: {}",
-            resolved.title,
-            notes.join("; ")
-        ),
-        "",
-    )?;
+    if !crate::steps::handled_by_parent_node(&project, &resolved) {
+        crate::inbox::write(
+            &project,
+            "thread-state",
+            id,
+            "resolved",
+            &format!(
+                "{id} \"{}\" was resolved: {}",
+                resolved.title,
+                notes.join("; ")
+            ),
+            "",
+        )?;
+    }
     note_open_task(&project, &resolved)
 }
 

@@ -17,7 +17,7 @@ use crate::threads;
 use crate::{inbox, pr, routine};
 
 pub const PARENT_NUDGE_PREFIX: &str =
-    "[herdr-projects ticker: automated, not the user, approves nothing] Direct child updates";
+    "[herdr-projects ticker: automated, not the user, approves nothing]";
 pub const AUTO_FIX_PREFIX: &str =
     "[herdr-projects ticker: automated, not the user, approves nothing] Auto-fix";
 /// A nudge waits until the coordinator's input box has looked empty for this
@@ -304,6 +304,7 @@ pub fn write_thread_items(
     }
     state.session_item_written = false;
 
+    let records = thread::list(project);
     for change in transitions {
         if !matches!(
             change.to,
@@ -314,6 +315,9 @@ pub fn write_thread_items(
         let Ok(t) = thread::load(project, &change.id) else {
             continue;
         };
+        if change.to != Group::WaitingOnYou && owning_coordinator(&records, &t).is_some() {
+            continue;
+        }
         let mut summary = format!(
             "{} is now {} ({})",
             thread_label(&t),
@@ -363,7 +367,7 @@ pub fn write_thread_items(
 
     // Ready for review: once per report hash, so an agent that goes back and
     // forth between working and idle on an unchanged report produces nothing.
-    for t in thread::list(project) {
+    for t in &records {
         if t.status != Status::Open
             || t.report_hash.is_empty()
             || t.report_hash == t.last_review_item_hash
@@ -373,14 +377,25 @@ pub fn write_thread_items(
         if t.last_group != Group::ReadyForReview.token() && t.last_group != Group::Landing.token() {
             continue;
         }
-        let mut summary = format!("{} has a new report: threads/{}.md", thread_label(&t), t.id);
-        if let Some(notes) = copy_notes.get(&t.id) {
-            summary.push_str(&format!(
-                "; not everything was copied: {}",
-                notes.join("; ")
-            ));
+        let notes = copy_notes.get(&t.id);
+        match owning_coordinator(&records, t) {
+            // Its coordinator node reads the report; a partial copy still
+            // reaches the project inbox, since only the user can recover it.
+            Some(parent) if notes.is_none() => {
+                queue_parent_update(state, &parent.id, &t.id, NEW_REPORT)
+            }
+            _ => {
+                let mut summary =
+                    format!("{} has a new report: threads/{}.md", thread_label(t), t.id);
+                if let Some(notes) = notes {
+                    summary.push_str(&format!(
+                        "; not everything was copied: {}",
+                        notes.join("; ")
+                    ));
+                }
+                inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
+            }
         }
-        inbox::write(project, "thread-state", &t.id, "new report", &summary, "")?;
         if notifier.wants_review() {
             notifier.send(
                 &t.id,
@@ -518,40 +533,75 @@ pub fn nudge(
     Ok(())
 }
 
-fn parent_update_is_actionable(group: Group) -> bool {
-    matches!(
-        group,
-        Group::ReadyForReview | Group::WaitingOnYou | Group::Landing | Group::Idle
-    )
+/// The coordinator node that handles a thread's routine events (a new report,
+/// idle, landing, resolved): its direct parent, when that is an open, local
+/// coordinator node that may spawn. Those events then wake only that parent
+/// and stay out of the project inbox; escalations (Waiting on you) still
+/// reach both. `None` under `root`, and when the parent is resolved, failed,
+/// remote or missing, so nothing is lost.
+fn owning_coordinator<'a>(records: &'a [Thread], child: &Thread) -> Option<&'a Thread> {
+    let parent_id = organizations::parent_id(child);
+    if parent_id == organizations::ROOT_ID {
+        return None;
+    }
+    records.iter().find(|record| {
+        record.id == parent_id
+            && record.status == Status::Open
+            && record.role == thread::NodeRole::Coordinator
+            && record.can_spawn
+            && !record.is_remote()
+    })
+}
+
+/// True when `t`'s coordinator node handles its routine events instead of
+/// the project inbox (see `owning_coordinator`).
+pub fn handled_by_parent_node(project: &Project, t: &Thread) -> bool {
+    owning_coordinator(&thread::list(project), t).is_some()
+}
+
+const NEW_REPORT: &str = "new report";
+/// Every phrase a parent nudge uses, in the order it names them: what may
+/// need the user first.
+const PARENT_PHRASES: [&str; 4] = ["waiting on you", "ready for review", NEW_REPORT, "landing"];
+
+/// What a parent nudge says about a direct child that moved to `group`, or
+/// `None` when the parent has nothing to act on (Working, Idle).
+fn parent_phrase(group: Group) -> Option<&'static str> {
+    match group {
+        Group::WaitingOnYou => Some("waiting on you"),
+        Group::ReadyForReview => Some("ready for review"),
+        Group::Landing => Some("landing"),
+        Group::Working | Group::Idle | Group::Resolved => None,
+    }
+}
+
+fn queue_parent_update(state: &mut State, parent_id: &str, child_id: &str, phrase: &str) {
+    state
+        .parent_updates
+        .entry(parent_id.to_string())
+        .or_default()
+        .insert(child_id.to_string(), phrase.to_string());
 }
 
 /// Retains only the latest meaningful state for each direct child. Working
-/// clears an older pending completion so a busy parent never receives stale
-/// information after the child resumed.
+/// or Idle clears an older pending one, so a busy parent never receives
+/// stale information after the child resumed or was acknowledged.
 pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &[Transition]) {
     let records = thread::list(project);
     for change in transitions {
         let Some(child) = records.iter().find(|record| record.id == change.id) else {
             continue;
         };
-        let parent_id = organizations::parent_id(child);
-        if parent_id == organizations::ROOT_ID {
-            continue;
-        }
-        let Some(parent) = records.iter().find(|candidate| candidate.id == parent_id) else {
+        let Some(parent) = owning_coordinator(&records, child) else {
             continue;
         };
-        if parent.role != thread::NodeRole::Coordinator || !parent.can_spawn {
-            continue;
-        }
-        if parent_update_is_actionable(change.to) {
-            state
-                .parent_updates
-                .entry(parent.id.clone())
-                .or_default()
-                .insert(child.id.clone(), change.to.label().to_string());
-        } else if let Some(pending) = state.parent_updates.get_mut(parent_id) {
-            pending.remove(&child.id);
+        match parent_phrase(change.to) {
+            Some(phrase) => queue_parent_update(state, &parent.id, &child.id, phrase),
+            None => {
+                if let Some(pending) = state.parent_updates.get_mut(&parent.id) {
+                    pending.remove(&child.id);
+                }
+            }
         }
     }
     state
@@ -559,9 +609,31 @@ pub fn queue_parent_updates(project: &Project, state: &mut State, transitions: &
         .retain(|_, children| !children.is_empty());
 }
 
+/// One line per parent, built from child ids and fixed phrases only, e.g.
+/// `t-0098 waiting on you; t-0094, t-0095 ready for review`. A pending value
+/// with no phrase (an Idle queued by an older version) is dropped; the
+/// comparison ignores case so a pending label from an older version still
+/// counts.
+fn parent_update_line(updates: &BTreeMap<String, String>) -> String {
+    PARENT_PHRASES
+        .iter()
+        .filter_map(|phrase| {
+            let ids: Vec<String> = updates
+                .iter()
+                .filter(|(_, pending)| pending.eq_ignore_ascii_case(phrase))
+                .map(|(id, _)| inbox::safe_subject(id))
+                .collect();
+            (!ids.is_empty()).then(|| format!("{} {phrase}", ids.join(", ")))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Wakes an idle child coordinator once for accumulated direct-child changes.
 /// No report text is injected: the prompt carries only code-derived ids and
-/// states, and tells the coordinator which deterministic CLI reads to use.
+/// fixed phrases, and names the read to use. How to watch children (no
+/// polling, return idle) is in the node brief, so the prompt does not repeat
+/// it.
 pub fn nudge_parent_coordinators(
     ctx: &Ctx,
     project: &Project,
@@ -585,22 +657,23 @@ pub fn nudge_parent_coordinators(
             state.parent_updates.remove(&parent_id);
             continue;
         }
+        let line = state
+            .parent_updates
+            .get(&parent_id)
+            .map(parent_update_line)
+            .unwrap_or_default();
+        if line.is_empty() {
+            state.parent_updates.remove(&parent_id);
+            continue;
+        }
         let Some(agent) = agents
             .iter()
             .find(|agent| thread::agent_matches(parent, agent) && agent.ready())
         else {
             continue;
         };
-        let Some(updates) = state.parent_updates.get(&parent_id) else {
-            continue;
-        };
-        let summary = updates
-            .iter()
-            .map(|(id, group)| format!("{id}={group}"))
-            .collect::<Vec<_>>()
-            .join(", ");
         let prompt = format!(
-            "{PARENT_NUDGE_PREFIX} for {parent_id}: {summary}. Do not poll, sleep, run `herdr agent wait`, or repeatedly read child panes. Inspect each changed child once with `{prefix} node show {} <id>` and read `threads/<id>.md` only when its state is Ready for review. Then continue coordination and return idle; the ticker will wake you for later changes.",
+            "{PARENT_NUDGE_PREFIX} {line}. Inspect with `{prefix} node show {} <id>`.",
             project.slug
         );
         herdr.agent_prompt(&agent.pane_id, &prompt)?;
@@ -1434,14 +1507,16 @@ fn resolve_after_copy(
     } else {
         format!("resolved ({reason})")
     };
-    inbox::write(
-        project,
-        "thread-state",
-        &t.id,
-        "resolved",
-        &format!("{}: {why}: {}", thread_label(t), notes.join("; ")),
-        "",
-    )?;
+    if !handled_by_parent_node(project, t) {
+        inbox::write(
+            project,
+            "thread-state",
+            &t.id,
+            "resolved",
+            &format!("{}: {why}: {}", thread_label(t), notes.join("; ")),
+            "",
+        )?;
+    }
     threads::note_open_task(project, &resolved)?;
     Ok(true)
 }
@@ -1674,7 +1749,7 @@ mod tests {
         queue_parent_updates(&project, &mut state, std::slice::from_ref(&ready));
         assert_eq!(
             state.parent_updates[&parent.id][&child.id],
-            "Ready for review"
+            "ready for review"
         );
 
         let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
@@ -1718,9 +1793,12 @@ mod tests {
             .find(|call| call.display().contains("agent prompt"))
             .and_then(|call| call.args.last())
             .unwrap();
-        assert!(prompt.contains(PARENT_NUDGE_PREFIX));
-        assert!(prompt.contains(&format!("{}=Ready for review", child.id)));
-        assert!(prompt.contains("Do not poll"));
+        assert!(prompt.starts_with(PARENT_NUDGE_PREFIX));
+        assert!(prompt.contains(&format!(" {} ready for review.", child.id)));
+        assert!(prompt.ends_with(&format!(" node show {} <id>`.", project.slug)));
+        assert!(!prompt.contains('\n'));
+        // The node brief says how to watch children; the nudge does not repeat it.
+        assert!(!prompt.contains("Do not poll"));
         assert!(!prompt.contains("herdr agent read"));
         drop(calls);
 
@@ -1733,6 +1811,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(world.runner.count("agent prompt"), 1);
+    }
+
+    #[test]
+    fn an_idle_child_does_not_wake_its_parent_and_several_children_share_one_line() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let parent = world.thread(&project, world.home.path(), |thread| {
+            thread.role = thread::NodeRole::Coordinator;
+            thread.can_spawn = true;
+        });
+        let child = |title: &str| {
+            thread::allocate(&project, |thread| {
+                thread.parent_id = parent.id.clone();
+                thread.title = title.into();
+                thread.status = Status::Open;
+            })
+            .unwrap()
+        };
+        let (a, b, c) = (child("A"), child("B"), child("C"));
+        let to = |id: &str, group: Group| Transition {
+            id: id.into(),
+            to: group,
+            note: String::new(),
+        };
+        let mut state = State::default();
+
+        queue_parent_updates(&project, &mut state, &[to(&a.id, Group::Idle)]);
+        assert!(
+            state.parent_updates.is_empty(),
+            "{:?}",
+            state.parent_updates
+        );
+
+        queue_parent_updates(
+            &project,
+            &mut state,
+            &[
+                to(&a.id, Group::ReadyForReview),
+                to(&b.id, Group::WaitingOnYou),
+                to(&c.id, Group::ReadyForReview),
+            ],
+        );
+        let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
+        world
+            .runner
+            .on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let agent = Agent {
+            pane_id: parent.pane_id.clone(),
+            tab_id: parent.tab_id.clone(),
+            workspace_id: parent.workspace_id.clone(),
+            name: parent.agent_name.clone(),
+            agent_status: "idle".into(),
+            cwd: parent.cwd.clone(),
+            ..Agent::default()
+        };
+        nudge_parent_coordinators(&world.ctx(), &project, &mut state, &herdr, &[agent]).unwrap();
+        let calls = world.runner.calls.borrow();
+        let prompt = calls
+            .iter()
+            .find(|call| call.display().contains("agent prompt"))
+            .and_then(|call| call.args.last())
+            .unwrap();
+        let prefix = crate::coordinator::current_prefix(&world.ctx().root).unwrap();
+        assert_eq!(
+            *prompt,
+            format!(
+                "{PARENT_NUDGE_PREFIX} {} waiting on you; {}, {} ready for review. Inspect with `{prefix} node show demo <id>`.",
+                b.id, a.id, c.id
+            )
+        );
     }
 
     #[test]

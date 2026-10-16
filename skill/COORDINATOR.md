@@ -72,7 +72,8 @@ TASK
 - `--role worker` (the default) completes one task and cannot create children. `--role coordinator` may create children; `--no-spawn` makes a leaf coordinator. A remote coordinator that may spawn is refused until a remote CLI bridge exists; remote workers work as remote threads do.
 - A node's profile is `--profile`, else its parent node's, else the project's default for its role (`thread_profile` for workers, `coordinator_profile` for coordinator nodes), checked against that role's allow-list. `--model`, `--reasoning-effort`, `--permission-profile` and repeatable `--raw-agent-arg` add node flags on top of the profile and are inherited by the node's children. They validate argv only; they are not OS isolation.
 - `hp node list <slug>` prints the tree with parent and role; `hp node show`, `hp node prompt`, `hp node restart`, `hp node ack` and `hp node resolve` work as their `thread` counterparts.
-- After delegating, return idle. Never poll nodes with repeated `herdr agent wait`, `herdr agent read`, `hp node list`, sleeps or status loops: the ticker watches agents in code, wakes a child coordinator once when one of its direct children needs it, and nudges you through the inbox.
+- After delegating, return idle. Never poll nodes with repeated `herdr agent wait`, `herdr agent read`, `hp node list`, sleeps or status loops: the ticker watches agents in code, wakes a child coordinator with one line when one of its direct children is waiting on you, ready for review, has a new report or is landing, and nudges you through the inbox.
+- Workers under a child coordinator send their new reports, idle, landing and resolved items to that coordinator, not to your inbox; its own new report tells you its area is done. You still get their waiting on you items (a prompt on screen, a closed pane, a lost agent) and pull request items, and all of their items once their coordinator node is resolved or failed.
 
 ## Follow-ups
 

@@ -536,6 +536,14 @@ mod progress_hooks {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
 
+    /// What the hook does in the pane under test.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Speaks {
+        Never,
+        Worker,
+        Coordinator,
+    }
+
     struct Hooks {
         home: tempfile::TempDir,
         root: std::path::PathBuf,
@@ -651,25 +659,32 @@ mod progress_hooks {
             out
         }
 
-        fn check_events(&self, socket: &str, managed: bool) {
+        fn check_events(&self, socket: &str, pane: Speaks) {
             for kind in ["SessionStart", "UserPromptSubmit", "PostToolUse"] {
                 let progress = self.root.join(".progress");
                 if progress.exists() {
                     std::fs::remove_dir_all(&progress).unwrap();
                 }
                 let out = self.run(socket, json!({"hook_event_name":kind, "session_id":"main"}));
+                // A coordinator pane gets no check-in reminder after a tool
+                // call, so nothing in its record changes either.
+                let speaks = match pane {
+                    Speaks::Never => false,
+                    Speaks::Worker => true,
+                    Speaks::Coordinator => kind != "PostToolUse",
+                };
                 assert_eq!(
                     !out.stdout.is_empty(),
-                    managed,
+                    speaks,
                     "{kind}: {}",
                     String::from_utf8_lossy(&out.stdout)
                 );
                 assert_eq!(
                     progress.exists(),
-                    managed,
+                    speaks,
                     "{kind}: progress record creation"
                 );
-                if managed {
+                if speaks {
                     let response: Value = serde_json::from_slice(&out.stdout).unwrap();
                     assert!(
                         !response["hookSpecificOutput"]["additionalContext"]
@@ -686,9 +701,9 @@ mod progress_hooks {
     fn unmanaged_progress_hooks_are_silent_for_every_event() {
         let mut h = Hooks::new();
         h.pane["cwd"] = "/unrelated/repo".into();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
         h.pane["cwd"] = h.coordinator["cwd"].clone();
-        h.check_events("/other.sock", false);
+        h.check_events("/other.sock", Speaks::Never);
     }
 
     #[test]
@@ -717,25 +732,40 @@ mod progress_hooks {
     #[test]
     fn managed_progress_hooks_cover_coordinators_discovery_and_worktrees() {
         let mut h = Hooks::new();
-        h.check_events("/managed.sock", true);
+        h.check_events("/managed.sock", Speaks::Coordinator);
         // A second coordinator before the ticker has recorded it.
         h.coordinator["pane_id"] = "w9:p1".into();
         h.save_coordinator();
         h.pane["foreground_cwd"] = h.pane["cwd"].clone();
         h.pane["cwd"] = "/shell".into();
-        h.check_events("/managed.sock", true);
+        h.check_events("/managed.sock", Speaks::Coordinator);
         std::fs::remove_file(h.root.join("demo/.state/coordinator.json")).unwrap();
-        h.check_events("/managed.sock", true);
+        h.check_events("/managed.sock", Speaks::Coordinator);
         h.save_coordinator();
         h.pane["foreground_cwd"] = "".into();
         h.pane["cwd"] = "/separate/worktree".into();
         h.pane["name"] = "hpt-demo-t-0001".into();
         h.thread("");
-        h.check_events("/managed.sock", true);
-        h.check_events("/other.sock", false);
+        h.check_events("/managed.sock", Speaks::Worker);
+        h.check_events("/other.sock", Speaks::Never);
         // A remote pane id must never grant ownership to a local pane.
         h.thread("remote-host");
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
+    }
+
+    #[test]
+    fn a_prompt_the_ticker_typed_gets_no_reminder_and_one_the_user_typed_does() {
+        let h = Hooks::new();
+        let prompt = |text: &str| {
+            h.run(
+                "/managed.sock",
+                json!({"hook_event_name":"UserPromptSubmit", "session_id":"main", "prompt":text}),
+            )
+            .stdout
+        };
+        assert!(prompt("[hp inbox] t-0001 new report").is_empty());
+        assert!(prompt("<task-notification>\n<status>completed</status>").is_empty());
+        assert!(!prompt("Start the release").is_empty());
     }
 
     #[test]
@@ -747,17 +777,17 @@ mod progress_hooks {
         h.pane["cwd"] = "/separate/worktree".into();
         h.pane["name"] = "hpt-demo-t-0001".into();
         h.node("", "coordinator");
-        h.check_events("/managed.sock", true);
-        h.check_events("/other.sock", false);
+        h.check_events("/managed.sock", Speaks::Coordinator);
+        h.check_events("/other.sock", Speaks::Never);
         // Its pane id reused by a pane in another folder is not the node's.
         h.pane["cwd"] = "/different/worktree".into();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
         // A resolved coordinator node no longer speaks.
         h.pane["cwd"] = "/separate/worktree".into();
         let file = h.root.join("demo/threads/t-0001.toml");
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(file, text.replace("status = 'open'", "status = 'resolved'")).unwrap();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
     }
 
     #[test]
@@ -835,15 +865,15 @@ mod progress_hooks {
         h.pane["name"] = "hpt-demo-t-0001".into();
         h.thread("");
         h.pane["name"] = "someone-else".into();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
         h.pane["name"] = "hpt-demo-t-0001".into();
         h.pane["cwd"] = "/different/worktree".into();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
         h.pane["cwd"] = "/separate/worktree".into();
         let file = h.root.join("demo/threads/t-0001.toml");
         let text = std::fs::read_to_string(&file).unwrap();
         std::fs::write(file, text.replace("status = 'open'", "status = 'resolved'")).unwrap();
-        h.check_events("/managed.sock", false);
+        h.check_events("/managed.sock", Speaks::Never);
     }
 
     #[test]
