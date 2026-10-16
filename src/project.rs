@@ -519,6 +519,11 @@ impl Project {
     pub fn tracker(&self, config_dir: &Path) -> Result<Option<crate::tracker::Config>> {
         load_tracker(config_dir, &self.canonical_dir())
     }
+
+    /// Its token caps; none without a `[usage]` table.
+    pub fn usage_caps(&self, config_dir: &Path) -> Result<crate::usage::Caps> {
+        load_usage_caps(config_dir, &self.canonical_dir())
+    }
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -726,6 +731,52 @@ pub fn load_tracker(
         cache_secs: own.cache_secs.or(default.cache_secs).unwrap_or(60),
         timeout_secs: timeout,
     }))
+}
+
+/// One `[usage.*]` table as written; absent keys fall through to
+/// `[usage.default]`. Unknown keys are ignored, so a later binary may add some.
+#[derive(Deserialize, Default)]
+struct UsageLayer {
+    context_warn: Option<u64>,
+    compaction_warn: Option<u64>,
+    tokens_warn: Option<u64>,
+}
+
+/// The token caps of the project at `canonical_project_dir`, resolved as the
+/// safety tables are: its own `[usage."<path>"]`, then `[usage.default]`; 0
+/// or no value is no cap. A config.toml that does not parse has none here:
+/// the safety settings already report it.
+pub fn load_usage_caps(
+    config_dir: &Path,
+    canonical_project_dir: &Path,
+) -> Result<crate::usage::Caps> {
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        usage: std::collections::BTreeMap<String, toml::Value>,
+    }
+    let file = config_dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Ok(Default::default());
+    };
+    let Ok(mut config) = toml::from_str::<Config>(&text) else {
+        return Ok(Default::default());
+    };
+    let mut layer = |key: &str| -> Result<UsageLayer> {
+        match config.usage.remove(key) {
+            Some(value) => value
+                .try_into()
+                .with_context(|| format!("{}: [usage.{key:?}]", file.display())),
+            None => Ok(UsageLayer::default()),
+        }
+    };
+    let default = layer(crate::safety::DEFAULT_TABLE)?;
+    let own = layer(&canonical_project_dir.to_string_lossy())?;
+    Ok(crate::usage::Caps {
+        context_warn: own.context_warn.or(default.context_warn).unwrap_or(0),
+        compaction_warn: own.compaction_warn.or(default.compaction_warn).unwrap_or(0),
+        tokens_warn: own.tokens_warn.or(default.tokens_warn).unwrap_or(0),
+    })
 }
 
 /// The `*.md` files directly in `dir` that are regular files, not links, in

@@ -1874,6 +1874,9 @@ pub struct ThreadJson {
     /// project without a tracker prints what it printed before.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub task_id: String,
+    /// Its token use as last read from its transcripts; `null` before that
+    /// and on another machine.
+    pub usage: Option<crate::usage::Usage>,
     /// A spawning coordinator node's STATUS.md, `null` for every other node
     /// and while it is missing.
     pub status_file: Option<crate::status_file::StatusJson>,
@@ -1945,6 +1948,7 @@ pub fn thread_json(
     row: &Row,
     state: &steps::State,
     rule: &merge_gate::Rule,
+    usage: &crate::usage::Store,
 ) -> ThreadJson {
     let t = &row.thread;
     let report_path = thread::home_report_path(project, &t.id);
@@ -2042,6 +2046,7 @@ pub fn thread_json(
         task: t.task.clone(),
         task_origin: t.task_origin.clone(),
         task_id: t.task_id.clone(),
+        usage: usage.usage(&t.id),
         status_file: organizations::node_status_json(project, t),
     }
 }
@@ -2050,8 +2055,9 @@ pub fn thread_json(
 pub fn threads_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> Vec<ThreadJson> {
     let state = steps::load_state(project);
     let rule = merge_gate::Rule::load(ctx, project);
+    let usage = crate::usage::load(project);
     rows.iter()
-        .map(|row| thread_json(project, row, &state, &rule))
+        .map(|row| thread_json(project, row, &state, &rule, &usage))
         .collect()
 }
 
@@ -2084,12 +2090,13 @@ pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     let rows = rows(ctx, &project);
     let state = steps::load_state(&project);
     let rule = merge_gate::Rule::load(ctx, &project);
+    let usage = crate::usage::load(&project);
     let nodes: Vec<NodeJson> = entries
         .iter()
         .filter_map(|entry| {
             let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
             Some(NodeJson {
-                thread: thread_json(&project, row, &state, &rule),
+                thread: thread_json(&project, row, &state, &rule, &usage),
                 depth: entry.depth,
                 tree_order: entry.tree_order,
             })
@@ -2125,7 +2132,8 @@ pub fn set_flags(
 pub fn row_json(ctx: &Ctx, project: &Project, row: &Row) -> serde_json::Value {
     let state = steps::load_state(project);
     let rule = merge_gate::Rule::load(ctx, project);
-    serde_json::to_value(thread_json(project, row, &state, &rule)).unwrap_or_default()
+    let usage = crate::usage::load(project);
+    serde_json::to_value(thread_json(project, row, &state, &rule, &usage)).unwrap_or_default()
 }
 
 pub fn print_list(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {

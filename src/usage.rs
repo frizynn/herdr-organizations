@@ -1,16 +1,28 @@
 //! Token use per local node: the root coordinator, each coordinator node and
 //! each thread. Herdr reports no usage, only each pane's native session id
-//! (`Agent::session_id`); the ticker keeps those in the node's record
-//! (`sessions`), and this module reads the harness's own transcripts for them.
+//! (`Agent::session_id`). The ticker keeps every id a node's pane reported in
+//! its record (`sessions`), and this module reads the harness's own
+//! transcripts for them: Claude Code's `<config>/projects/<cwd>/<id>.jsonl`,
+//! with its subagents in `<id>/subagents/*.jsonl`, and Codex's
+//! `sessions/**/rollout-*-<id>.jsonl`.
+//!
+//! A read takes only the lines added since the last one: `.state/usage.json`
+//! keeps each file's offset and counts, so the totals outlive a transcript the
+//! harness deletes. A line it does not understand is skipped. Only numbers are
+//! kept; no transcript text is stored, printed or sent anywhere.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::notify::{Notifier, Sound};
+use crate::organizations::ROOT_ID;
 use crate::paths::Ctx;
 use crate::project::{self, Project};
+use crate::thread;
 
 /// The ticker reads transcripts at most this often, and whenever a node
 /// stops working.
@@ -49,17 +61,46 @@ pub struct File {
     pub subagent: bool,
     /// Bytes read, always at the end of a line.
     pub offset: u64,
+    /// Claude Code writes a request once per content block, the rows one after
+    /// another: the last `message.id`/`requestId` counted.
     pub last_key: String,
+    /// Codex: the last cumulative input, cached input and output.
     pub cumulative: [u64; 3],
     pub requests: u64,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// The last request's prompt: input, cache read and cache write.
     pub context: u64,
     pub peak_context: u64,
     pub compactions: u64,
+    /// When the last counted request was made.
     pub last_at: String,
+}
+
+impl File {
+    fn new(harness: &str, session: &str, subagent: bool) -> File {
+        File {
+            harness: harness.into(),
+            session: session.into(),
+            subagent,
+            ..File::default()
+        }
+    }
+
+    fn count(&mut self, input: u64, output: u64, read: u64, write: u64, context: u64, at: &str) {
+        self.requests += 1;
+        self.input += input;
+        self.output += output;
+        self.cache_read += read;
+        self.cache_write += write;
+        self.context = context;
+        self.peak_context = self.peak_context.max(context);
+        if let Some(at) = instant(at) {
+            self.last_at = at;
+        }
+    }
 }
 
 /// A node's use in the `--json` contract.
@@ -76,15 +117,60 @@ pub struct Usage {
     pub over_cap: Vec<String>,
 }
 
+impl Usage {
+    /// What `tokens_warn` counts: cache reads repeat the context on every
+    /// request and would dwarf the rest.
+    fn tokens(&self) -> u64 {
+        self.input + self.cache_write + self.output
+    }
+}
+
 impl Node {
+    /// What its transcripts add up to: tokens from every file, context and
+    /// compactions from its own sessions, the context of the latest.
+    /// `None` until one request or compaction was understood.
     pub fn usage(&self) -> Option<Usage> {
-        None
+        let files: Vec<&File> = self
+            .files
+            .values()
+            .filter(|f| f.requests > 0 || f.compactions > 0)
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        let own = || files.iter().filter(|f| !f.subagent);
+        let sum = |field: fn(&File) -> u64| files.iter().map(|f| field(f)).sum();
+        Some(Usage {
+            input: sum(|f| f.input),
+            output: sum(|f| f.output),
+            cache_read: sum(|f| f.cache_read),
+            cache_write: sum(|f| f.cache_write),
+            context: own()
+                .max_by(|a, b| a.last_at.cmp(&b.last_at))
+                .map_or(0, |f| f.context),
+            peak_context: own().map(|f| f.peak_context).max().unwrap_or(0),
+            compactions: own().map(|f| f.compactions).sum(),
+            updated: files
+                .iter()
+                .map(|f| f.last_at.clone())
+                .max()
+                .unwrap_or_default(),
+            over_cap: self.over.clone(),
+        })
     }
 }
 
 impl Store {
     pub fn usage(&self, id: &str) -> Option<Usage> {
         self.nodes.get(id).and_then(Node::usage)
+    }
+
+    /// The caps node `id` was at or above at its last read.
+    pub fn over(&self, id: &str) -> Vec<String> {
+        self.nodes
+            .get(id)
+            .map(|n| n.over.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -98,8 +184,37 @@ pub struct Caps {
 }
 
 impl Caps {
-    pub fn over(&self, _usage: &Usage) -> Vec<String> {
-        Vec::new()
+    /// The caps `usage` is at or above, by their config.toml keys.
+    pub fn over(&self, usage: &Usage) -> Vec<String> {
+        self.levels(usage)
+            .into_iter()
+            .filter(|(_, cap, value)| *cap > 0 && value >= cap)
+            .map(|(key, ..)| key.to_string())
+            .collect()
+    }
+
+    /// Each cap's key, limit and the value it is compared with.
+    fn levels(&self, usage: &Usage) -> [(&'static str, u64, u64); 3] {
+        [
+            ("context_warn", self.context_warn, usage.context),
+            ("compaction_warn", self.compaction_warn, usage.compactions),
+            ("tokens_warn", self.tokens_warn, usage.tokens()),
+        ]
+    }
+
+    /// The notification for reaching cap `key`.
+    fn describe(&self, key: &str, usage: &Usage) -> String {
+        let (_, cap, value) = self
+            .levels(usage)
+            .into_iter()
+            .find(|(k, ..)| *k == key)
+            .unwrap_or_default();
+        let what = match key {
+            "context_warn" => format!("context {} tokens", short(value)),
+            "compaction_warn" => plural(value, "compaction"),
+            _ => format!("{} tokens used", short(value)),
+        };
+        format!("{what}, at or above its cap of {}", short(cap))
     }
 }
 
@@ -111,14 +226,488 @@ pub fn load(project: &Project) -> Store {
     project::read_json(&path(project)).unwrap_or_default()
 }
 
-/// Reads what every open local node's transcripts added since the last read.
-pub fn refresh(_ctx: &Ctx, project: &Project) -> Result<Store> {
-    Ok(load(project))
+/// Reads what every open local node's transcripts gained since the last
+/// read, records the caps each node is at or above, and notifies each cap a
+/// node newly reached, once and without sound.
+pub fn refresh(ctx: &Ctx, project: &Project) -> Result<Store> {
+    let caps = project.usage_caps(&ctx.config_dir)?;
+    let mut reached = Vec::new();
+    let store = {
+        let _lock = lock(project)?;
+        let mut store = load(project);
+        for node in local_nodes(project) {
+            let mut entry = store.nodes.remove(&node.id).unwrap_or_default();
+            read_node(ctx, &node, &mut entry);
+            let usage = entry.usage();
+            let over = usage.as_ref().map(|u| caps.over(u)).unwrap_or_default();
+            for key in over.iter().filter(|key| !entry.over.contains(key)) {
+                let usage = usage.clone().unwrap_or_default();
+                reached.push((node.id.clone(), caps.describe(key, &usage)));
+            }
+            entry.over = over;
+            if !entry.files.is_empty() {
+                store.nodes.insert(node.id, entry);
+            }
+        }
+        store.refreshed = project::now();
+        project::write_json(&path(project), &store)?;
+        store
+    };
+    if !reached.is_empty() {
+        let notifier = Notifier::new(ctx, project);
+        for (id, body) in reached {
+            let subject = if id == ROOT_ID { "coordinator" } else { &id };
+            notifier.send(subject, &body, Sound::None, false);
+        }
+    }
+    Ok(store)
 }
 
-/// The ticker's pass.
-pub fn tick(_ctx: &Ctx, _project: &Project, _stopped: bool, _now: jiff::Timestamp) -> Result<()> {
+/// The ticker's pass: a read at most every five minutes, and at once when a
+/// node stopped working, so a finished turn shows without waiting.
+pub fn tick(ctx: &Ctx, project: &Project, stopped: bool, now: jiff::Timestamp) -> Result<()> {
+    let due = load(project)
+        .refreshed
+        .parse::<jiff::Timestamp>()
+        .map_or(true, |at| now.duration_since(at).as_secs() >= REFRESH_SECS);
+    if stopped || due {
+        refresh(ctx, project)?;
+    }
     Ok(())
+}
+
+/// `node usage <slug> [--json]`: reads the transcripts now, then one row per
+/// node, the root first, in tree order.
+pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
+    let project = Project::load(&ctx.root, slug)?;
+    let store = refresh(ctx, &project)?;
+    let mut rows = vec![(
+        ROOT_ID.to_string(),
+        "Coordinator".to_string(),
+        String::new(),
+    )];
+    rows.extend(
+        crate::organizations::tree(&project)?
+            .into_iter()
+            .map(|e| (e.thread.id, e.thread.title, e.thread.machine)),
+    );
+    if json {
+        let nodes: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(id, title, _)| serde_json::json!({"id": id, "title": title, "usage": store.usage(id)}))
+            .collect();
+        return crate::threads::print_json(&serde_json::json!({
+            "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+            "project": project.slug,
+            "nodes": nodes,
+        }));
+    }
+    for (id, title, machine) in rows {
+        let line = match store.usage(&id) {
+            Some(u) => {
+                let mut line = format!(
+                    "context {} · peak {} · {} · {} tokens · {} cache read",
+                    short(u.context),
+                    short(u.peak_context),
+                    plural(u.compactions, "compaction"),
+                    short(u.tokens()),
+                    short(u.cache_read)
+                );
+                if !u.over_cap.is_empty() {
+                    line.push_str(&format!(" · over {}", u.over_cap.join(", ")));
+                }
+                line
+            }
+            None if !machine.is_empty() => format!("on {machine}, not read"),
+            None => "no data".into(),
+        };
+        println!("{id}\t{title}\t{line}");
+    }
+    Ok(())
+}
+
+/// The CLI and the ticker read one at a time, so a crossing notifies once.
+/// Not the project lock: a first read of a long transcript takes a while,
+/// and nothing else needs to wait for it.
+fn lock(project: &Project) -> Result<std::fs::File> {
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(project.state_dir().join("usage.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// A node whose transcripts are on this machine.
+struct Local {
+    id: String,
+    harness: String,
+    cwd: String,
+    sessions: Vec<String>,
+}
+
+/// The root coordinator and every open local thread. A resolved thread was
+/// read when it stopped; a remote one's transcripts are on its machine.
+fn local_nodes(project: &Project) -> Vec<Local> {
+    let root = project.coordinator().map(|c| Local {
+        id: ROOT_ID.into(),
+        harness: c.agent,
+        cwd: if c.cwd.is_empty() {
+            project.canonical_dir().to_string_lossy().into_owned()
+        } else {
+            c.cwd
+        },
+        sessions: c.sessions,
+    });
+    let threads = thread::list(project)
+        .into_iter()
+        .filter(|t| t.status != thread::Status::Resolved && !t.is_remote())
+        .map(|t| Local {
+            id: t.id,
+            harness: t.agent,
+            cwd: t.cwd,
+            sessions: t.sessions,
+        });
+    root.into_iter().chain(threads).collect()
+}
+
+/// Finds the transcripts of sessions new to `entry`, and of Claude Code
+/// subagents, then reads what every file gained.
+fn read_node(ctx: &Ctx, node: &Local, entry: &mut Node) {
+    for session in &node.sessions {
+        let known = entry
+            .files
+            .values()
+            .any(|f| f.session == *session && !f.subagent);
+        if !known && let Some(path) = locate(ctx, &node.harness, &node.cwd, session) {
+            entry
+                .files
+                .entry(path.to_string_lossy().into_owned())
+                .or_insert_with(|| File::new(&node.harness, session, false));
+        }
+    }
+    let mains: Vec<(String, String)> = entry
+        .files
+        .iter()
+        .filter(|(_, f)| f.harness == CLAUDE && !f.subagent)
+        .map(|(path, f)| (path.clone(), f.session.clone()))
+        .collect();
+    for (main, session) in mains {
+        for path in subagents(Path::new(&main)) {
+            entry
+                .files
+                .entry(path.to_string_lossy().into_owned())
+                .or_insert_with(|| File::new(CLAUDE, &session, true));
+        }
+    }
+    for (path, file) in &mut entry.files {
+        read(Path::new(path), file);
+    }
+}
+
+/// The transcript of `session` for a node on `harness` working in `cwd`.
+fn locate(ctx: &Ctx, harness: &str, cwd: &str, session: &str) -> Option<PathBuf> {
+    // Herdr may name the transcript itself (`kind: path`).
+    let named = Path::new(session);
+    if named.is_absolute() {
+        return named.is_file().then(|| named.to_path_buf());
+    }
+    if session.is_empty() || session.starts_with('.') || session.contains(['/', '\\']) {
+        return None;
+    }
+    let file = format!("{session}.jsonl");
+    match harness {
+        CLAUDE => {
+            let own = crate::rename::claude_projects(ctx, Path::new(cwd));
+            if own.join(&file).is_file() {
+                return Some(own.join(&file));
+            }
+            // Claude Code shortens a long folder name, and a link may name
+            // the folder another way: look in every one.
+            std::fs::read_dir(own.parent()?)
+                .ok()?
+                .flatten()
+                .map(|e| e.path().join(&file))
+                .find(|p| p.is_file())
+        }
+        CODEX => {
+            let home = ctx
+                .env
+                .var("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| ctx.env.home.join(".codex"));
+            rollout(&home.join("sessions"), &format!("-{file}"), 4)
+        }
+        _ => None,
+    }
+}
+
+/// `rollout-<time>-<id>.jsonl` under Codex's dated session folders.
+fn rollout(dir: &Path, suffix: &str, depth: usize) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_dir() && depth > 0 {
+            if let Some(found) = rollout(&entry.path(), suffix, depth - 1) {
+                return Some(found);
+            }
+        } else if kind.is_file() && name.starts_with("rollout-") && name.ends_with(suffix) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// The subagent transcripts Claude Code keeps beside the session in `main`.
+fn subagents(main: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(main.with_extension("").join("subagents")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect()
+}
+
+/// Reads the lines `file` gained since its offset. A missing transcript
+/// keeps what was read from it (the harness deletes old ones); a shorter one
+/// was rewritten and is read again from its start.
+fn read(path: &Path, file: &mut File) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if !meta.is_file() {
+        return;
+    }
+    if meta.len() < file.offset {
+        *file = File::new(&file.harness, &file.session, file.subagent);
+    }
+    if meta.len() == file.offset {
+        return;
+    }
+    let Ok(mut handle) = std::fs::File::open(path) else {
+        return;
+    };
+    if handle.seek(SeekFrom::Start(file.offset)).is_err() {
+        return;
+    }
+    let mut reader = BufReader::with_capacity(1 << 16, handle);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(n) if n > 0 && line.ends_with(b"\n") => {
+                file.offset += n as u64;
+                match file.harness.as_str() {
+                    CLAUDE => claude_line(&line, file),
+                    CODEX => codex_line(&line, file),
+                    _ => {}
+                }
+            }
+            // The end, or a line the harness is still writing.
+            _ => break,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ClaudeRow {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    subtype: Option<String>,
+    #[serde(rename = "requestId", default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    message: Option<ClaudeMessage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeMessage {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
+fn claude_line(line: &[u8], file: &mut File) {
+    // Most rows are neither, and are not parsed.
+    if !has(line, b"\"usage\"") && !has(line, b"compact_boundary") {
+        return;
+    }
+    let Ok(row) = serde_json::from_slice::<ClaudeRow>(line) else {
+        return;
+    };
+    if row.kind == "system" && row.subtype.as_deref() == Some("compact_boundary") {
+        file.compactions += 1;
+        return;
+    }
+    let Some(message) = row.message.filter(|_| row.kind == "assistant") else {
+        return;
+    };
+    // Claude Code's own notices are no request; their counts are zero.
+    if message.model.as_deref() == Some("<synthetic>") {
+        return;
+    }
+    let Some(usage) = message.usage else {
+        return;
+    };
+    let key = format!(
+        "{}/{}",
+        message.id.unwrap_or_default(),
+        row.request_id.unwrap_or_default()
+    );
+    if key == file.last_key {
+        return;
+    }
+    file.last_key = key;
+    let context =
+        usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+    file.count(
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
+        context,
+        row.timestamp.as_deref().unwrap_or(""),
+    );
+}
+
+#[derive(Deserialize)]
+struct CodexRow {
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    payload: Option<CodexPayload>,
+}
+
+#[derive(Deserialize)]
+struct CodexPayload {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    info: Option<CodexInfo>,
+}
+
+#[derive(Deserialize)]
+struct CodexInfo {
+    #[serde(default)]
+    total_token_usage: Option<CodexTokens>,
+    #[serde(default)]
+    last_token_usage: Option<CodexTokens>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(default)]
+struct CodexTokens {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl CodexTokens {
+    fn columns(self) -> [u64; 3] {
+        [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.output_tokens,
+        ]
+    }
+}
+
+/// Codex writes cumulative totals: a request is what they grew by, its input
+/// split into the uncached part and the cache read.
+fn codex_line(line: &[u8], file: &mut File) {
+    if !has(line, b"token_count") {
+        return;
+    }
+    let Ok(row) = serde_json::from_slice::<CodexRow>(line) else {
+        return;
+    };
+    let Some(info) = row
+        .payload
+        .filter(|p| p.kind == "token_count")
+        .and_then(|p| p.info)
+    else {
+        return;
+    };
+    let Some(total) = info.total_token_usage else {
+        return;
+    };
+    let now = total.columns();
+    let last = info.last_token_usage.unwrap_or_default();
+    let grown = [0, 1, 2].map(|i| now[i].checked_sub(file.cumulative[i]));
+    let delta = if grown.iter().all(Option::is_some) {
+        grown.map(Option::unwrap_or_default)
+    } else {
+        // A total that went down was reset by a compaction or a resume: the
+        // event's own use is its last request's.
+        file.compactions += 1;
+        last.columns()
+    };
+    file.cumulative = now;
+    // Codex repeats an unchanged total.
+    if delta == [0, 0, 0] {
+        return;
+    }
+    file.count(
+        delta[0].saturating_sub(delta[1]),
+        delta[2],
+        delta[1],
+        0,
+        last.input_tokens,
+        row.timestamp.as_deref().unwrap_or(""),
+    );
+}
+
+fn has(line: &[u8], needle: &[u8]) -> bool {
+    line.windows(needle.len()).any(|w| w == needle)
+}
+
+/// A transcript's time as the JSON contract writes times, to the second.
+fn instant(text: &str) -> Option<String> {
+    let at = text.parse::<jiff::Timestamp>().ok()?;
+    at.round(jiff::Unit::Second).ok().map(|t| t.to_string())
+}
+
+/// 1300 as `1.3k`, 1,000,300 as `1M`.
+fn short(n: u64) -> String {
+    let (value, unit) = match n {
+        0..1_000 => return n.to_string(),
+        1_000..1_000_000 => (n as f64 / 1e3, "k"),
+        _ => (n as f64 / 1e6, "M"),
+    };
+    let text = format!("{value:.1}");
+    format!("{}{unit}", text.strip_suffix(".0").unwrap_or(&text))
+}
+
+fn plural(n: u64, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +727,15 @@ mod tests {
                 "usage": {"input_tokens": input, "output_tokens": output,
                     "cache_read_input_tokens": read, "cache_creation_input_tokens": write}}
         })
+        .to_string()
+    }
+
+    /// Claude Code's own notice after an interrupted turn: no request.
+    fn synthetic() -> String {
+        json!({"type": "assistant", "timestamp": "2026-10-16T10:03:00Z", "requestId": "req-n",
+            "message": {"id": "n", "model": "<synthetic>", "content": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}})
         .to_string()
     }
 
@@ -206,7 +804,7 @@ mod tests {
 
     /// Claude Code repeats a request's row once per content block: each
     /// request counts once, the context is the last request's prompt, and a
-    /// line that is not JSON is skipped.
+    /// line that is not JSON and a notice Claude Code wrote itself are skipped.
     #[test]
     fn a_transcript_counts_each_request_once_with_its_context_peak_and_compactions() {
         let world = World::new();
@@ -221,6 +819,7 @@ mod tests {
                 compaction(),
                 "{not json".into(),
                 assistant("m3", "2026-10-16T10:02:00.000Z", 1, 2, 40, 0),
+                synthetic(),
             ],
         );
         assert_eq!(

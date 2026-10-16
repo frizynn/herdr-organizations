@@ -544,22 +544,35 @@ fn verdict_style(verdict: Verdict) -> Style {
     }
 }
 
-/// A tree row's text column: its report's verdict first, when it has one.
+/// A tree row's text column: its report's verdict first, when it has one,
+/// then `over cap` when it reached a token cap.
 fn text_column(line: Line, node: &Node) -> Line {
     const AT: isize = 41;
     const WIDTH: usize = 40;
-    let Some(verdict) = node.verdict else {
+    let marks = node
+        .verdict
+        .map(|v| (v.words(), verdict_style(v)))
+        .into_iter()
+        .chain((!node.over_cap.is_empty()).then_some(("over cap", YELLOW)));
+    let (mut line, mut x) = (line, AT);
+    for (words, style) in marks {
+        if x > AT {
+            line = line.at(x + 1, "·", DIM);
+            x += 3;
+        }
+        line = line.at(x, words, style);
+        x += words.len() as isize;
+    }
+    if x == AT {
         return line.at(AT, term::fit(&node.text, WIDTH), Style::PLAIN);
-    };
-    let words = verdict.words();
-    let line = line.at(AT, words, verdict_style(verdict));
+    }
     if node.text.is_empty() {
         return line;
     }
-    let x = AT + words.len() as isize;
+    let used = (x - AT) as usize;
     line.at(x + 1, "·", DIM).at(
         x + 3,
-        term::fit(&node.text, WIDTH.saturating_sub(words.len() + 3)),
+        term::fit(&node.text, WIDTH.saturating_sub(used + 3)),
         Style::PLAIN,
     )
 }

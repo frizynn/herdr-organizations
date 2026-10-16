@@ -880,6 +880,8 @@ pub struct Seen {
     transitions: Vec<Transition>,
     /// At least one agent works in the project folder: routines may fire.
     coordinator: bool,
+    /// A coordinator's agent was working at the last pass and is not now.
+    coordinator_stopped: bool,
     /// The session answered, the project has at least two recorded local
     /// panes, and every one of them is missing: herdr was restarted.
     session_lost: bool,
@@ -1043,15 +1045,27 @@ fn thread_pass(
             None => (String::new(), None),
         };
         let self_changed = !t.is_remote() && (activity != t.activity || percent != t.percent);
+        // Every session its pane reported, for its token use (`usage.rs`).
+        let session = agents
+            .iter()
+            .find(|a| thread::agent_matches(t, a))
+            .map(|a| a.session_id().to_string())
+            .filter(|s| !s.is_empty() && !t.sessions.contains(s));
         if delivered
             || state != t.last_state
             || group.token() != t.last_group
             || line != t.state_line
             || self_changed
+            || session.is_some()
         {
             thread::update(project, &t.id, |t| {
                 if delivered {
                     t.prompt_pending = false;
+                }
+                if let Some(session) = &session
+                    && !t.sessions.contains(session)
+                {
+                    t.sessions.push(session.clone());
                 }
                 if state != t.last_state {
                     t.last_state = state.clone();
@@ -1306,17 +1320,30 @@ fn tick_cheap(ctx: &Ctx, project: &Project, sessions: &mut Sessions) -> Result<O
     if coordinators != previous {
         coordinator::save_live(project, &coordinators)?;
     }
-    // The primary pane's native session id, for a later resume by `open`.
+    // The primary pane's native session id, for a later resume by `open`,
+    // and every one it had, for its token use (`usage.rs`).
     if let Some(primary) = coordinators.iter().find(|c| c.pane_id == record.pane_id)
         && !primary.agent_session.is_empty()
-        && (primary.agent_session != record.agent_session || primary.agent != record.agent)
+        && (primary.agent_session != record.agent_session
+            || primary.agent != record.agent
+            || !record.sessions.contains(&primary.agent_session))
     {
         let (session_id, kind) = (primary.agent_session.clone(), primary.agent.clone());
         project.update_coordinator(|c| {
+            if !c.sessions.contains(&session_id) {
+                c.sessions.push(session_id.clone());
+            }
             c.agent_session = session_id;
             c.agent = kind;
         })?;
     }
+    // A coordinator that stopped working: its turn's tokens are read now.
+    let coordinator_stopped = previous.iter().any(|p| {
+        p.agent_status == "working"
+            && coordinators
+                .iter()
+                .any(|c| c.pane_id == p.pane_id && c.agent_status != "working")
+    });
     for c in &coordinators {
         let terminal = agents
             .iter()
@@ -1392,6 +1419,7 @@ fn tick_cheap(ctx: &Ctx, project: &Project, sessions: &mut Sessions) -> Result<O
             panes,
             transitions: pass.transitions,
             coordinator: !coordinators.is_empty(),
+            coordinator_stopped,
             session_lost: recorded_panes >= 2 && missing_panes == recorded_panes,
         })),
     }
@@ -1566,6 +1594,16 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         steps::nudge_parent_coordinators(ctx, project, &mut state, &herdr, &seen.agents)
             .err()
             .map(|error| error.context("parent nudge")),
+    );
+    // Token use: every five minutes, and at once when a node stopped working.
+    let stopped = seen.coordinator_stopped
+        || transitions
+            .iter()
+            .any(|t| t.from == Some(thread::Group::Working));
+    errors.extend(
+        crate::usage::tick(ctx, project, stopped, now)
+            .err()
+            .map(|error| error.context("usage")),
     );
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     errors.extend(steps::resolve_merged(ctx, project, &mut state, now));

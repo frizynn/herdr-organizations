@@ -746,6 +746,13 @@ enum NodeCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Token use per node, read from its harness's transcripts now: context, peak, compactions and totals
+    Usage {
+        slug: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a node's standing instructions, or replace them; the node and its descendants read them on their next brief or restart
     Rules {
         slug: String,
@@ -1550,6 +1557,7 @@ pub fn run() -> Result<()> {
                 }
             }
             NodeCommand::Show { slug, id, json } => threads::print_show(&ctx, &slug, &id, json),
+            NodeCommand::Usage { slug, json } => crate::usage::print(&ctx, &slug, json),
             NodeCommand::Rules {
                 slug,
                 id,
