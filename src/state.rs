@@ -191,6 +191,7 @@ pub struct InboxItem {
     pub subject: String,
     pub created: String,
     pub summary: String,
+    pub audience: inbox::Audience,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -601,6 +602,7 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
             subject: item.subject,
             created: item.created,
             summary: item.summary,
+            audience: inbox::Audience::Coordinator,
         })
         .collect();
 

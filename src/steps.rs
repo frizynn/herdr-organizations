@@ -2259,6 +2259,56 @@ mod tests {
             }
         }
 
+        /// The coordinator gets what it can act on in a pull request (a
+        /// failing check); what it cannot (an opened pull request, review
+        /// activity, what the auto actions did or did not do) is the user's.
+        #[test]
+        fn pull_request_items_are_for_whoever_can_act_on_them() {
+            use inbox::Audience::{Coordinator, User};
+            let audience = |setup: &Setup, event: &str| {
+                let found: Vec<inbox::Audience> = setup
+                    .items()
+                    .into_iter()
+                    .filter(|item| item.event == event)
+                    .map(|item| item.audience)
+                    .collect();
+                assert!(!found.is_empty(), "no `{event}` item");
+                found
+            };
+            let setup = Setup::new("idle", |t| t.auto_fix_ci = true);
+            let mut state = State::default();
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", GREEN, 10);
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = view("REVIEW_REQUIRED", RED, 10);
+            setup.check(&mut state);
+            *setup.gh_view.borrow_mut() = view_with_comments("CHANGES_REQUESTED", RED, 10, 1);
+            setup.check(&mut state);
+            let outcome = crate::pr_actions::ask(
+                &setup.world.ctx(),
+                "demo",
+                "t-0001",
+                crate::pr_actions::Request::FixCi,
+            )
+            .unwrap();
+            assert!(!outcome.sent, "{}", outcome.reason);
+            assert_eq!(audience(&setup, "PR opened"), [User]);
+            assert_eq!(audience(&setup, "PR checks failing"), [Coordinator]);
+            assert!(audience(&setup, "auto-fix").iter().all(|a| *a == User));
+            assert_eq!(audience(&setup, "PR review activity"), [User]);
+            assert_eq!(audience(&setup, "fix CI already asked"), [User]);
+
+            let setup = Setup::new("idle", |t| t.auto_merge = true);
+            setup.check(&mut State::default());
+            assert_eq!(audience(&setup, "auto-merged"), [User]);
+
+            let setup =
+                Setup::with_merge("idle", fail(1, "Required status check is expected"), |t| {
+                    t.auto_merge = true
+                });
+            setup.check(&mut State::default());
+            assert_eq!(audience(&setup, "auto-merge refused"), [User]);
+        }
+
         #[test]
         fn a_ready_pull_request_is_never_merged_without_the_flag() {
             let setup = Setup::new("idle", |_| {});
@@ -2400,6 +2450,8 @@ mod tests {
             let items = refusals();
             assert_eq!(items.len(), 1, "one item per reason: {items:?}");
             assert!(items[0].summary.contains("waiting for the reviewer"));
+            // Only the user merges, so a refusal is theirs.
+            assert_eq!(items[0].audience, inbox::Audience::User);
             assert!(
                 setup
                     .items()

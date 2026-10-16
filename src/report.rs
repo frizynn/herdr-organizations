@@ -13,6 +13,8 @@ use crate::thread::is_real_dir;
 pub const MAX_SUMMARY_CHARS: usize = 600;
 pub const MAX_CAPTURES: usize = 24;
 pub const MAX_DELIVERABLES: usize = 10;
+pub const MAX_REMEMBER_LINES: usize = 10;
+pub const MAX_REMEMBER_CHARS: usize = 600;
 
 /// The `Status:` line of a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +83,10 @@ pub fn summary(report: &str) -> Option<String> {
     let cut: String = text.trim().chars().take(MAX_SUMMARY_CHARS).collect();
     let cut = cut.trim_end();
     (!cut.is_empty()).then(|| cut.to_string())
+}
+
+pub fn remember(_report: &str) -> Vec<String> {
+    Vec::new()
 }
 
 /// The images listed under `## Captures` as `- <path> - <caption>` (or with
@@ -276,6 +282,39 @@ mod tests {
         );
         assert_eq!(summary("## Summary\n\n## Report\nx\n"), None);
         assert_eq!(summary("## Report\nx\n"), None);
+    }
+
+    #[test]
+    fn the_summary_keeps_its_first_three_lines() {
+        let report = "Status: done\n## Summary\nOne.\n\nTwo.\nThree.\nFour.\nFive.\n## Report\nx\n";
+        assert_eq!(summary(report).as_deref(), Some("One.\nTwo.\nThree."));
+    }
+
+    #[test]
+    fn remember_is_its_lines_without_list_markers_within_the_limits() {
+        let report = "Status: done\n## Summary\nx\n## Remember\n- Run the gates before a push.\n\n* `cargo test` needs the fake gh.\n  Plain line.  \n## Next\n- not this\n";
+        assert_eq!(
+            remember(report),
+            [
+                "Run the gates before a push.",
+                "`cargo test` needs the fake gh.",
+                "Plain line."
+            ]
+        );
+        assert!(remember("## Summary\nx\n").is_empty());
+        assert!(remember("## Remember\n\n-\n## Next\n- y\n").is_empty());
+
+        let many: String = (0..12).map(|n| format!("- lesson {n}\n")).collect();
+        let lines = remember(&format!("## Remember\n{many}"));
+        assert_eq!(lines.len(), MAX_REMEMBER_LINES);
+        assert_eq!(lines[9], "lesson 9");
+
+        let long = format!(
+            "## Remember\n- {}\n- {}\n- tail\n",
+            "a".repeat(400),
+            "é".repeat(400)
+        );
+        assert_eq!(remember(&long), ["a".repeat(400), "é".repeat(200)]);
     }
 
     #[test]

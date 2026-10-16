@@ -14,6 +14,15 @@ const MAX_CONSUME_CHARS: usize = 12_000;
 const MAX_INLINE_SUMMARY_CHARS: usize = 600;
 const MAX_INLINE_BODY_CHARS: usize = 2_000;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Audience {
+    User,
+    #[default]
+    #[serde(other)]
+    Coordinator,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct Item {
@@ -26,6 +35,7 @@ pub struct Item {
     /// a prompt"). The nudge line is built from subjects and events only, never
     /// from summaries, which may quote text from reports or GitHub.
     pub event: String,
+    pub audience: Audience,
     /// Empty except for `routine` items.
     #[serde(skip)]
     pub body: String,
@@ -97,6 +107,7 @@ pub fn write(
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect(),
         event: event.to_string(),
+        audience: Audience::Coordinator,
         body: String::new(),
     };
     let mut text = format!("+++\n{}+++\n", toml::to_string(&item)?);
@@ -202,37 +213,38 @@ pub fn done(project: &Project, ids: &[String], all: bool) -> Result<usize> {
     Ok(moved)
 }
 
+/// The `inbox list --json` document.
+pub fn list_json(project: &Project) -> serde_json::Value {
+    let seen = seen(project);
+    let items: Vec<serde_json::Value> = unhandled(project)
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "id": item.id,
+                "kind": item.kind,
+                "subject": item.subject,
+                "created": item.created,
+                "summary": item.summary,
+                "body": item.body,
+                "seen": seen.contains(&item.id),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": crate::threads::JSON_SCHEMA_VERSION,
+        "project": project.slug,
+        "items": items,
+    })
+}
+
 /// `inbox list`: unhandled items, oldest first. Reads only: nothing is marked
 /// seen or moved.
 pub fn print_list(project: &Project, json: bool) -> Result<()> {
-    let items = unhandled(project);
     if json {
-        let seen = seen(project);
-        let items: Vec<serde_json::Value> = items
-            .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "id": item.id,
-                    "kind": item.kind,
-                    "subject": item.subject,
-                    "created": item.created,
-                    "summary": item.summary,
-                    "body": item.body,
-                    "seen": seen.contains(&item.id),
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "schema_version": crate::threads::JSON_SCHEMA_VERSION,
-                "project": project.slug,
-                "items": items,
-            })
-        );
+        println!("{}", list_json(project));
         return Ok(());
     }
-    for item in items {
+    for item in unhandled(project) {
         println!(
             "{}\t{}\t{}\t{}",
             item.id, item.kind, item.subject, item.summary
@@ -412,6 +424,95 @@ mod tests {
             .unwrap();
         assert!(routine.body.starts_with("Check the build."));
         assert!(routine.body.ends_with("```"));
+    }
+
+    #[test]
+    fn an_item_without_an_audience_or_with_an_unknown_one_is_the_coordinators() {
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        // Written by a version before `audience`.
+        write_item(&project, "20260917T000001Z-routine-r-1", "");
+        std::fs::write(
+            inbox_dir(&project).join("20260917T000002Z-pr-t-0001-2.md"),
+            "+++\nid = \"20260917T000002Z-pr-t-0001-2\"\nkind = \"pr\"\nsubject = \"t-0001\"\nevent = \"auto-fix\"\naudience = \"someone-new\"\n+++\n",
+        )
+        .unwrap();
+        let items = unhandled(&project);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(
+            items.iter().all(|i| i.audience == Audience::Coordinator),
+            "{items:?}"
+        );
+    }
+
+    /// An item this version writes still reads with the fields an older
+    /// binary knows, so it keeps working on the same inbox.
+    #[test]
+    fn an_older_binary_still_reads_an_item_with_an_audience() {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct OlderItem {
+            id: String,
+            kind: String,
+            subject: String,
+            summary: String,
+            event: String,
+        }
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let id = write(&project, "pr", "t-0001", "auto-fix", "asked", "").unwrap();
+        let text = std::fs::read_to_string(inbox_dir(&project).join(format!("{id}.md"))).unwrap();
+        assert!(text.contains("audience = \"user\""), "{text}");
+        let front = text
+            .strip_prefix("+++\n")
+            .and_then(|rest| rest.split_once("+++\n"))
+            .unwrap()
+            .0;
+        let older: OlderItem = toml::from_str(front).unwrap();
+        assert_eq!(
+            (
+                older.id,
+                older.kind,
+                older.subject,
+                older.summary,
+                older.event
+            ),
+            (
+                id,
+                "pr".to_string(),
+                "t-0001".to_string(),
+                "asked".to_string(),
+                "auto-fix".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn consume_delivers_only_the_coordinators_items_and_done_takes_any() {
+        let root = tempfile::tempdir().unwrap();
+        let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        let for_user = write(&project, "pr", "t-0001", "auto-fix", "asked it", "").unwrap();
+        write(
+            &project,
+            "thread-state",
+            "t-0002",
+            "new report",
+            "read it",
+            "",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        assert_eq!(consume(&project, &mut out).unwrap(), 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("t-0002: read it"), "{text}");
+        assert!(!text.contains("asked it"), "{text}");
+        let left: Vec<String> = unhandled(&project).into_iter().map(|i| i.id).collect();
+        assert_eq!(left, [for_user.clone()]);
+        let mut out = Vec::new();
+        assert_eq!(consume(&project, &mut out).unwrap(), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), "No new inbox events.\n");
+        assert_eq!(done(&project, &[for_user], false).unwrap(), 1);
+        assert!(unhandled(&project).is_empty());
     }
 
     #[test]

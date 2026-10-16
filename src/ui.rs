@@ -4798,6 +4798,45 @@ mod tests {
         );
     }
 
+    /// A thread's details show what its report proposes to remember, and
+    /// mark the inbox items that are for the user rather than the
+    /// coordinator.
+    #[test]
+    fn the_detail_shows_what_to_remember_and_which_items_are_for_the_user() {
+        let world = crate::scenarios::World::new();
+        let ctx = world.ctx();
+        let mut app = new_app(&ctx, Mode::Popup);
+        app.snap = snapshot();
+        let dir = world.home.path().join("acme");
+        std::fs::create_dir_all(dir.join("threads")).unwrap();
+        std::fs::write(
+            dir.join("threads/t-0004.md"),
+            "Status: done\n## Summary\nShipped.\n## Remember\n- FIRST-LESSON\n- SECOND-LESSON\n",
+        )
+        .unwrap();
+        app.snap.projects[0].dir = dir.to_string_lossy().into_owned();
+        let item = |id: &str, summary: &str, audience| state::InboxItem {
+            id: id.into(),
+            kind: "pr".into(),
+            subject: "t-0004".into(),
+            created: crate::project::now(),
+            summary: summary.into(),
+            audience,
+        };
+        app.snap.projects[0].inbox = vec![
+            item("a", "USER-ITEM", crate::inbox::Audience::User),
+            item("b", "COORDINATOR-ITEM", crate::inbox::Audience::Coordinator),
+        ];
+        app.stack = vec![View::Launcher { sel: 0 }];
+        app.open_detail("acme", "t-0004");
+        let text = app.render(84, 30).text();
+        assert!(text.contains("remember 2 · FIRST-LESSON"), "{text}");
+        assert!(!text.contains("SECOND-LESSON"), "{text}");
+        let line = |needle: &str| text.lines().find(|l| l.contains(needle)).unwrap();
+        assert!(line("USER-ITEM").contains("for you · USER-ITEM"), "{text}");
+        assert!(!line("COORDINATOR-ITEM").contains("for you"), "{text}");
+    }
+
     #[test]
     fn go_to_agent_closes_the_popup_before_any_herdr_call() {
         let jump = ui_ops::Jump::Node {
