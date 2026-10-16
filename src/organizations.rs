@@ -2224,7 +2224,7 @@ mod tests {
         let world = World::new();
         let project = world.project("demo", "a.sock");
         let vault = world.home.path().join("vault");
-        std::fs::create_dir_all(vault.join("threads")).unwrap();
+        std::fs::create_dir_all(&vault).unwrap();
         let text = std::fs::read_to_string(project.project_md()).unwrap();
         std::fs::write(
             project.project_md(),

@@ -1826,9 +1826,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let project = project::create(root.path(), "demo", "", vec![]).unwrap();
+        // Written by hand: an empty folder, no `threads/` or `library/` yet.
         let vault = work.path().join("vault");
-        std::fs::create_dir_all(vault.join("threads")).unwrap();
-        std::fs::create_dir_all(vault.join("library")).unwrap();
+        std::fs::create_dir_all(&vault).unwrap();
         let text = std::fs::read_to_string(project.project_md()).unwrap();
         std::fs::write(
             project.project_md(),

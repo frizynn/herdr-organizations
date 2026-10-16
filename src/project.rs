@@ -1021,6 +1021,10 @@ mod tests {
         assert!(text.contains(&format!("`{prefix} skill`")));
         assert!(text.contains(&format!("`{prefix} context demo-project`")));
         assert!(text.contains("under `threads/`, you are a thread"));
+        assert!(
+            !text.contains("Your status file"),
+            "STATUS.md beside it needs no word"
+        );
         assert_eq!(prefix_in_agents_md(&text).as_deref(), Some(prefix.as_str()));
         assert_eq!(
             std::fs::read_link(project.dir().join("CLAUDE.md")).unwrap(),

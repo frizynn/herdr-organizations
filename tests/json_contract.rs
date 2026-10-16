@@ -547,7 +547,9 @@ fn records_move_where_project_md_says_and_every_view_reads_them_there() {
     let dir = Path::new(&fixture.dir()).to_path_buf();
     let vault = fixture.home.path().join("vault/demo");
     let v = vault.display().to_string();
-    fixture.text(&["set", "demo", "records", &v]);
+    // `~/` is the caller's home; `set` says the folder it stored.
+    let set = fixture.text(&["set", "demo", "records", "~/vault/demo"]);
+    assert!(set.starts_with(&format!("demo: records = {v}\n")), "{set}");
     for moved in [
         "threads/t-0002.md",
         "threads/t-0002.next.md",

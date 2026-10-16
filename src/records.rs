@@ -540,6 +540,38 @@ mod tests {
         assert_eq!(resolve(dir, "/vault/demo/"), Path::new("/vault/demo"));
     }
 
+    fn hand_written(project: &Project, records: &Path) {
+        let text = read(&project.project_md()).replacen(
+            "+++\n",
+            &format!("+++\nrecords = \"{}\"\n", records.display()),
+            1,
+        );
+        std::fs::write(project.project_md(), text).unwrap();
+    }
+
+    /// `records` written by hand to an empty folder: the writers make the
+    /// folders a record goes in, inside it. A records folder that is gone is
+    /// never made again, so an unmounted vault keeps failing.
+    #[test]
+    fn writers_make_their_folders_inside_a_records_folder_but_never_the_folder() {
+        let setup = Setup::new();
+        let project = setup.project("demo");
+        crate::thread::allocate(&project, |_| {}).unwrap();
+        let vault = setup.vault();
+        std::fs::create_dir_all(&vault).unwrap();
+        hand_written(&project, &vault);
+
+        crate::thread::append_follow_up(&project, "t-0001", "Also this.").unwrap();
+        assert!(read(&vault.join("threads/t-0001.task.md")).contains("Also this."));
+        crate::threads::next(&setup.ctx(), "demo", "t-0001", None, Some("Close it")).unwrap();
+        assert_eq!(read(&vault.join("threads/t-0001.next.md")), "- Close it\n");
+
+        std::fs::remove_dir_all(&vault).unwrap();
+        assert!(crate::thread::append_follow_up(&project, "t-0001", "Lost?").is_err());
+        assert!(crate::threads::next(&setup.ctx(), "demo", "t-0001", None, Some("X")).is_err());
+        assert!(!vault.exists(), "a records folder that is gone stays gone");
+    }
+
     /// The fixture every move test starts from: one of each record in the
     /// project folder, beside files that must stay.
     fn records_in(project: &Project) {
@@ -623,9 +655,10 @@ mod tests {
             "a status file keeps its time, which `status-stale` compares"
         );
         // AGENTS.md names the status file where it now is.
-        assert!(
-            read(&dir.join("AGENTS.md")).contains(&vault.join("STATUS.md").display().to_string())
-        );
+        assert!(read(&dir.join("AGENTS.md")).contains(&format!(
+            "Your status file is `{}`.",
+            vault.join("STATUS.md").display()
+        )));
 
         // Again: nothing changes.
         set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
@@ -644,6 +677,10 @@ mod tests {
             read(&project.project_md())
                 .lines()
                 .all(|l| !l.starts_with("records"))
+        );
+        assert!(
+            !read(&dir.join("AGENTS.md")).contains("Your status file"),
+            "AGENTS.md is the one it was before records"
         );
     }
 
@@ -669,6 +706,8 @@ mod tests {
             "Another task.\n"
         );
         assert!(!vault.join("STATUS.md").exists(), "nothing was copied");
+        assert!(!vault.join("library").exists(), "no folder was made");
+        assert!(!vault.join("nodes").exists(), "no folder was made");
 
         std::fs::remove_file(vault.join("threads/t-0001.task.md")).unwrap();
         set_records(&setup.ctx(), &project, &vault.to_string_lossy()).unwrap();
@@ -708,6 +747,9 @@ mod tests {
         set_records(&ctx, &project, "~/notes/demo").unwrap();
         let made = setup.home.path().join("notes/demo");
         assert_eq!(records_setting(&project), made.to_string_lossy());
-        assert!(made.join("threads").is_dir() && made.join("library").is_dir());
+        assert!(
+            made.join("STATUS.md").is_file(),
+            "the root's STATUS.md moved there"
+        );
     }
 }

@@ -6095,6 +6095,49 @@ fn a_workers_report_wakes_its_coordinator_node_and_only_the_nodes_own_report_rea
     assert_eq!(nudges(&world), ["[hp inbox] t-0001 new report"]);
 }
 
+/// With `records` set to an empty folder, the ticker copies reports there,
+/// wakes a coordinator node with the verdict read from there, names the
+/// copy there in a root inbox item, and a follow-up lands there too.
+#[test]
+fn with_records_the_ticker_copies_reads_and_names_reports_in_the_records_folder() {
+    let (world, project, worker) = nested_world("done");
+    let vault = world.home.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    set_front_matter(&project, &format!("records = \"{}\"", vault.display()));
+    write_report(&worker, "Status: blocked\n## Summary\nNeeds a key.\n");
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    }
+    assert!(vault.join("threads/t-0002.md").is_file());
+    assert!(!project.dir().join("threads/t-0002.md").exists());
+    let woken = prompts_to(&world, "w2:p1");
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("t-0002 blocked"), "{}", woken[0]);
+
+    let node = thread::load(&project, "t-0001").unwrap();
+    write_report(&node, "## Report\narea done\n");
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    let items = items_about(&project, "t-0001");
+    assert_eq!(items.len(), 1, "{items:?}");
+    let copy = vault.join("threads/t-0001.md");
+    assert!(
+        items[0]
+            .summary
+            .ends_with(&format!("has a new report: {}", copy.display())),
+        "{}",
+        items[0].summary
+    );
+
+    thread::append_follow_up(&project, "t-0002", "Use the sandbox key.").unwrap();
+    assert!(
+        std::fs::read_to_string(vault.join("threads/t-0002.task.md"))
+            .unwrap()
+            .contains("Use the sandbox key.")
+    );
+}
+
 /// `nudge = false`: the ticker types nothing into any coordinator of the
 /// project, the root or a coordinator node, and a child's events that would
 /// have woken its node are written to the project inbox instead.
