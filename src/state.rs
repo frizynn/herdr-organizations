@@ -207,11 +207,12 @@ mod verdict_on_disk {
     }
 
     pub fn serialize<S: Serializer>(verdict: &Option<Verdict>, to: S) -> Result<S::Ok, S::Error> {
-        let issues = *verdict == Some(Verdict::Issues);
-        let verdict = if issues {
-            Some(Verdict::Failed)
-        } else {
-            *verdict
+        // Every verdict names its form on disk, so a new one does not compile
+        // until it has a form a binary from before it reads.
+        let (verdict, issues) = match *verdict {
+            Some(Verdict::Issues) => (Some(Verdict::Failed), true),
+            Some(Verdict::Done | Verdict::NeedsDecision | Verdict::Blocked | Verdict::Failed)
+            | None => (*verdict, false),
         };
         OnDisk { verdict, issues }.serialize(to)
     }
