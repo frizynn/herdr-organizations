@@ -6246,7 +6246,7 @@ fn tracked_world(link: Output) -> (World, Project) {
     .unwrap();
     world.runner.on(
         "tracker-list",
-        ok(r#"{"schema_version":1,"tasks":[{"id":"AWA-1","title":"Research","owner":"","description":"Start with the 2025 papers."}]}"#),
+        ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research","owner":"","description":"Start with the 2025 papers."}]}"#),
     );
     world.runner.on("tracker-link", link);
     (world, project)
@@ -6288,7 +6288,7 @@ fn a_tracker_task_is_delegated_by_id_and_link_hears_it_started() {
             base: None,
             task: "Look into it.".into(),
             node: crate::organizations::NodeRequest {
-                from_task: Some("AWA-1".into()),
+                from_task: Some("TRK-1".into()),
                 ..Default::default()
             },
         },
@@ -6296,7 +6296,7 @@ fn a_tracker_task_is_delegated_by_id_and_link_hears_it_started() {
     .unwrap();
     assert_eq!(
         (t.task.as_str(), t.task_id.as_str(), t.task_origin.as_str()),
-        ("Research", "AWA-1", "task")
+        ("Research", "TRK-1", "task")
     );
     assert!(!project.dir().join("TASKS.md").exists());
     let brief = std::fs::read_to_string(Path::new(&t.thread_dir).join("brief.md")).unwrap();
@@ -6329,7 +6329,7 @@ fn a_tracker_task_is_delegated_by_id_and_link_hears_it_started() {
             "HP_PR_URL"
         ]
         .map(|key| env_of(links[0], key)),
-        ["demo", "AWA-1", "t-0001", "started", ""]
+        ["demo", "TRK-1", "t-0001", "started", ""]
     );
     assert_eq!(links[0].stdin, None);
 }
@@ -6365,12 +6365,12 @@ fn a_failing_link_never_stops_a_delegated_thread() {
         },
     )
     .unwrap();
-    assert_eq!(t.task_id, "AWA-1");
+    assert_eq!(t.task_id, "TRK-1");
     assert_ne!(t.status, Status::Failed);
     let items = items_of(&project, "task");
     assert_eq!(items.len(), 1);
     assert_eq!(
         items[0].summary,
-        "the tracker's link command failed for task AWA-1 (started): it timed out after 30 s"
+        "the tracker's link command failed for task TRK-1 (started): it timed out after 30 s"
     );
 }

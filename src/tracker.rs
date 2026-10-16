@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn a_list_needs_its_schema_version_and_an_id_and_title_per_task() {
         let tasks = parse(
-            r#"{"schema_version":1,"tasks":[{"id":" AWA-1 ","title":"Fix\tlogin","owner":"claude@m1","thread":null,"description":"a\u0007b\nc\n","extra":1}]}"#,
+            r#"{"schema_version":1,"tasks":[{"id":" TRK-1 ","title":"Fix\tlogin","owner":"claude@m1","thread":null,"description":"a\u0007b\nc\n","extra":1}]}"#,
         )
         .unwrap();
         let task = tasks[0].task();
@@ -276,7 +276,7 @@ mod tests {
                 task.title.as_str(),
                 task.description.as_str()
             ),
-            ("AWA-1", "Fix login", "ab\nc")
+            ("TRK-1", "Fix login", "ab\nc")
         );
         assert_eq!(
             task.owner,

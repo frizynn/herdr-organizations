@@ -3200,7 +3200,7 @@ mod tests {
         world.runner.on(
             "tracker-list",
             crate::runner::fake::ok(
-                r#"{"schema_version":1,"tasks":[{"id":"AWA-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0003","description":"Safari drops the cookie.","url":"https://tracker.example/AWA-1"}]}"#,
+                r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0003","description":"Safari drops the cookie.","url":"https://tracker.example/TRK-1"}]}"#,
             ),
         );
         world
@@ -3227,7 +3227,7 @@ mod tests {
             [
                 ("Backlog".to_string(), true),
                 (
-                    "  [AWA-1] Fix login  (claude) · t-0003  ≡".to_string(),
+                    "  [TRK-1] Fix login  (claude) · t-0003  ≡".to_string(),
                     false
                 )
             ]
@@ -3240,7 +3240,7 @@ mod tests {
             panic!()
         };
         assert!(
-            lines.contains(&"https://tracker.example/AWA-1".to_string()),
+            lines.contains(&"https://tracker.example/TRK-1".to_string()),
             "{lines:?}"
         );
 
@@ -3257,7 +3257,7 @@ mod tests {
         assert_eq!(
             sent.stdin.as_deref(),
             Some(
-                "(from the projects popup) Please mark as done the task AWA-1 \"Fix login\" in the tracker, with the tracker's own tool."
+                "(from the projects popup) Please mark as done the task TRK-1 \"Fix login\" in the tracker, with the tracker's own tool."
             )
         );
     }

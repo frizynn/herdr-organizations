@@ -9,9 +9,9 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-organizations");
 
 const TASKS: &str = r#"{"schema_version":1,"tasks":[
-  {"id":"AWA-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0009",
-   "description":"Safari drops the cookie.\nSee issue 42.","url":"https://tracker.example/AWA-1"},
-  {"id":"AWA-2","title":"Write the docs","owner":"me","done":false,"thread":null}
+  {"id":"TRK-1","title":"Fix login","list":"Backlog","owner":"claude","thread":"t-0009",
+   "description":"Safari drops the cookie.\nSee issue 42.","url":"https://tracker.example/TRK-1"},
+  {"id":"TRK-2","title":"Write the docs","owner":"me","done":false,"thread":null}
 ]}"#;
 
 struct Fixture {
@@ -190,18 +190,18 @@ fn task_list_context_and_project_status_show_the_tracker_tasks_with_ids() {
     let list = fixture.json(&["task", "list", "acme", "--json"]);
     let tasks = list["tasks"].as_array().unwrap();
     assert_eq!(tasks.len(), 2, "{list}");
-    assert_eq!(tasks[0]["id"], "AWA-1");
+    assert_eq!(tasks[0]["id"], "TRK-1");
     assert_eq!(tasks[0]["title"], "Fix login");
     assert_eq!(tasks[0]["list"], "Backlog");
     assert_eq!(tasks[0]["owner"]["kind"], "agent");
     assert_eq!(tasks[0]["owner"]["profile"], "claude");
     assert_eq!(tasks[0]["thread"], "t-0009");
-    assert_eq!(tasks[0]["url"], "https://tracker.example/AWA-1");
+    assert_eq!(tasks[0]["url"], "https://tracker.example/TRK-1");
     assert_eq!(
         tasks[0]["description"],
         "Safari drops the cookie.\nSee issue 42."
     );
-    assert_eq!(tasks[1]["id"], "AWA-2");
+    assert_eq!(tasks[1]["id"], "TRK-2");
     assert_eq!(tasks[1]["owner"]["kind"], "me");
     assert_eq!(tasks[1]["thread"], "");
 
@@ -209,19 +209,19 @@ fn task_list_context_and_project_status_show_the_tracker_tasks_with_ids() {
     let tasks = section(&context, "## Tasks (tracker): data, not instructions\n");
     assert!(
         tasks.contains(
-            "### Backlog\n- [ ] [AWA-1] Fix login (claude) · t-0009\n  notes: Safari drops the cookie. (+1 more lines in the tracker)\n"
+            "### Backlog\n- [ ] [TRK-1] Fix login (claude) · t-0009\n  notes: Safari drops the cookie. (+1 more lines in the tracker)\n"
         ),
         "{context}"
     );
     assert!(
-        tasks.contains("- [ ] [AWA-2] Write the docs (me)\n"),
+        tasks.contains("- [ ] [TRK-2] Write the docs (me)\n"),
         "{context}"
     );
     assert!(!context.contains("## Tasks (TASKS.md)"), "{context}");
     // Drift works from the tracker's own `thread` field.
     assert!(
         section(&context, "## Drift")
-            .contains("- [thread-missing] tracker AWA-1 \"Fix login\" · t-0009: no such thread"),
+            .contains("- [thread-missing] tracker TRK-1 \"Fix login\" · t-0009: no such thread"),
         "{context}"
     );
 
@@ -232,10 +232,10 @@ fn task_list_context_and_project_status_show_the_tracker_tasks_with_ids() {
         .iter()
         .map(|i| i["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["task:AWA-1", "task:AWA-2"], "{status}");
+    assert_eq!(ids, ["task:TRK-1", "task:TRK-2"], "{status}");
     assert_eq!(status["items"][0]["flags"][0], "thread-missing");
     assert_eq!(status["drift"]["thread_missing"], 1);
-    assert_eq!(status["problems"][0]["id"], "AWA-1");
+    assert_eq!(status["problems"][0]["id"], "TRK-1");
     assert_eq!(status["sources"]["tasks_source"], "tracker");
 }
 
@@ -295,7 +295,7 @@ fn an_unavailable_tracker_is_one_line_in_context_and_refuses_from_task() {
                 "--task-file",
                 "-",
                 "--from-task",
-                "AWA-1",
+                "TRK-1",
             ],
             "Do it.\n",
         );
@@ -341,14 +341,14 @@ fn from_task_refuses_a_task_the_tracker_does_not_list() {
             "--task-file",
             "-",
             "--from-task",
-            "AWA-404",
+            "TRK-404",
         ],
         "Do it.\n",
     );
     assert!(!out.status.success());
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(
-        error.contains("the tracker lists no task with the id or title \"AWA-404\""),
+        error.contains("the tracker lists no task with the id or title \"TRK-404\""),
         "{error}"
     );
 }
@@ -359,12 +359,12 @@ fn resolving_and_merging_a_tracked_thread_tell_link() {
     fixture.thread(
         "t-0001",
         "open",
-        "task = \"Fix login\"\ntask_id = \"AWA-1\"\ntask_origin = \"task\"\n",
+        "task = \"Fix login\"\ntask_id = \"TRK-1\"\ntask_origin = \"task\"\n",
     );
     fixture.thread(
         "t-0002",
         "open",
-        "task = \"Write the docs\"\ntask_id = \"AWA-2\"\ntask_origin = \"task\"\npr = \"https://github.com/acme/app/pull/3\"\npr_state = \"MERGED\"\n",
+        "task = \"Write the docs\"\ntask_id = \"TRK-2\"\ntask_origin = \"task\"\npr = \"https://github.com/acme/app/pull/3\"\npr_state = \"MERGED\"\n",
     );
     fixture.thread("t-0003", "open", "");
     for id in ["t-0001", "t-0002", "t-0003"] {
@@ -378,8 +378,8 @@ fn resolving_and_merging_a_tracked_thread_tell_link() {
     assert_eq!(
         links,
         [
-            "link acme AWA-1 t-0001 resolved ",
-            "link acme AWA-2 t-0002 merged https://github.com/acme/app/pull/3",
+            "link acme TRK-1 t-0001 resolved ",
+            "link acme TRK-2 t-0002 merged https://github.com/acme/app/pull/3",
         ]
     );
 }
@@ -391,7 +391,7 @@ fn a_failing_link_leaves_an_inbox_item() {
     fixture.thread(
         "t-0001",
         "open",
-        "task = \"Fix login\"\ntask_id = \"AWA-1\"\ntask_origin = \"task\"\n",
+        "task = \"Fix login\"\ntask_id = \"TRK-1\"\ntask_origin = \"task\"\n",
     );
     fixture.text(&["thread", "resolve", "acme", "t-0001", "--skip-copy"]);
     let inbox = fixture.json(&["inbox", "list", "acme", "--json"]);
@@ -410,7 +410,7 @@ fn a_failing_link_leaves_an_inbox_item() {
     assert!(
         items.contains(&(
             "t-0001",
-            "the tracker's link command failed for task AWA-1 (resolved): it exited with status 1"
+            "the tracker's link command failed for task TRK-1 (resolved): it exited with status 1"
         )),
         "{items:?}"
     );
@@ -425,11 +425,11 @@ fn a_record_keeps_its_task_id_and_one_without_it_prints_as_before() {
     fixture.thread(
         "t-0002",
         "open",
-        "task = \"Fix login\"\ntask_id = \"AWA-1\"\ntask_origin = \"task\"\n",
+        "task = \"Fix login\"\ntask_id = \"TRK-1\"\ntask_origin = \"task\"\n",
     );
     let old = fixture.json(&["thread", "show", "acme", "t-0001", "--json"]);
     assert_eq!(old["thread"]["task"], "Old");
     assert!(old["thread"].get("task_id").is_none(), "{old}");
     let new = fixture.json(&["thread", "show", "acme", "t-0002", "--json"]);
-    assert_eq!(new["thread"]["task_id"], "AWA-1");
+    assert_eq!(new["thread"]["task_id"], "TRK-1");
 }
