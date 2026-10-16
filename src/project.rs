@@ -604,8 +604,10 @@ pub fn load_safety_layers_from(
                 "{file}: merge_gate must be a command and its arguments, such as [\"./approve.sh\"], not {argv:?}"
             );
         }
-        if layer.merge_gate_timeout == Some(0) {
-            bail!("{file}: merge_gate_timeout must be a number of seconds above 0");
+        if let Some(secs) = layer.merge_gate_timeout
+            && !(1..=3600).contains(&secs)
+        {
+            bail!("{file}: merge_gate_timeout must be from 1 to 3600 seconds, not {secs}");
         }
     }
     Ok((default, own))
@@ -1157,6 +1159,7 @@ mod tests {
             "merge_gate = [\"\"]\n",
             "merge_gate = \"./approve.sh\"\n",
             "merge_gate_timeout = 0\n",
+            "merge_gate_timeout = 86400\n",
             "merge_method = \"fast-forward\"\n",
             "auto_merge = \"yes\"\n",
         ] {

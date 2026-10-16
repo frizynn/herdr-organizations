@@ -158,7 +158,7 @@ coordinator_agent_args = []        # extra arguments for every coordinator's age
 thread_agent_args = []             # extra arguments for every thread's agent CLI
 routine_commands = false           # true lets approved routines run shell commands
 merge_gate = ["./approve.sh"]      # your command decides merges instead of GitHub's approval (by hand only)
-merge_gate_timeout = 120           # seconds before the gate counts as a refusal
+merge_gate_timeout = 120           # seconds (1 to 3600) before the gate counts as a refusal
 merge_method = "squash"            # or "merge" or "rebase": the popup, auto-merge and thread merge without --method
 auto_merge = false                 # true: the ticker auto-merges every thread of the project
 ```

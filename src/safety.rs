@@ -29,7 +29,7 @@ pub const KEYS: [(&str, &str); 6] = [
 
 /// The merge settings: changed only by editing config.toml by hand, so no
 /// popup, terminal prompt or faked terminal can turn an agent's merge on.
-pub const HAND_EDITED: [&str; 4] = [
+const HAND_EDITED: [&str; 4] = [
     "merge_gate",
     "merge_gate_timeout",
     "merge_method",
