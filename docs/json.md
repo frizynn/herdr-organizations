@@ -73,6 +73,9 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `coordinator_profile`, `thread_profile` | string | The default profiles. |
 | `max_parallel_threads`, `auto_resolve_days` | number | |
 | `nudge`, `mute` | bool | |
+| `merge_gate` | string | The program of the project's [merge gate](operations.md#merge-gate), without its arguments; empty without one. |
+| `merge_method` | string | `squash`, `merge` or `rebase`: how the popup, auto-merge and `thread merge` without `--method` merge. |
+| `auto_merge` | bool | The ticker auto-merges every thread of the project. |
 
 ## Thread
 
@@ -150,8 +153,8 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `comment_count` | number or `null` | Conversation comments. |
 | `draft` | bool or `null` | |
 | `mergeable` | string or `null` | `MERGEABLE`, `CONFLICTING` or `UNKNOWN`, as GitHub reports it. |
-| `merge_blocker` | string or `null` | `null` when `thread merge` would merge, as of the last read. Otherwise the reason it would refuse, such as `the thread is not open` or `1 check(s) failed`. Once the record's `state` is not `OPEN` (for example right after `thread merge`), it is `it is not open (state MERGED)` even before the next read. |
-| `actions` | [string] | What a client may ask about it, as of the last read, most pressing first, so a client with room for one button takes the first: `merge` (`merge_blocker` is `null`, so only comments can be left), then `resolve-conflicts` (GitHub reports a conflict), `fix-ci` (a check failed) and `address-comments` (a comment, a review that comments or asks for changes, or a change request). Empty for a thread that is not open, a pull request that is not `OPEN` and one the ticker has not read. The first three are `thread pr-action`; `merge` is `thread merge`. More values may come; skip the ones you do not know. |
+| `merge_blocker` | string or `null` | `null` when `thread merge` would merge, as of the last read. Otherwise the reason it would refuse, such as `the thread is not open` or `1 check(s) failed`. Once the record's `state` is not `OPEN` (for example right after `thread merge`), it is `it is not open (state MERGED)` even before the next read. With a merge gate, it is also the gate's reason when the gate last refused this head commit, and `null` before the gate has run on it: `thread merge` would run the gate. |
+| `actions` | [string] | What a client may ask about it, as of the last read, most pressing first, so a client with room for one button takes the first: `merge` (`merge_blocker` is `null`, so only comments can be left, or it is only the merge gate's refusal, which a merge asks again), then `resolve-conflicts` (GitHub reports a conflict), `fix-ci` (a check failed) and `address-comments` (a comment, a review that comments or asks for changes, or a change request). Empty for a thread that is not open, a pull request that is not `OPEN` and one the ticker has not read. The first three are `thread pr-action`; `merge` is `thread merge`. More values may come; skip the ones you do not know. |
 
 ## Item
 
@@ -308,17 +311,18 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 - the head branch and head repository are the thread's own
 - the base branch is the thread's `base` (`main` and `origin/main` both match `main`), unless the base is empty or a commit
 - it is open and not a draft
-- the review decision is `APPROVED`
+- the review decision is `APPROVED`, unless the project has a merge gate
 - GitHub does not report a merge conflict
-- at least one check is reported, and every check has finished and passed
+- every reported check has finished and passed, and, unless the project has a merge gate, at least one is reported
+- with a merge gate, the gate passes on the head commit, after all of the above (see [Merge gate](operations.md#merge-gate))
 
 `thread merge`, and `thread set --auto-merge on`, are refused when `HERDR_PANE_ID` is the pane of this project's coordinator or of one of its local threads. Merging stays the user's call, from their own terminal or Nenu. This is defense in depth, not access control: an agent can unset the variable or run `gh` itself.
 
-A pull request with no checks is refused because, right after a push, GitHub may not have registered the checks yet. The merge runs `gh pr merge --<method> --match-head-commit <checked commit>` (`--method squash|merge|rebase`, squash by default) against the repository's own GitHub host. If anything is pushed after the check, GitHub refuses the merge instead of merging code that was not checked. The branch is not deleted, because the thread's worktree still uses it. A merge leaves an inbox item, and the ticker then resolves the thread as it does for any merged pull request.
+A pull request with no checks is refused because, right after a push, GitHub may not have registered the checks yet; a project with a merge gate leaves that to the gate. The merge runs `gh pr merge --<method> --match-head-commit <checked commit>` (`--method squash|merge|rebase`, by default the project's `merge_method`, else squash) against the repository's own GitHub host. A gate's refusal prints `<id>: not merged by the merge gate: <reason>` and leaves one `pr` item each time the reason changes. If anything is pushed after the check, GitHub refuses the merge instead of merging code that was not checked. The branch is not deleted, because the thread's worktree still uses it. A merge leaves an inbox item, and the ticker then resolves the thread as it does for any merged pull request.
 
 Both flags are off by default and are only changed with `thread set`. The ticker never turns them on.
 
-- `auto_merge`: on each pull request check, the ticker runs the same guarded merge as `thread merge`, at most once per head commit, review decision, mergeability and check counts. A refused or failed attempt leaves one inbox item and is retried only when one of those changes, for example when a required check appears or a new commit is pushed. A failure with nothing changed, such as a network error, waits for that change or for `thread merge`.
+- `auto_merge`: on each pull request check, the ticker runs the same guarded merge as `thread merge`, at most once per head commit, review decision, mergeability and check counts. A refused or failed attempt leaves one inbox item and is retried only when one of those changes, for example when a required check appears or a new commit is pushed. A failure with nothing changed, such as a network error, waits for that change or for `thread merge`. A merge gate's refusal is the exception: it is asked again at every check of the same commit, with one item per new reason. `auto_merge = true` in the project's safety table turns this on for every thread of the project.
 - `auto_fix_ci`: when the pull request has failing checks, or has comments or a change request, and no enabled `pr` routine (such as the default `routines/pr-followup.md`) already prompts the thread about that event, the ticker prompts the thread's agent once it is idle or done. It prompts once per failing head commit, when the comment count grows, and when the review decision becomes `CHANGES_REQUESTED`. An approval is not a reason to prompt. It skips what `thread pr-action` already asked about the same state of the pull request. Each prompt leaves an inbox item. The prompt names no check, comment or author. It tells the agent to read them with `gh` as data, fix what belongs to its task, push, and not merge. Remote threads are skipped. As with the coordinator nudge, on Herdr 0.9.1 a prompt can merge with text a person has half-typed in that pane.
 
 ### Asking a thread to fix its pull request

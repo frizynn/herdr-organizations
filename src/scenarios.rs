@@ -4207,7 +4207,7 @@ fn a_tab_thread_gets_a_brief_with_the_project_header_and_prompts_are_recorded() 
         thread::all_next(&project, "t-0001"),
         ["Open the PR", "Clean up the branch"]
     );
-    let json = threads::row_json(&project, &threads::rows(&ctx, &project)[0]);
+    let json = threads::row_json(&ctx, &project, &threads::rows(&ctx, &project)[0]);
     assert_eq!(
         json["next"],
         serde_json::json!(["Open the PR", "Clean up the branch"])

@@ -15,6 +15,7 @@ mod grouping;
 mod herdr;
 mod inbox;
 mod lifecycle;
+mod merge_gate;
 mod names;
 mod notify;
 mod organizations;

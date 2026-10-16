@@ -164,7 +164,7 @@ pub fn print(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
     let threads: BTreeMap<String, (Thread, ThreadJson)> = rows
         .iter()
         .map(|row| row.thread.clone())
-        .zip(threads::threads_json(&project, &rows))
+        .zip(threads::threads_json(ctx, &project, &rows))
         .map(|(t, json)| (t.id.clone(), (t, json)))
         .collect();
     let tasks = tasks::load(ctx, &project, false);

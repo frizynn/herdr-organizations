@@ -915,14 +915,14 @@ struct Pass {
 }
 
 fn thread_pass(
-    project: &Project,
-    herdr: &Herdr,
+    context: &PassContext<'_, '_, '_>,
     socket: &str,
     threads: &[thread::Thread],
-    agents: &[Agent],
-    panes: &[Pane],
     hashes: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<Pass> {
+    let (project, herdr) = (context.project, context.herdr);
+    let (agents, panes) = (context.agents, context.panes);
+    let rule = crate::merge_gate::Rule::load(context.ctx, project);
     let slug = &project.slug;
     let tree = crate::organizations::tree(project).unwrap_or_default();
     let now = jiff::Timestamp::now();
@@ -942,7 +942,10 @@ fn thread_pass(
             }
             continue;
         }
-        let mut live = thread::live_with_report(t, agents, panes, now, &project.root, socket);
+        let mut live = thread::Live {
+            merge_gate: rule.landing(&t.id),
+            ..thread::live_with_report(t, agents, panes, now, &project.root, socket)
+        };
         // Herdr's native resume starts our agent again without its name.
         if let Some(agent) = agents.iter().find(|a| thread::needs_rename(t, a))
             && let Err(error) = herdr.agent_rename(&agent.pane_id, &t.agent_name)
@@ -1331,13 +1334,17 @@ fn tick_cheap(ctx: &Ctx, project: &Project, sessions: &mut Sessions) -> Result<O
         );
     }
 
-    let pass = thread_pass(
+    let context = PassContext {
+        ctx,
         project,
-        &herdr,
+        herdr: &herdr,
+        agents: &agents,
+        panes: &panes,
+    };
+    let pass = thread_pass(
+        &context,
         &record.socket,
         &open_threads(project, false),
-        &agents,
-        &panes,
         None,
     )?;
     // The project's part of the sidebar grouping.
@@ -1419,16 +1426,15 @@ fn remote_pass(
     let hashes =
         crate::remote::report_hashes(ctx.runner, &target, &dirs).map_err(|e| format!("{e:#}"))?;
 
-    let pass = thread_pass(
+    let remote_context = PassContext {
+        ctx,
         project,
-        &remote,
-        "",
-        threads,
-        &agents,
-        &panes,
-        Some(&hashes),
-    )
-    .map_err(|e| format!("{e:#}"))?;
+        herdr: &remote,
+        agents: &agents,
+        panes: &panes,
+    };
+    let pass =
+        thread_pass(&remote_context, "", threads, Some(&hashes)).map_err(|e| format!("{e:#}"))?;
     errors.extend(pass.error);
 
     for t in threads {
