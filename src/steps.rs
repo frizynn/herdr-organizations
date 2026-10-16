@@ -696,10 +696,7 @@ pub fn nudge_parent_coordinators(
             state.parent_updates.remove(&parent_id);
             continue;
         };
-        if parent.status != Status::Open
-            || parent.role != thread::NodeRole::Coordinator
-            || parent.is_remote()
-        {
+        if parent.status != Status::Open || !parent.is_spawning_coordinator() {
             state.parent_updates.remove(&parent_id);
             continue;
         }
