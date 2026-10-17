@@ -126,7 +126,13 @@ fn two_coordinators() -> Fixture {
         "TASKS.md",
         "# Tasks\n\n## Now\n- [ ] Ship billing\n- [ ] Plan the quarter (me)\n",
     );
-    fixture.node("t-0001", "Billing", "root", "coordinator", "tasks = [\"Ship billing\"]\n");
+    fixture.node(
+        "t-0001",
+        "Billing",
+        "root",
+        "coordinator",
+        "tasks = [\"Ship billing\"]\n",
+    );
     fixture.node("t-0002", "Docs", "root", "coordinator", "");
     fixture.node(
         "t-0003",
@@ -157,7 +163,10 @@ fn the_project_view_groups_the_tasks_by_coordinator_and_keeps_the_unowned() {
     let fixture = two_coordinators();
     let listed = fixture.json(&["task", "list", "acme", "--json"]);
     // The root's tasks stay where they were.
-    assert_eq!(titles(&listed["tasks"]), ["Ship billing", "Plan the quarter"]);
+    assert_eq!(
+        titles(&listed["tasks"]),
+        ["Ship billing", "Plan the quarter"]
+    );
     let owners: Vec<(String, String, Vec<String>)> = listed["owners"]
         .as_array()
         .unwrap()
@@ -174,8 +183,16 @@ fn the_project_view_groups_the_tasks_by_coordinator_and_keeps_the_unowned() {
     assert_eq!(
         owners,
         [
-            (s("root"), s(""), vec![s("Ship billing"), s("Plan the quarter")]),
-            (s("t-0001"), s("Billing"), vec![s("Charge cards"), s("Refunds")]),
+            (
+                s("root"),
+                s(""),
+                vec![s("Ship billing"), s("Plan the quarter")]
+            ),
+            (
+                s("t-0001"),
+                s("Billing"),
+                vec![s("Charge cards"), s("Refunds")]
+            ),
             (s("t-0002"), s("Docs"), vec![s("Write the guide")]),
         ]
     );
@@ -231,7 +248,12 @@ fn a_coordinator_view_lists_its_tasks_and_those_delegated_to_it() {
 
     let root = fixture.json(&["task", "list", "acme", "--node", "root", "--json"]);
     assert_eq!(titles(&root["tasks"]), ["Ship billing", "Plan the quarter"]);
-    assert!(!fixture.run(&["task", "list", "acme", "--node", "t-0003"]).status.success());
+    assert!(
+        !fixture
+            .run(&["task", "list", "acme", "--node", "t-0003"])
+            .status
+            .success()
+    );
 }
 
 /// `node assign` and `node unassign` change only the record, refuse a task
@@ -242,7 +264,10 @@ fn node_assign_puts_a_node_on_several_tasks_and_unassign_takes_it_off() {
     let assign = |task: &str| fixture.run(&["node", "assign", "acme", "t-0002", "--task", task]);
     assert!(assign("Write the guide").status.success());
     assert!(assign("Plan the quarter").status.success());
-    assert!(assign("Plan the quarter").status.success(), "a repeat is a no-op");
+    assert!(
+        assign("Plan the quarter").status.success(),
+        "a repeat is a no-op"
+    );
     let missing = assign("No such task");
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("No such task"));
@@ -258,7 +283,14 @@ fn node_assign_puts_a_node_on_several_tasks_and_unassign_takes_it_off() {
     );
     assert!(
         fixture
-            .run(&["node", "unassign", "acme", "t-0002", "--task", "plan the quarter"])
+            .run(&[
+                "node",
+                "unassign",
+                "acme",
+                "t-0002",
+                "--task",
+                "plan the quarter"
+            ])
             .status
             .success()
     );
@@ -321,8 +353,20 @@ fn tracked(with_get: bool) -> Fixture {
         fixture.path("list.sh").display(),
     ));
     assert!(fixture.run(&["new", "acme"]).status.success());
-    fixture.node("t-0001", "Billing", "root", "coordinator", "task_scope = \"billing\"\n");
-    fixture.node("t-0002", "Card worker", "t-0001", "worker", "tasks = [\"B-1\"]\n");
+    fixture.node(
+        "t-0001",
+        "Billing",
+        "root",
+        "coordinator",
+        "task_scope = \"billing\"\n",
+    );
+    fixture.node(
+        "t-0002",
+        "Card worker",
+        "t-0001",
+        "worker",
+        "tasks = [\"B-1\"]\n",
+    );
     fixture
 }
 
@@ -334,16 +378,24 @@ fn a_coordinator_with_a_task_scope_owns_what_the_tracker_lists_for_it() {
     assert_eq!(view["tasks"][0]["id"], "B-1");
     assert_eq!(view["tasks"][0]["assignees"][0]["id"], "t-0002");
     assert!(
-        fixture.calls().contains(&"list t-0001 [billing]".to_string()),
+        fixture
+            .calls()
+            .contains(&"list t-0001 [billing]".to_string()),
         "{:?}",
         fixture.calls()
     );
     let project = fixture.json(&["task", "list", "acme", "--json"]);
     // The root's list is the whole project, as before.
-    assert_eq!(titles(&project["tasks"]), ["Charge cards", "Refunds", "Hire"]);
+    assert_eq!(
+        titles(&project["tasks"]),
+        ["Charge cards", "Refunds", "Hire"]
+    );
     // In the project view a task is its scoped coordinator's.
     assert_eq!(titles(&project["owners"][0]["tasks"]), ["Hire"]);
-    assert_eq!(titles(&project["owners"][1]["tasks"]), ["Charge cards", "Refunds"]);
+    assert_eq!(
+        titles(&project["owners"][1]["tasks"]),
+        ["Charge cards", "Refunds"]
+    );
     assert!(fixture.calls().contains(&"list root []".to_string()));
     // Each scope has its own cache: a second look asks nobody.
     let before = fixture.calls().len();
@@ -358,7 +410,11 @@ fn a_coordinator_with_a_task_scope_owns_what_the_tracker_lists_for_it() {
             .success()
     );
     fixture.json(&["task", "list", "acme", "--node", "t-0001", "--json"]);
-    assert!(fixture.calls().contains(&"list t-0001 [general]".to_string()));
+    assert!(
+        fixture
+            .calls()
+            .contains(&"list t-0001 [general]".to_string())
+    );
 }
 
 /// A task the lists leave out is found by its id with `get`: an assignment
@@ -377,7 +433,10 @@ fn a_task_no_list_prints_is_found_by_its_id() {
     assert!(!refused.status.success());
     let view = fixture.json(&["task", "list", "acme", "--node", "t-0001", "--json"]);
     let last = view["tasks"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["id"].clone(), last["title"].clone()), (json!("OLD-9"), json!("An old one")));
+    assert_eq!(
+        (last["id"].clone(), last["title"].clone()),
+        (json!("OLD-9"), json!("An old one"))
+    );
     assert_eq!(last["via"], "assigned");
 
     fixture.write(

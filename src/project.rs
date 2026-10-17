@@ -679,6 +679,7 @@ pub fn load_safety_layers_from(
 struct TrackerLayer {
     list: Option<Vec<String>>,
     link: Option<Vec<String>>,
+    get: Option<Vec<String>>,
     cache_secs: Option<u64>,
     timeout: Option<u64>,
 }
@@ -738,6 +739,7 @@ pub fn load_tracker(
     Ok(Some(crate::tracker::Config {
         list,
         link: own.link.or(default.link).unwrap_or_default(),
+        get: own.get.or(default.get).unwrap_or_default(),
         cache_secs: own.cache_secs.or(default.cache_secs).unwrap_or(60),
         timeout_secs: timeout,
     }))

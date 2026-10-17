@@ -901,6 +901,8 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     let _ = writeln!(out, "{}", memory.trim());
 
     let tasks = crate::tasks::load(ctx, project, false);
+    // So an ask that links a task the list leaves out reads its state.
+    crate::task_views::find_missing(ctx, project);
     if matches!(tasks, Tasks::File(_)) {
         let _ = writeln!(out, "\n## Tasks (TASKS.md)");
     } else {

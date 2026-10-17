@@ -48,6 +48,7 @@ mod status;
 mod status_file;
 mod steps;
 mod sweep;
+mod task_views;
 mod tasks;
 mod templates;
 mod term;

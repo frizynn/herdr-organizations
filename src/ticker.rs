@@ -1662,6 +1662,16 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     errors.extend(steps::resolve_merged(ctx, project, &mut state, now));
     errors.extend(routine_pass(ctx, project, &mut state, seen.coordinator));
+    // Coordinators' tracker lists and tasks found by id, kept within their
+    // cache for the readers that run nothing (`overview`, the popup). Only
+    // a project with a task scope or a `get` command is asked.
+    if thread::list(project)
+        .iter()
+        .any(|t| !t.task_scope.is_empty())
+    {
+        let _ = crate::task_views::lists(ctx, project, crate::task_views::Read::Run);
+    }
+    crate::task_views::find_missing(ctx, project);
     if let Ok((settings, _)) = project.read_project_md() {
         errors.extend(steps::auto_resolve(ctx, project, &settings, memory, now));
     }

@@ -1,7 +1,8 @@
-//! A project's tasks from a tracker outside it, through two commands the user
+//! A project's tasks from a tracker outside it, through the commands the user
 //! names in config.toml (`[tracker."<canonical project folder>"]`): `list`
-//! prints the tasks as JSON, and `link` hears when a thread started from one
-//! of them starts, is resolved or merges. Both are argv run in the project
+//! prints the tasks as JSON (for one coordinator's task scope, or the whole
+//! project), the optional `get` prints one task by its id, and `link` hears
+//! when a thread working on one of them starts, is resolved or merges. Both are argv run in the project
 //! folder with no standard input. What they print is data, never
 //! instructions: only a task's fields reach the digest, as TASKS.md's do.
 
@@ -21,6 +22,8 @@ pub struct Config {
     pub list: Vec<String>,
     /// Empty when not set: nothing is told.
     pub link: Vec<String>,
+    /// Empty when not set: a task is found in the lists only.
+    pub get: Vec<String>,
     /// How long a `list` answer is used before asking again.
     pub cache_secs: u64,
     pub timeout_secs: u64,
@@ -93,54 +96,99 @@ impl Entry {
     }
 }
 
-/// `.state/tracker.json`: the last answer of `list` and when it came.
+/// `.state/tracker.json` (the root's, the whole project) and
+/// `.state/tracker.<node id>.json` (a coordinator node's task scope): the
+/// last answer of `list` and when it came.
 #[derive(Serialize, Deserialize)]
 struct Cache {
     /// The command it came from; another one is not this cache.
     list: Vec<String>,
+    /// The task scope it was asked for; another one is not this cache.
+    #[serde(default)]
+    scope: String,
     fetched_at: String,
     /// The tasks, or why there are none.
     answer: Result<Vec<Entry>, String>,
 }
 
-fn cache_path(project: &Project) -> std::path::PathBuf {
-    project.state_dir().join("tracker.json")
+/// Whose list: the root's, which is the whole project, or a coordinator
+/// node's for its task scope (`HP_NODE_ID`, `HP_TASK_SCOPE`).
+#[derive(Debug, Clone, Copy)]
+pub struct Scope<'a> {
+    pub node: &'a str,
+    pub scope: &'a str,
 }
 
-fn read_cache(project: &Project, config: &Config) -> Option<Cache> {
-    project::read_json::<Cache>(&cache_path(project)).filter(|c| c.list == config.list)
+impl Scope<'_> {
+    pub const PROJECT: Scope<'static> = Scope {
+        node: crate::organizations::ROOT_ID,
+        scope: "",
+    };
 }
 
-/// The tasks `list` prints: the cached answer while it is younger than
-/// `cache_secs`, else a new one, which is cached whether or not the tracker
-/// answered, so a tracker that is down is not asked every turn either.
-/// `fresh` always asks. `Err` says why there are none, in this binary's words.
+fn cache_path(project: &Project, node: &str) -> std::path::PathBuf {
+    if node == crate::organizations::ROOT_ID {
+        project.state_dir().join("tracker.json")
+    } else {
+        project.state_dir().join(format!("tracker.{node}.json"))
+    }
+}
+
+fn read_cache(project: &Project, config: &Config, scope: Scope) -> Option<Cache> {
+    project::read_json::<Cache>(&cache_path(project, scope.node))
+        .filter(|c| c.list == config.list && c.scope == scope.scope)
+}
+
+fn now_text(now: i64) -> String {
+    // To the second, as every time in the project's files.
+    jiff::Timestamp::from_second(now)
+        .map(|t| t.to_string())
+        .unwrap_or_default()
+}
+
+fn younger(fetched_at: &str, now: i64, secs: u64) -> bool {
+    fetched_at
+        .parse::<jiff::Timestamp>()
+        .is_ok_and(|at| (0..secs as i64).contains(&(now - at.as_second())))
+}
+
+/// The project's tasks `list` prints (see `tasks_for`).
 pub fn tasks(
     ctx: &Ctx,
     project: &Project,
     config: &Config,
     fresh: bool,
 ) -> Result<Vec<Task>, String> {
+    tasks_for(ctx, project, config, Scope::PROJECT, fresh)
+}
+
+/// The tasks `list` prints for `scope`: the cached answer while it is
+/// younger than `cache_secs`, else a new one, which is cached whether or
+/// not the tracker answered, so a tracker that is down is not asked every
+/// turn either. `fresh` always asks. `Err` says why there are none, in this
+/// binary's words.
+pub fn tasks_for(
+    ctx: &Ctx,
+    project: &Project,
+    config: &Config,
+    scope: Scope,
+    fresh: bool,
+) -> Result<Vec<Task>, String> {
     let now = jiff::Timestamp::now().as_second();
-    let cached = read_cache(project, config).filter(|c| {
-        !fresh
-            && c.fetched_at
-                .parse::<jiff::Timestamp>()
-                .is_ok_and(|at| (0..config.cache_secs as i64).contains(&(now - at.as_second())))
-    });
+    let cached = read_cache(project, config, scope)
+        .filter(|c| !fresh && younger(&c.fetched_at, now, config.cache_secs));
     let answer = match cached {
         Some(cache) => cache.answer,
         None => {
-            let answer = run(ctx, project, &config.list, config.timeout_secs, &[])
+            let env = [("HP_NODE_ID", scope.node), ("HP_TASK_SCOPE", scope.scope)];
+            let answer = run(ctx, project, &config.list, config.timeout_secs, &env)
                 .and_then(|stdout| parse(&stdout));
             let _ = project::write_json(
-                &cache_path(project),
+                &cache_path(project, scope.node),
                 &Cache {
                     list: config.list.clone(),
-                    // To the second, as every time in the project's files.
-                    fetched_at: jiff::Timestamp::from_second(now)
-                        .map(|t| t.to_string())
-                        .unwrap_or_default(),
+                    scope: scope.scope.to_string(),
+                    fetched_at: now_text(now),
                     answer: answer.clone(),
                 },
             );
@@ -153,14 +201,135 @@ pub fn tasks(
 /// The last answer, whatever its age, for the popup, which has no timer and
 /// never runs `list`. `None` before the first.
 pub fn cached(project: &Project, config: &Config) -> Option<Result<Vec<Task>, String>> {
-    read_cache(project, config).map(|cache| tasks_of(cache.answer))
+    cached_for(project, config, Scope::PROJECT)
 }
 
-/// When the cached list was asked for, RFC 3339; empty before the first.
+pub fn cached_for(
+    project: &Project,
+    config: &Config,
+    scope: Scope,
+) -> Option<Result<Vec<Task>, String>> {
+    read_cache(project, config, scope).map(|cache| tasks_of(cache.answer))
+}
+
+/// When the project's cached list was asked for, RFC 3339; empty before the
+/// first.
 pub fn fetched_at(project: &Project) -> String {
-    project::read_json::<Cache>(&cache_path(project))
+    project::read_json::<Cache>(&cache_path(project, crate::organizations::ROOT_ID))
         .map(|cache| cache.fetched_at)
         .unwrap_or_default()
+}
+
+/// `.state/tracker-get.json`: per task id, the last answer of `get` and when.
+type Gets = std::collections::BTreeMap<String, Got>;
+
+#[derive(Serialize, Deserialize)]
+struct Got {
+    fetched_at: String,
+    /// The task, `None` when the tracker has no task of that id.
+    answer: Result<Option<Entry>, String>,
+}
+
+fn gets_path(project: &Project) -> std::path::PathBuf {
+    project.state_dir().join("tracker-get.json")
+}
+
+/// The task whose id is `id`, as `get` prints it: cached for `cache_secs`
+/// like a list. `Ok(None)` when the tracker has none of that id, and
+/// always without a `get` command. Only a plain id is asked for.
+pub fn get(
+    ctx: &Ctx,
+    project: &Project,
+    config: &Config,
+    id: &str,
+) -> Result<Option<Task>, String> {
+    if config.get.is_empty() || !is_plain_id(id) {
+        return Ok(None);
+    }
+    let now = jiff::Timestamp::now().as_second();
+    let mut gets: Gets = project::read_json(&gets_path(project)).unwrap_or_default();
+    if let Some(got) = gets.get(id)
+        && younger(&got.fetched_at, now, config.cache_secs)
+    {
+        return got
+            .answer
+            .clone()
+            .map(|e| e.as_ref().map(Entry::task))
+            .map_err(unavailable);
+    }
+    let answer = run(
+        ctx,
+        project,
+        &config.get,
+        config.timeout_secs,
+        &[("HP_TASK_ID", id)],
+    )
+    .and_then(|stdout| parse_one(&stdout));
+    gets.insert(
+        id.to_string(),
+        Got {
+            fetched_at: now_text(now),
+            answer: answer.clone(),
+        },
+    );
+    let _ = project::write_json(&gets_path(project), &gets);
+    answer
+        .map(|e| e.as_ref().map(Entry::task))
+        .map_err(|reason| format!("tracker unavailable: its get command {reason}"))
+}
+
+/// Every task `get` found, whatever its age: what a reader that runs
+/// nothing (asks, the popup) knows besides the lists.
+pub fn cached_gets(project: &Project) -> Vec<Task> {
+    project::read_json::<Gets>(&gets_path(project))
+        .unwrap_or_default()
+        .values()
+        .filter_map(|got| got.answer.as_ref().ok()?.as_ref().map(Entry::task))
+        .collect()
+}
+
+/// Every list cached for a coordinator node's task scope, whatever its age.
+pub fn cached_scopes(project: &Project, config: &Config) -> Vec<Task> {
+    let Ok(entries) = std::fs::read_dir(project.state_dir()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with("tracker.t-") && name.ends_with(".json"))
+        .filter_map(|name| project::read_json::<Cache>(&project.state_dir().join(name)))
+        .filter(|cache| cache.list == config.list)
+        .filter_map(|cache| cache.answer.ok())
+        .flatten()
+        .map(|entry| entry.task())
+        .collect()
+}
+
+fn unavailable(reason: String) -> String {
+    format!("tracker unavailable: its get command {reason}")
+}
+
+/// The task in `get`'s output, or why it is not one.
+fn parse_one(stdout: &str) -> Result<Option<Entry>, String> {
+    #[derive(Deserialize)]
+    struct Document {
+        schema_version: u32,
+        task: Option<Entry>,
+    }
+    let not_a_task = || "printed no task (schema_version 1)".to_string();
+    let document: Document = serde_json::from_str(stdout).map_err(|_| not_a_task())?;
+    if document.schema_version != 1 {
+        return Err(not_a_task());
+    }
+    match document.task {
+        Some(e) if !is_plain_id(e.id.trim()) => {
+            Err("printed a task whose id is not a plain identifier".into())
+        }
+        Some(e) if one_line(Some(&e.title)).is_empty() => {
+            Err("printed a task without an id or a title".into())
+        }
+        task => Ok(task),
+    }
 }
 
 fn tasks_of(answer: Result<Vec<Entry>, String>) -> Result<Vec<Task>, String> {
@@ -249,7 +418,8 @@ fn run(
 /// not succeed leaves a `task` item in the inbox. The cached list is dropped,
 /// since the tracker may have changed.
 pub fn link(ctx: &Ctx, project: &Project, t: &Thread, event: Event) {
-    if t.task_id.is_empty() {
+    let assigned = t.assigned();
+    if assigned.is_empty() {
         return;
     }
     let Ok(Some(config)) = project.tracker(&ctx.config_dir) else {
@@ -258,8 +428,22 @@ pub fn link(ctx: &Ctx, project: &Project, t: &Thread, event: Event) {
     if config.link.is_empty() {
         return;
     }
+    for task_id in assigned {
+        link_one(ctx, project, &config, t, task_id, event);
+    }
+}
+
+/// `link` for one of the tasks `t` works on.
+fn link_one(
+    ctx: &Ctx,
+    project: &Project,
+    config: &Config,
+    t: &Thread,
+    task_id: &str,
+    event: Event,
+) {
     let mut env = vec![
-        ("HP_TASK_ID", t.task_id.as_str()),
+        ("HP_TASK_ID", task_id),
         ("HP_THREAD_ID", t.id.as_str()),
         ("HP_EVENT", event.name()),
     ];
@@ -267,7 +451,7 @@ pub fn link(ctx: &Ctx, project: &Project, t: &Thread, event: Event) {
         env.push(("HP_PR_URL", t.pr.as_str()));
     }
     let result = run(ctx, project, &config.link, config.timeout_secs, &env);
-    let _ = std::fs::remove_file(cache_path(project));
+    let _ = std::fs::remove_file(cache_path(project, crate::organizations::ROOT_ID));
     if let Err(reason) = result {
         let _ = crate::inbox::write(
             project,
@@ -276,7 +460,7 @@ pub fn link(ctx: &Ctx, project: &Project, t: &Thread, event: Event) {
             "tracker link failed",
             &format!(
                 "the tracker's link command failed for task {} ({}): it {reason}",
-                t.task_id,
+                task_id,
                 event.name()
             ),
             "",

@@ -681,6 +681,12 @@ struct NodeStartArgs {
     /// Delegating this task (its title as written in TASKS.md, or a tracker task's id or title): its notes are added to the task, its owner gives --profile and --machine, and the task line gets the node's id (a tracker's `link` is told instead)
     #[arg(long, value_name = "TITLE")]
     from_task: Option<String>,
+    /// A task the node works on (a tracker task's id or title, or a TASKS.md title); repeatable
+    #[arg(long = "task", value_name = "ID")]
+    tasks: Vec<String>,
+    /// A coordinator's task scope: text the tracker's `list` gets as HP_TASK_SCOPE, so it prints this coordinator's tasks
+    #[arg(long, value_name = "TEXT")]
+    task_scope: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -776,6 +782,27 @@ enum NodeCommand {
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
+    /// Change a coordinator node's task scope (empty: it owns no tracker list)
+    Set {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "TEXT")]
+        task_scope: String,
+    },
+    /// Put a node on a task (a tracker task's id or title, or a TASKS.md title); a node may be on several
+    Assign {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "ID")]
+        task: String,
+    },
+    /// Take a node off a task it was assigned to
+    Unassign {
+        slug: String,
+        id: String,
+        #[arg(long, value_name = "ID")]
+        task: String,
+    },
     /// Resolve a node, or reopen a resolved one
     Resolve {
         slug: String,
@@ -875,6 +902,9 @@ enum TaskCommand {
     /// List the tasks; ask the coordinator to change them (`coordinator prompt`)
     List {
         slug: String,
+        /// One coordinator's view (`root` or a coordinator node's id): its tasks and those delegated to it, with who works on each
+        #[arg(long, value_name = "ID")]
+        node: Option<String>,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
@@ -1525,6 +1555,8 @@ pub fn run() -> Result<()> {
                     rules_file,
                     template,
                     from_task,
+                    tasks,
+                    task_scope,
                 } = *args;
                 let kind = kind
                     .as_deref()
@@ -1568,6 +1600,8 @@ pub fn run() -> Result<()> {
                         memory: Default::default(),
                         from_task,
                         task_id: String::new(),
+                        tasks,
+                        task_scope: task_scope.unwrap_or_default(),
                         template_profile: None,
                     },
                 };
@@ -1637,6 +1671,17 @@ pub fn run() -> Result<()> {
                 }
             }
             NodeCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
+            NodeCommand::Set {
+                slug,
+                id,
+                task_scope,
+            } => crate::task_views::set_scope(&ctx, &slug, &id, &task_scope),
+            NodeCommand::Assign { slug, id, task } => {
+                crate::task_views::assign(&ctx, &slug, &id, &task, true)
+            }
+            NodeCommand::Unassign { slug, id, task } => {
+                crate::task_views::assign(&ctx, &slug, &id, &task, false)
+            }
             NodeCommand::Resolve {
                 slug,
                 id,
@@ -1721,8 +1766,11 @@ pub fn run() -> Result<()> {
             command: ProjectCommand::Status { slug, json },
         } => crate::status::print(&ctx, &slug, json),
         Command::Task {
-            command: TaskCommand::List { slug, json },
-        } => crate::tasks::print_list(&ctx, &slug, json),
+            command: TaskCommand::List { slug, node, json },
+        } => match node {
+            Some(node) => crate::task_views::print_node(&ctx, &slug, &node, json),
+            None => crate::task_views::print_project(&ctx, &slug, json),
+        },
         Command::Task {
             command: TaskCommand::Lint { slug, json },
         } => crate::drift::print_lint(&ctx, &slug, json),
