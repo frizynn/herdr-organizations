@@ -4578,11 +4578,44 @@ fn a_tab_thread_of_a_coordinator_running_in_another_workspace_opens_the_project_
         .borrow_mut()
         .push((0, format!("[{}]", h.child_agent("w5:p1", "", "sess-7"))));
     h.open(true, false).unwrap();
-    let folder = h.project.dir().join("threads/t-0001");
     h.world
         .runner
         .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
-    let args = |title: &str| StartArgs {
+    h.world.runner.on(
+        "tab create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
+    );
+    let t = threads::start(&h.world.ctx(), "demo", tab_args("Research")).unwrap();
+    // (`Here` scripts every new workspace as w3.) A home Space with a shell
+    // in the project folder, and the thread's tab in it.
+    assert_eq!(
+        h.world.runner.count(&format!(
+            "workspace create --cwd {} --label Demo\u{2800}",
+            h.dir
+        )),
+        1
+    );
+    assert_eq!(h.world.runner.count("tab create --workspace w3"), 1);
+    assert_eq!(
+        (t.workspace_id.as_str(), t.pane_id.as_str()),
+        ("w3", "w3:p2")
+    );
+    // The running coordinator's record still names its own pane.
+    assert_eq!(h.project.coordinator().unwrap().workspace_id, "w5");
+
+    // The next tab thread finds that workspace by its shell in the project folder.
+    *h.world.panes.borrow_mut() = format!(
+        "[{},{}]",
+        pane_json("w5", "w5:t1", "w5:p1", "/tmp"),
+        pane_json("w3", "w3:t1", "w3:p1", &h.dir)
+    );
+    threads::start(&h.world.ctx(), "demo", tab_args("More")).unwrap();
+    assert_eq!(h.world.runner.count("tab create --workspace w3"), 2);
+    assert_eq!(h.world.runner.count("workspace create"), 1);
+}
+
+fn tab_args(title: &str) -> StartArgs {
+    StartArgs {
         title: title.into(),
         repo: None,
         machine: None,
@@ -4591,41 +4624,81 @@ fn a_tab_thread_of_a_coordinator_running_in_another_workspace_opens_the_project_
         base: None,
         task: "Look.".into(),
         node: Default::default(),
-    };
-    let t = threads::start(&h.world.ctx(), "demo", args("Research")).unwrap();
-    let calls = h.world.runner.calls.borrow();
-    let create = calls
-        .iter()
-        .rfind(|c| c.display().contains("workspace create"))
-        .unwrap();
-    assert!(
-        create.display().contains("threads/t-0001")
-            && create.args.contains(&"Demo\u{2800}".to_string()),
-        "{}",
-        create.display()
-    );
-    drop(calls);
-    // (`Here` scripts every new workspace as w3.)
-    assert_eq!(h.world.runner.count("tab rename w3:t1 Research"), 1);
-    assert_eq!(
-        (t.workspace_id.as_str(), t.pane_id.as_str()),
-        ("w3", "w3:p1")
-    );
+    }
+}
 
-    // The next tab thread finds that workspace by its shell in the project folder.
-    let folder = std::fs::canonicalize(&folder).unwrap();
-    *h.world.panes.borrow_mut() = format!(
-        "[{},{}]",
-        pane_json("w5", "w5:t1", "w5:p1", "/tmp"),
-        pane_json("w3", "w3:t1", "w3:p1", &folder.to_string_lossy())
-    );
-    h.world.runner.on(
-        "tab create",
-        ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
-    );
-    threads::start(&h.world.ctx(), "demo", args("More")).unwrap();
-    assert_eq!(h.world.runner.count("tab create --workspace w3"), 1);
-    assert_eq!(h.world.runner.count("workspace create"), 1);
+/// Every tab of the home Space was closed and the root coordinator with it
+/// (its record still names its pane). Whichever placement comes first, a tab
+/// or a checkout thread reopens one home Space, with a shell in the project
+/// folder, records it, and the next thread goes there. No coordinator starts.
+#[test]
+fn a_tab_thread_reopens_the_project_workspace_when_every_tab_of_it_was_closed() {
+    for first in [Kind::Tab, Kind::Checkout] {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let home = project.canonical_dir().to_string_lossy().into_owned();
+        let repo = world.home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let panes = world.panes.clone();
+        let created_home = home.clone();
+        world.runner.on_fn(
+            |cmd| cmd.display().contains("workspace create"),
+            move |_| {
+                *panes.borrow_mut() =
+                    format!("[{}]", pane_json("w3", "w3:t1", "w3:p1", &created_home));
+                Ok(ok(
+                    r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t1","pane_id":"w3:p1"}}}"#,
+                ))
+            },
+        );
+        world.runner.on(
+            "tab create",
+            ok(r#"{"result":{"root_pane":{"workspace_id":"w3","tab_id":"w3:t2","pane_id":"w3:p2"}}}"#),
+        );
+        world
+            .runner
+            .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+        let args = StartArgs {
+            kind: Some(first),
+            repo: (first == Kind::Checkout).then(|| repo.to_string_lossy().into_owned()),
+            ..tab_args("First")
+        };
+
+        let t = threads::start(&world.ctx(), "demo", args).unwrap();
+        assert_eq!(
+            world
+                .runner
+                .count(&format!("workspace create --cwd {home} ")),
+            1,
+            "{first:?}"
+        );
+        assert_eq!(
+            world.runner.count("tab create --workspace w3"),
+            1,
+            "{first:?}"
+        );
+        assert_eq!(t.workspace_id, "w3", "{first:?}");
+        let record = project.coordinator().unwrap();
+        assert_eq!(
+            (
+                record.workspace_id.as_str(),
+                record.tab_id.as_str(),
+                record.pane_id.as_str()
+            ),
+            ("w3", "w3:t1", "w1:p1"),
+            "{first:?}: the shell's tab is the recorded home"
+        );
+        assert_eq!(world.runner.count("agent start"), 0, "{first:?}");
+
+        let next = threads::start(&world.ctx(), "demo", tab_args("More")).unwrap();
+        assert_eq!(world.runner.count("workspace create"), 1, "{first:?}");
+        assert_eq!(
+            world.runner.count("tab create --workspace w3"),
+            2,
+            "{first:?}"
+        );
+        assert_eq!(next.workspace_id, "w3", "{first:?}");
+    }
 }
 
 /// Herdr's default socket, where the ticker looks for hand-started agents.

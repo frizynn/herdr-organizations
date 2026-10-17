@@ -164,9 +164,7 @@ pub fn bind(ctx: &Ctx, project: &Project, session: &paths::Session) -> Result<Co
                 match panes.iter().find(|p| Path::new(&p.cwd).starts_with(&dir)) {
                     Some(pane) => (pane.workspace_id.clone(), pane.tab_id.clone()),
                     None => {
-                        let (settings, _) = project.read_project_md()?;
-                        let label = crate::project::home_label(&settings.name, &project.slug);
-                        let created = herdr.workspace_create(&dir, &label, false)?;
+                        let created = create_home(&herdr, project)?;
                         (created.workspace_id, created.tab_id)
                     }
                 };
@@ -200,6 +198,14 @@ pub fn bind(ctx: &Ctx, project: &Project, session: &paths::Session) -> Result<Co
         }
     );
     Ok(record)
+}
+
+/// A new home Space for the project: a workspace with only a shell in the
+/// project folder, unfocused, so `workspace_open` recognizes it.
+pub fn create_home(herdr: &Herdr, project: &Project) -> Result<crate::herdr::Created> {
+    let (settings, _) = project.read_project_md()?;
+    let label = crate::project::home_label(&settings.name, &project.slug);
+    Ok(herdr.workspace_create(&project.canonical_dir(), &label, false)?)
 }
 
 /// One live coordinator pane, as the ticker last saw it (`.state/coordinators.json`).

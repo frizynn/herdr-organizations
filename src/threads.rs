@@ -366,15 +366,13 @@ pub fn start_in(
     ticker::start(ctx)?;
     let view = require_session(ctx, &project)?;
 
-    let open_count = thread::list(&project)
-        .iter()
-        .filter(|t| t.status == Status::Open || t.status == Status::Starting)
-        .count();
-    if open_count as u32 >= settings.max_parallel_threads {
-        eprintln!(
-            "warning: {open_count} threads are already open; max_parallel_threads is {}",
-            settings.max_parallel_threads
-        );
+    if let Some(warning) = cap_warning(
+        &thread::list(&project),
+        &view.agents,
+        &view.panes,
+        settings.max_parallel_threads,
+    ) {
+        eprintln!("warning: {warning}");
     }
 
     let record = organizations::create_node(
@@ -410,6 +408,24 @@ pub fn start_in(
             )))
         }
     }
+}
+
+/// The warning `start` prints when `max_parallel_threads` threads already
+/// work: open with a live pane, or still starting. An open thread whose pane
+/// is gone (waiting on review or a merge) does not count. A remote thread's
+/// pane is listed on its own machine, so it counts while open.
+fn cap_warning(threads: &[Thread], agents: &[Agent], panes: &[Pane], max: u32) -> Option<String> {
+    let now = jiff::Timestamp::now();
+    let working = threads
+        .iter()
+        .filter(|t| match t.status {
+            Status::Starting => true,
+            Status::Open => t.is_remote() || thread::live_state(t, agents, panes, now).pane_exists,
+            _ => false,
+        })
+        .count();
+    (working as u32 >= max)
+        .then(|| format!("{working} threads are already working; max_parallel_threads is {max}"))
 }
 
 /// Steps 2 to 5 of starting a thread, also used by `thread restart` case (a).
@@ -562,17 +578,6 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
         .coordinator()
         .context("the project has never been opened")?;
     let workspace = coordinator::project_workspace(&coordinator, &view.panes);
-    if workspace.is_none()
-        && !view
-            .agents
-            .iter()
-            .any(|a| coordinator::is_coordinator(&coordinator, a))
-    {
-        bail!(
-            "the project's workspace is not open; run `open {}` first",
-            project.slug
-        );
-    }
     let folder = if record.kind == Kind::Checkout {
         std::path::PathBuf::from(&record.repo)
     } else {
@@ -585,24 +590,31 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
         folder
     };
     let folder = std::fs::canonicalize(&folder)?;
-    let created = match workspace {
-        Some(id) => view.herdr.tab_create(&id, &folder, &record.title, false)?,
-        // The coordinator runs in a pane of another workspace: the thread
-        // opens the project's own.
+    // No pane of the project's workspace is left, or the coordinator runs in
+    // a pane of another workspace: the project gets its home Space again.
+    let workspace = match workspace {
+        Some(id) => id,
         None => {
-            let (settings, _) = project.read_project_md()?;
-            let created = view.herdr.workspace_create(
-                &folder,
-                &crate::project::home_label(&settings.name, &project.slug),
-                false,
-            )?;
-            let _ = view.herdr.call(
-                &["tab", "rename", &created.tab_id, &record.title],
-                crate::herdr::CALL_TIMEOUT,
-            );
-            created
+            let home = coordinator::create_home(&view.herdr, project)?;
+            // With no coordinator running, it becomes the recorded home, so
+            // later tabs and `open` go there. A running coordinator's record
+            // keeps naming its own pane.
+            if !view
+                .agents
+                .iter()
+                .any(|a| coordinator::is_coordinator(&coordinator, a))
+            {
+                project.update_coordinator(|c| {
+                    c.workspace_id = home.workspace_id.clone();
+                    c.tab_id = home.tab_id.clone();
+                })?;
+            }
+            home.workspace_id
         }
     };
+    let created = view
+        .herdr
+        .tab_create(&workspace, &folder, &record.title, false)?;
     let cwd = view.herdr.pane_cwd(&created.pane_id).unwrap_or_default();
     let cwd = if cwd.is_empty() {
         folder.to_string_lossy().into_owned()
@@ -2326,6 +2338,38 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cap_counts_open_threads_with_a_live_pane_and_starting_ones() {
+        let tab = |id: &str, status: Status| Thread {
+            id: id.into(),
+            kind: Kind::Tab,
+            status,
+            pane_id: format!("w2:{id}"),
+            cwd: format!("/p/threads/{id}"),
+            ..Thread::default()
+        };
+        let pane = |t: &Thread| Pane {
+            pane_id: t.pane_id.clone(),
+            cwd: t.cwd.clone(),
+            ..Pane::default()
+        };
+        // Waiting on review: open, its pane closed.
+        let waiting = tab("t-0001", Status::Open);
+        let working = tab("t-0002", Status::Open);
+        let starting = tab("t-0003", Status::Starting);
+        let merged = tab("t-0004", Status::Resolved);
+        let threads = [waiting.clone(), working.clone(), starting, merged.clone()];
+        let panes = [pane(&working), pane(&merged)];
+        assert_eq!(
+            cap_warning(&threads, &[], &panes, 2).as_deref(),
+            Some("2 threads are already working; max_parallel_threads is 2")
+        );
+        assert_eq!(cap_warning(&threads, &[], &panes, 3), None);
+        // The same thread counts once its pane is live.
+        let panes = [pane(&working), pane(&waiting)];
+        assert!(cap_warning(&threads, &[], &panes, 3).is_some());
+    }
 
     fn now() -> jiff::Timestamp {
         "2026-09-17T12:00:00Z".parse().unwrap()
