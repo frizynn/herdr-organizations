@@ -2794,15 +2794,41 @@ mod tests {
         }
         assert_eq!(thread::list(&project), before);
 
-        // From its own pane a coordinator takes a node under itself.
+        // From its own pane a coordinator moves only nodes in its subtree:
+        // not a node under root, not another coordinator or its children.
+        let other = tab_node(&project, "Other", request(ROOT_ID, NodeRole::Coordinator));
+        let theirs = tab_node(&project, "Theirs", request(&other.id, NodeRole::Worker));
+        let grandchild = tab_node(&project, "Grandchild", request(&sub.id, NodeRole::Worker));
+        let before = thread::list(&project);
+        for id in [&worker.id, &other.id, &theirs.id] {
+            let error = move_node(&calling_from(&world, &from_area), &project, id, &area.id)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "coordinator `t-0001` may move only nodes beneath itself, not `{id}`"
+                )),
+                "{error}"
+            );
+        }
+        assert_eq!(thread::list(&project), before);
         let taken = move_node(
             &calling_from(&world, &from_area),
             &project,
-            &worker.id,
+            &grandchild.id,
             &area.id,
         )
         .unwrap();
         assert_eq!(taken.parent_id, area.id);
+        // The user's terminal moves any node.
+        let moved = move_node(
+            &calling_from(&world, &plain),
+            &project,
+            &theirs.id,
+            &area.id,
+        )
+        .unwrap();
+        assert_eq!(moved.parent_id, area.id);
     }
 
     /// A tree that is already broken refuses a move and is left as it was.

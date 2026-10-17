@@ -874,6 +874,106 @@ mod tests {
         assert_eq!(world.runner.count("agent start"), 0);
     }
 
+    /// The ticker never starts an agent in an adopted pane. When the agent
+    /// it found busy leaves before its brief, the pane waits at its shell and
+    /// the brief goes to the next agent that runs there.
+    #[test]
+    fn an_adopted_pane_whose_agent_left_gets_no_new_agent() {
+        let (world, project, cwd) = world_with_agent("working", "my-agent");
+        let t = adopt(
+            &world.ctx(),
+            "demo",
+            &under("w5:p1", "Boss", ROOT_ID, NodeRole::Coordinator),
+        )
+        .unwrap();
+        assert!(t.prompt_pending);
+        *world.agents.borrow_mut() = "[]".into();
+        *world.panes.borrow_mut() = format!(
+            "[{}]",
+            crate::scenarios::pane_json("w5", "w5:t1", "w5:p1", &cwd)
+        );
+        world.runner.on("agent start", ok(r#"{"result":{}}"#));
+        for _ in 0..3 {
+            crate::ticker::tick_project(&world.ctx(), &project).unwrap();
+        }
+        assert_eq!(world.runner.count("agent start"), 0);
+        let waiting = thread::load(&project, &t.id).unwrap();
+        assert_eq!(
+            (waiting.status, waiting.prompt_pending),
+            (Status::Open, true)
+        );
+
+        *world.agents.borrow_mut() =
+            format!("[{}]", agent_json("w5", "w5:t1", "w5:p1", &cwd, "", "idle"));
+        crate::ticker::tick_project(&world.ctx(), &project).unwrap();
+        crate::scenarios::settled(&project);
+        crate::ticker::tick_project(&world.ctx(), &project).unwrap();
+        assert_eq!(world.runner.count("agent prompt"), 1);
+        assert_eq!(world.runner.count("agent start"), 0);
+    }
+
+    /// An adoption refused because of its pane, in a project never opened,
+    /// ties the project to no session and makes no home Space.
+    #[test]
+    fn a_refused_adoption_in_a_project_never_opened_ties_nothing() {
+        let world = World::new();
+        let project = project::create(&world.root, "demo", "", vec![]).unwrap();
+        let socket = world.home.path().join("a.sock");
+        std::fs::write(&socket, b"").unwrap();
+        world.runner.on(
+            "workspace create",
+            ok(r#"{"result":{"root_pane":{"workspace_id":"w7","tab_id":"w7:t1","pane_id":"w7:p1"}}}"#),
+        );
+        let args = AdoptArgs {
+            session: SessionFlags {
+                session: None,
+                socket: Some(socket),
+            },
+            ..under("w9:p9", "Nope", ROOT_ID, NodeRole::Coordinator)
+        };
+        let error = adopt(&world.ctx(), "demo", &args).unwrap_err().to_string();
+        assert!(error.contains("no agent is detected"), "{error}");
+        assert!(project.coordinator().is_none());
+        assert_eq!(world.runner.count("workspace create"), 0);
+    }
+
+    /// Pane ids repeat between sessions, so `--session` or `--socket` naming
+    /// another session than the project's is refused before any pane is read.
+    #[test]
+    fn a_session_flag_naming_another_session_is_refused() {
+        let (world, project, _) = world_with_agent("idle", "my-agent");
+        let other = world.home.path().join("b.sock");
+        std::fs::write(&other, b"").unwrap();
+        let args = AdoptArgs {
+            session: SessionFlags {
+                session: None,
+                socket: Some(other.clone()),
+            },
+            ..plain("w5:p1", "Elsewhere", None)
+        };
+        let error = adopt(&world.ctx(), "demo", &args).unwrap_err().to_string();
+        let recorded = project.coordinator().unwrap().socket;
+        assert!(
+            error.contains(&format!(
+                "`demo` belongs to the herdr session at {recorded}, not the one at {}",
+                other.display()
+            )),
+            "{error}"
+        );
+        assert_eq!(world.runner.calls.borrow().len(), 0);
+        assert!(thread::list(&project).is_empty());
+
+        // Naming the recorded session is the same as naming none.
+        let same = AdoptArgs {
+            session: SessionFlags {
+                session: None,
+                socket: Some(recorded.into()),
+            },
+            ..plain("w5:p1", "Here", None)
+        };
+        adopt(&world.ctx(), "demo", &same).unwrap();
+    }
+
     #[test]
     fn refusals_happen_before_anything_is_created() {
         let (world, project, _) = world_with_agent("idle", "my-agent");

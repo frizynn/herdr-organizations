@@ -6881,3 +6881,44 @@ fn node_start_in_a_project_never_opened_makes_its_home_space_without_a_coordinat
     assert_eq!(world.runner.count("workspace create"), 1);
     assert_eq!(world.runner.count("agent start"), 0);
 }
+
+/// `node start --socket` naming another session than the project's is
+/// refused before anything is created: pane ids repeat between sessions.
+#[test]
+fn node_start_refuses_a_session_flag_naming_another_session() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let other = world.home.path().join("b.sock");
+    std::fs::write(&other, b"").unwrap();
+    let session = crate::paths::SessionFlags {
+        session: None,
+        socket: Some(other.clone()),
+    };
+    let error = threads::start_in(
+        &world.ctx(),
+        "demo",
+        StartArgs {
+            title: "Area".into(),
+            repo: None,
+            machine: None,
+            profile: None,
+            kind: None,
+            base: None,
+            task: "Coordinate this area".into(),
+            node: crate::organizations::NodeRequest::default(),
+        },
+        &session,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains(&format!(
+            "`demo` belongs to the herdr session at {}, not the one at {}",
+            project.coordinator().unwrap().socket,
+            other.display()
+        )),
+        "{error}"
+    );
+    assert!(thread::list(&project).is_empty());
+    assert_eq!(world.runner.calls.borrow().len(), 0);
+}
