@@ -24,7 +24,7 @@ Objective: <one line>
 
 - Every user message gets an Asked line, kept until it is answered or done.
 - With nothing under a heading, leave it empty: no `(none)` or `(nothing for now; ...)` line. A line that is only a parenthesis is not read as an item.
-- A message that starts `[from the user, answering your STATUS.md line N: "..."]` is the user's answer to that line. Act on it and rewrite that line: an Asked line gets its state and answer, a Needs your decision line moves to Decisions as `- <date> <what the user decided>`. Until you change it, the list shows it answered.
+- A message that starts `[from the user, answering your STATUS.md line N]` is the user's answer to that line of your status file; read the line there. Act on it and rewrite that line: an Asked line gets its state and answer, a Needs your decision line moves to Decisions as `- <date> <what the user decided>`. Until you change it, the list shows it answered.
 - End it with its links in parentheses: the thread id (`t-0007`), the PR (`#12` or its URL), `task:<id>` or a page URL. Link every ask that has a thread, PR or task: the binary confirms the state from the link and marks the line when it does not close (done while something linked is still going or after it failed, open or working once it finished, working with no link). The user reads all asks with `asks`, in the popup and in Nenu; `asks --project <slug>` shows which of yours do not close.
 - What is in progress or done is computed (the tree, `node show`, Nenu): do not list threads here.
 - Before you answer, update the file when something changed for the user, with small edits. Never paste reports or transcripts.

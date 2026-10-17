@@ -49,11 +49,11 @@ pub struct Lists {
     /// `owners`, the root keeps only what no scoped coordinator lists.
     pub project: Tasks,
     pub owners: Vec<OwnerList>,
-    /// Lists whose coordinator is resolved or is no coordinator: (its node,
-    /// the task).
+    /// Tasks no coordinator owns: (the node whose list it is in, or empty,
+    /// the task). The lists of nodes that are resolved or no coordinators,
+    /// then each task an open node is on that no list has (found with
+    /// `get`, else named by what the record keeps).
     pub unowned: Vec<(String, Task)>,
-    /// Tasks found only by their id (`get`), with no owner here.
-    pub found: Vec<Task>,
     /// Some node is assigned to a task with `--task` or `node assign`.
     assigned: bool,
 }
@@ -81,11 +81,6 @@ impl Lists {
         }
         for (node, task) in &self.unowned {
             all.push((node.as_str(), task));
-        }
-        for task in &self.found {
-            if !all.iter().any(|(_, t)| same(t, task)) {
-                all.push(("", task));
-            }
         }
         all
     }
@@ -191,20 +186,56 @@ pub fn lists(ctx: &Ctx, project: &Project, read: Read) -> Lists {
             tasks: root,
         },
     );
-    let unowned = match &config {
+    let mut unowned = match &config {
         Ok(None) => unowned_files(project, &owners),
         _ => Vec::new(),
     };
+    let threads = thread::list(project);
+    // The tasks open nodes were put on that no list has: a tracker task the
+    // lists leave out, or a title the coordinator renamed or deleted. Only
+    // assignments count, so a project that makes none stays as it was.
     let found = match &config {
         Ok(Some(_)) => tracker::cached_gets(project),
         _ => Vec::new(),
     };
+    for t in threads.iter().filter(|t| t.status != Status::Resolved) {
+        for key in &t.tasks {
+            let listed = owners
+                .iter()
+                .flat_map(|o| o.tasks.as_deref().unwrap_or_default())
+                .chain(unowned.iter().map(|(_, task)| task))
+                .any(|task| names(task, key));
+            if listed {
+                continue;
+            }
+            let fetched = match (&config, read) {
+                (Ok(Some(config)), Read::Run) => {
+                    tracker::get(ctx, project, config, key).ok().flatten()
+                }
+                _ => None,
+            };
+            let task = found
+                .iter()
+                .find(|task| names(task, key))
+                .cloned()
+                .or(fetched)
+                .unwrap_or_else(|| Task {
+                    id: if matches!(config, Ok(Some(_))) {
+                        key.clone()
+                    } else {
+                        String::new()
+                    },
+                    title: key.clone(),
+                    ..Task::default()
+                });
+            unowned.push((String::new(), task));
+        }
+    }
     Lists {
         project: project_tasks,
         owners,
         unowned,
-        found,
-        assigned: thread::list(project).iter().any(|t| !t.tasks.is_empty()),
+        assigned: threads.iter().any(|t| !t.tasks.is_empty()),
     }
 }
 
@@ -481,7 +512,7 @@ pub fn print_node(ctx: &Ctx, slug: &str, node: &str, json: bool) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let lists = lists(ctx, &project, Read::Run);
     let threads = thread::list(&project);
-    let rows = node_rows(ctx, &project, &lists, &threads, node, Read::Run)?;
+    let rows = node_rows(&project, &lists, &threads, node)?;
     let title = threads
         .iter()
         .find(|t| t.id == node)
@@ -538,16 +569,13 @@ impl NodeRow {
     }
 }
 
-/// `node`'s view: its own tasks, then the tasks of other lists it is on.
-/// With `Read::Run`, a tracker task it is on that no list printed is asked
-/// for by id.
+/// `node`'s view: its own tasks, then the tasks of other lists (and the
+/// unowned ones) it is on.
 pub fn node_rows(
-    ctx: &Ctx,
     project: &Project,
     lists: &Lists,
     threads: &[Thread],
     node: &str,
-    read: Read,
 ) -> Result<Vec<NodeRow>> {
     let Some(owner) = lists.owners.iter().find(|o| o.id == node) else {
         bail!(
@@ -579,18 +607,6 @@ pub fn node_rows(
             rows.push(row("assigned", owner, task));
         }
     }
-    if let (Some(record), Read::Run, Ok(Some(config))) =
-        (record, read, project.tracker(&ctx.config_dir))
-    {
-        for key in record.assigned() {
-            if catalog.iter().any(|(_, t)| names(t, key)) {
-                continue;
-            }
-            if let Ok(Some(task)) = tracker::get(ctx, project, &config, key) {
-                rows.push(row("assigned", "", &task));
-            }
-        }
-    }
     Ok(rows)
 }
 
@@ -606,7 +622,7 @@ pub fn coordinator_rows(ctx: &Ctx, project: &Project) -> Vec<(String, Vec<NodeRo
         .owners
         .iter()
         .filter_map(|owner| {
-            let rows = node_rows(ctx, project, &lists, &threads, &owner.id, Read::Cached).ok()?;
+            let rows = node_rows(project, &lists, &threads, &owner.id).ok()?;
             Some((owner.id.clone(), rows))
         })
         .collect()
@@ -668,31 +684,39 @@ pub fn assign(ctx: &Ctx, slug: &str, id: &str, key: &str, on: bool) -> Result<()
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
     if !on {
+        // As `assign` found it, else as written, for a task that is gone.
+        let wanted = find_key(ctx, &project, key).unwrap_or_else(|_| key.trim().to_string());
         let held = record
             .assigned()
             .iter()
-            .any(|k| k.eq_ignore_ascii_case(key.trim()));
+            .any(|k| k.eq_ignore_ascii_case(&wanted));
         if !held {
             bail!("{id} is not on task \"{key}\"");
         }
         thread::update(&project, id, |t| {
-            t.tasks.retain(|k| !k.eq_ignore_ascii_case(key.trim()));
-            if t.task_id.eq_ignore_ascii_case(key.trim()) {
+            t.tasks.retain(|k| !k.eq_ignore_ascii_case(&wanted));
+            if t.task_id.eq_ignore_ascii_case(&wanted) {
                 t.task_id.clear();
             }
         })?;
-        println!("{id} is off task {}", key.trim());
+        println!("{id} is off task {wanted}");
         return Ok(());
     }
     if record.status == Status::Resolved {
         bail!("{id} is resolved; reopen it first");
     }
     let found = find_key(ctx, &project, key)?;
-    thread::update(&project, id, |t| {
-        if !t.assigned().iter().any(|k| k.eq_ignore_ascii_case(&found)) {
-            t.tasks.push(found.clone());
-        }
-    })?;
+    if record
+        .assigned()
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(&found))
+    {
+        println!("{id} is on task {found}");
+        return Ok(());
+    }
+    let record = thread::update(&project, id, |t| t.tasks.push(found.clone()))?;
+    // As a start tells it, so a later resolve is never the first it hears.
+    tracker::link_task(ctx, &project, &record, &found, tracker::Event::Started);
     println!("{id} is on task {found}");
     Ok(())
 }

@@ -433,6 +433,33 @@ pub fn link(ctx: &Ctx, project: &Project, t: &Thread, event: Event) {
     }
 }
 
+/// `link` for one task `t` works on, as `link` tells each.
+pub fn link_task(ctx: &Ctx, project: &Project, t: &Thread, task_id: &str, event: Event) {
+    let Ok(Some(config)) = project.tracker(&ctx.config_dir) else {
+        return;
+    };
+    if !config.link.is_empty() {
+        link_one(ctx, project, &config, t, task_id, event);
+    }
+}
+
+/// Drops every cached list, the project's and each task scope's: after a
+/// `link` the tracker may have changed any of them.
+fn drop_lists(project: &Project) {
+    let _ = std::fs::remove_file(cache_path(project, crate::organizations::ROOT_ID));
+    let Ok(entries) = std::fs::read_dir(project.state_dir()) else {
+        return;
+    };
+    for name in entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+    {
+        if name.starts_with("tracker.t-") && name.ends_with(".json") {
+            let _ = std::fs::remove_file(project.state_dir().join(name));
+        }
+    }
+}
+
 /// `link` for one of the tasks `t` works on.
 fn link_one(
     ctx: &Ctx,
@@ -451,7 +478,7 @@ fn link_one(
         env.push(("HP_PR_URL", t.pr.as_str()));
     }
     let result = run(ctx, project, &config.link, config.timeout_secs, &env);
-    let _ = std::fs::remove_file(cache_path(project, crate::organizations::ROOT_ID));
+    drop_lists(project);
     if let Err(reason) = result {
         let _ = crate::inbox::write(
             project,

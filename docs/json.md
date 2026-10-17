@@ -207,9 +207,9 @@ What the user asked a coordinator, as it wrote under `## Asked` in its status fi
 
 ### Answering an ask
 
-`asks answer <slug> <root|t-NNNN> --line N --text-file <F|-> [--json]` answers line `N` of that coordinator's status file, an ask under `## Asked` or a line under `## Needs your decision`. `-` reads the text from standard input. It types into the coordinator `[from the user, answering your STATUS.md line N: "<ask>"] <text>`, where `<ask>` is the line's text and answer without its links, on one line of at most 120 characters. Then it records in `.state/answers.json` the line's text and when, so that line carries `answered_at` until the coordinator changes it. The answer itself goes to the coordinator, whose skill says where it lands: an `## Asked` line gets its state and answer updated, and a `## Needs your decision` line moves to `## Decisions` as `- <date> <what the user decided>`.
+`asks answer <slug> <root|t-NNNN> --line N --text-file <F|-> [--json]` answers line `N` of that coordinator's status file, an ask under `## Asked` or a line under `## Needs your decision`. `-` reads the text from standard input. The text is one line (a control character, a line break included, is refused). It types into the coordinator `[from the user, answering your STATUS.md line N] <text>`: the line is named by its number, never quoted, because its text is the coordinator's and may carry words from outside (a pull request or issue title) that must not come back as the user's. Then it records in `.state/answers.json` the line's text and when, so that line carries `answered_at` until the coordinator changes it. The answer itself goes to the coordinator, whose skill says where it lands: an `## Asked` line gets its state and answer updated, and a `## Needs your decision` line moves to `## Decisions` as `- <date> <what the user decided>`.
 
-Exit 0 means the answer was typed. Otherwise the error is on standard error, the exit status is not 0 and nothing is recorded: the coordinator does not run or cannot take a prompt, the node is resolved or is no coordinator with a status file, line `N` is no ask or decision, the text is empty, or the command runs in a coordinator's own pane (it is the user's). With `--json` it prints `{"schema_version":1,"project":"<slug>","coordinator":"<root|t-NNNN>","line":N,"answered_at":"<RFC 3339>"}`. `asks answer --help` exits 0, so a client can tell the command is there.
+Exit 0 means the answer was typed. Otherwise the error is on standard error, the exit status is not 0 and nothing is recorded: the coordinator does not run or cannot take a prompt, the node is resolved or is no coordinator with a status file, line `N` is no ask or decision, the text is empty or more than one line, or the command runs in a coordinator's own pane (it is the user's). With `--json` it prints `{"schema_version":1,"project":"<slug>","coordinator":"<root|t-NNNN>","line":N,"answered_at":"<RFC 3339>"}`. `asks answer --help` exits 0, so a client can tell the command is there.
 
 ## Usage
 
@@ -285,14 +285,14 @@ Once a coordinator node has tasks of its own (or its tracker list failed), a nod
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `owners` | [{id, title, tasks: [Task + assignees, delegated], unavailable?}] | Every coordinator that owns a list: `root` (empty title) first, then open coordinator nodes in tree order. With a tracker, the root keeps the tasks no scoped coordinator lists. `unavailable` is present, with the reason, when that list could not be read. |
-| `unowned` | [Task + assignees, delegated, owner_node] | Tasks in `nodes/<id>/TASKS.md` of a node that is resolved or is no coordinator; `owner_node` is that node. |
+| `unowned` | [Task + assignees, delegated, owner_node] | Tasks in `nodes/<id>/TASKS.md` of a node that is resolved or is no coordinator (`owner_node` is that node), then each task an open node is on that no list has (`owner_node` empty): a tracker task found with `get`, else named by its id, or a `TASKS.md` title no list has any more. |
 
 | Task view field | Type | Meaning |
 | --- | --- | --- |
 | `assignees` | [Assignee] | Who works on it: the thread on its line and the nodes whose record names it, nested so that a node on the task sits under its nearest ancestor that is on it too. In `--node`'s view, that coordinator is left out. |
 | `delegated` | bool | A coordinator node is among the top assignees: the owner handed the task to it. |
 | `via` | `"own"` or `"assigned"` | `--node` only: in the coordinator's own list, or in another list with the coordinator on it. |
-| `owner_node` | string | `--node` and `unowned`: whose list it is in (`root` or a node id), empty for a task only `get` found. |
+| `owner_node` | string | `--node` and `unowned`: whose list it is in (`root` or a node id), empty for a task no list has. |
 
 | Assignee field | Type | Meaning |
 | --- | --- | --- |

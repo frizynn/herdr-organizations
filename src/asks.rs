@@ -490,9 +490,9 @@ pub struct Answered {
     pub answered_at: String,
 }
 
-/// `asks answer`: types the user's `text` into `coordinator` (`root` or a
-/// coordinator node's id) as their answer to line `line` of its status
-/// file, an ask or a decision, named by its text without its links. Refused
+/// `asks answer`: types the user's `text`, one line, into `coordinator`
+/// (`root` or a coordinator node's id) as their answer to line `line` of
+/// its status file, an ask or a decision, named by its number only. Refused
 /// from a coordinator's own pane, for a resolved node and while the
 /// coordinator does not run; only an answer that was sent is recorded.
 pub fn answer(
@@ -506,6 +506,11 @@ pub fn answer(
     let text = text.trim();
     if text.is_empty() {
         bail!("the answer is empty");
+    }
+    if text.chars().any(char::is_control) {
+        bail!(
+            "the answer is one line of text; a line break would be typed into the coordinator's pane"
+        );
     }
     if organizations::called_by_coordinator(ctx, &project) {
         bail!(
@@ -526,23 +531,16 @@ pub fn answer(
     }
     .with_context(|| format!("{coordinator} of `{slug}` has no status file"))?;
     let contents = read(&status.text, &Records::default(), coordinator);
-    let said = contents
-        .asks
-        .iter()
-        .find(|ask| ask.line == line)
-        .map(Ask::said)
-        .or_else(|| {
-            contents
-                .decisions
-                .iter()
-                .find(|d| d.line == line)
-                .map(|d| d.text.clone())
-        })
-        .with_context(|| format!("line {line} of {} is no ask or decision", status.path))?;
+    let item = contents.asks.iter().any(|ask| ask.line == line)
+        || contents.decisions.iter().any(|d| d.line == line);
+    if !item {
+        bail!("line {line} of {} is no ask or decision", status.path);
+    }
+    // The line is named, never quoted: its text is the coordinator's, and
+    // may hold a title from outside, which must not come back as the user's.
     let prompt = format!(
-        "[from the user, answering your {} line {line}: \"{}\"] {text}",
-        status_file::NAME,
-        quoted(&said)
+        "[from the user, answering your {} line {line}] {text}",
+        status_file::NAME
     );
     if coordinator == ROOT_ID {
         crate::coordinator::send(ctx, slug, &prompt)?;
@@ -561,18 +559,6 @@ pub fn answer(
     }
     project::write_json(&path, &answers)?;
     Ok(Answered { answered_at })
-}
-
-/// A line of the status file as a prompt quotes it: one line of at most
-/// 120 characters, with no double quote to end the quote early.
-fn quoted(text: &str) -> String {
-    clean(&text.replace('"', "'"))
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(120)
-        .collect()
 }
 
 /// Reads `coordinator`'s status file text. It never fails: a line under
