@@ -268,15 +268,16 @@ pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<(bool, A
 }
 
 /// When the caller is a known project pane, keep its child creation beneath
-/// itself. Calls from ordinary terminal sessions remain manually usable.
+/// itself, and return its id. Calls from ordinary terminal sessions remain
+/// manually usable (`None`).
 pub fn authorize_creator(
     project: &Project,
     caller_pane: &str,
     caller_socket: &str,
     requested_parent: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let Some(creator_id) = creator_parent(project, caller_pane, caller_socket)? else {
-        return Ok(());
+        return Ok(None);
     };
     let requested_parent = if requested_parent.is_empty() {
         ROOT_ID
@@ -288,7 +289,7 @@ pub fn authorize_creator(
             "coordinator `{creator_id}` may create children only beneath itself, not `{requested_parent}`"
         );
     }
-    Ok(())
+    Ok(Some(creator_id))
 }
 
 /// A pane this project recorded: its root coordinator's, or a local node's.
@@ -660,12 +661,12 @@ fn finish_node(
 }
 
 /// `node move`: puts node `id` and its subtree under `parent`, with the
-/// parent checks of `node start` and the caller's (a known pane may only
-/// use itself as the parent), under the lock. Only `parent_id` changes:
-/// nothing is restarted, and the node's next brief or restart composes the
-/// new ancestors' context.
+/// parent checks of `node start`, under the lock. A known pane may only move
+/// nodes beneath itself, and only to itself, as it only creates there. Only
+/// `parent_id` changes: nothing is restarted, and the node's next brief or
+/// restart composes the new ancestors' context.
 pub fn move_node(ctx: &Ctx, project: &Project, id: &str, parent: &str) -> Result<Thread> {
-    authorize_creator(
+    let caller = authorize_creator(
         project,
         ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
         ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
@@ -677,6 +678,12 @@ pub fn move_node(ctx: &Ctx, project: &Project, id: &str, parent: &str) -> Result
     let by_id = validate_tree(&records)?;
     if !by_id.contains_key(id) {
         bail!("node `{id}` does not exist");
+    }
+    if let Some(caller) = caller
+        && caller != ROOT_ID
+        && (id == caller || !within(&by_id, id, &caller))
+    {
+        bail!("coordinator `{caller}` may move only nodes beneath itself, not `{id}`");
     }
     validate_parent(&records, parent)?;
     if within(&by_id, parent, id) {

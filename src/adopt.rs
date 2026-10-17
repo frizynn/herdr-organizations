@@ -105,12 +105,14 @@ pub fn adopt(ctx: &Ctx, slug: &str, args: &AdoptArgs) -> Result<Thread> {
     };
     // Refused before Herdr is asked anything; checked again under the lock.
     organizations::check_adoption(&project, &request)?;
-    let record = match project.coordinator() {
-        Some(record) => record,
-        None => coordinator::bind(ctx, &project, &args.session)?,
-    };
-    let herdr = Herdr::new(ctx.env.herdr_bin(), &record.socket, ctx.runner);
-    let agent = adoptable_agent(ctx, &herdr, &record.socket, &args.pane)?;
+    let session = coordinator::session_for(ctx, &project, &args.session)?;
+    let socket = session.socket.to_string_lossy().into_owned();
+    let herdr = Herdr::new(ctx.env.herdr_bin(), &socket, ctx.runner);
+    let agent = adoptable_agent(ctx, &herdr, &socket, &args.pane)?;
+    // Tied last, so a refused adoption ties nothing.
+    if project.coordinator().is_none() {
+        coordinator::bind(ctx, &project, &session)?;
+    }
     ticker::start(ctx)?;
 
     // The pane's repository and branch, when it is in one.

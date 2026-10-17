@@ -349,8 +349,9 @@ pub fn start_in(
     node_profile.argv(&safety.thread_agent_args)?;
     let kind = placement(args.kind, args.repo.is_some(), !machine.is_empty())?;
 
+    let session = coordinator::session_for(ctx, &project, session)?;
     if project.coordinator().is_none() {
-        coordinator::bind(ctx, &project, session)?;
+        coordinator::bind(ctx, &project, &session)?;
     }
     // Without a running ticker nothing launches.
     ticker::start(ctx)?;

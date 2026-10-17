@@ -163,7 +163,7 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
     // names no pane) gets one only when asked for `root`.
     let organizer = project
         .coordinator()
-        .is_some_and(|record| record.pane_id.is_empty() && Path::new(&record.socket).exists());
+        .is_some_and(|record| !record.has_root() && Path::new(&record.socket).exists());
     if id == ROOT_ID || !organizer {
         coordinator::open_quiet(ctx, slug, &options)
             .context("could not open the project coordinator")?;

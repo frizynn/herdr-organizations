@@ -115,15 +115,41 @@ pub fn found(
     })
 }
 
-/// Ties a project with no session record to the session `flags` name (the
-/// caller's by default) without starting a coordinator, so it can organize
-/// coordinator nodes with no root one. An agent already working in the
-/// project folder is recorded as `open` would; otherwise the home Space is a
-/// workspace that already has a pane in the folder, or a new one with only a
-/// shell, and the record names no pane. `open` starts a root coordinator
-/// there later. A record written meanwhile by someone else is kept.
-pub fn bind(ctx: &Ctx, project: &Project, flags: &SessionFlags) -> Result<Coordinator> {
-    let session = paths::resolve_session(flags, ctx.env, ctx.runner)?;
+/// The session a command that may tie the project works in: the recorded
+/// one, else the one `flags` name (the caller's by default). Flags naming
+/// another session than the recorded one are refused, since pane ids repeat
+/// between sessions.
+pub fn session_for(ctx: &Ctx, project: &Project, flags: &SessionFlags) -> Result<paths::Session> {
+    let Some(record) = project.coordinator().filter(|r| !r.socket.is_empty()) else {
+        return paths::resolve_session(flags, ctx.env, ctx.runner);
+    };
+    let recorded = paths::Session {
+        socket: record.socket.clone().into(),
+        name: (!record.session.is_empty()).then(|| record.session.clone()),
+    };
+    if flags == &SessionFlags::default() {
+        return Ok(recorded);
+    }
+    let named = paths::resolve_session(flags, ctx.env, ctx.runner)?;
+    if named.socket != recorded.socket {
+        bail!(
+            "`{}` belongs to the herdr session at {}, not the one at {}",
+            project.slug,
+            record.socket,
+            named.socket.display()
+        );
+    }
+    Ok(recorded)
+}
+
+/// Ties a project with no session record to `session` without starting a
+/// coordinator, so it can organize coordinator nodes with no root one. An
+/// agent already working in the project folder is recorded as `open` would;
+/// otherwise the home Space is a workspace that already has a pane in the
+/// folder, or a new one with only a shell, and the record names no pane.
+/// `open` starts a root coordinator there later. A record written meanwhile
+/// by someone else is kept.
+pub fn bind(ctx: &Ctx, project: &Project, session: &paths::Session) -> Result<Coordinator> {
     let socket = session.socket.to_string_lossy().into_owned();
     let herdr = Herdr::new(ctx.env.herdr_bin(), &session.socket, ctx.runner);
     let reachable = || format!("the herdr session at {socket} is not reachable");

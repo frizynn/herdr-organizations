@@ -504,7 +504,7 @@ fn report(
                 // A record that names no pane was tied to its session by
                 // `node start` or `node adopt`: it organizes coordinator
                 // nodes and its root coordinator is optional.
-                let organizer = record.as_ref().is_some_and(|r| r.pane_id.is_empty());
+                let organizer = record.as_ref().is_some_and(|r| !r.has_root());
                 if coordinators.is_empty() && organizer {
                     notes.push(format!(
                         "no root coordinator (optional: `open {slug}` starts one)"

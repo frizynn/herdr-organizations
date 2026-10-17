@@ -207,7 +207,9 @@ pub struct CoordinatorJson {
 }
 
 fn coordinator_json(project: &Project) -> Option<CoordinatorJson> {
-    let record = project.coordinator().filter(|r| !r.pane_id.is_empty())?;
+    let record = project
+        .coordinator()
+        .filter(project::Coordinator::has_root)?;
     let state = crate::coordinator::live(project)
         .into_iter()
         .find(|pane| pane.pane_id == record.pane_id)
