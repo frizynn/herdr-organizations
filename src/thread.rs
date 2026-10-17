@@ -294,6 +294,15 @@ fn write_record(project: &Project, thread: &Thread) -> Result<()> {
 /// touch only the fields its step owns, writes.
 pub fn update(project: &Project, id: &str, change: impl FnOnce(&mut Thread)) -> Result<Thread> {
     let _lock = project.lock()?;
+    update_locked(project, id, change)
+}
+
+/// `update` while the caller holds the project lock.
+pub(crate) fn update_locked(
+    project: &Project,
+    id: &str,
+    change: impl FnOnce(&mut Thread),
+) -> Result<Thread> {
     let mut thread = load(project, id)?;
     change(&mut thread);
     thread.updated = project::now();
@@ -302,6 +311,7 @@ pub fn update(project: &Project, id: &str, change: impl FnOnce(&mut Thread)) -> 
 }
 
 /// Allocates the next id under the project lock and writes the first record.
+#[cfg(test)]
 pub fn allocate(project: &Project, fill: impl FnOnce(&mut Thread)) -> Result<Thread> {
     let _lock = project.lock()?;
     allocate_locked(project, fill)
@@ -467,6 +477,9 @@ pub struct BriefInput<'a> {
     pub instructions: &'a str,
     pub memory_index: &'a str,
     pub node_protocol: &'a str,
+    /// What the brief opens with: an adopted coordinator's preface
+    /// (`organizations::adopted_preface`), empty for every other node.
+    pub preface: &'a str,
     /// (path in the project folder, contents), in the order they should be inlined.
     pub memory_files: &'a [(String, String)],
     pub task: &'a str,
@@ -538,7 +551,8 @@ fn status_line(status: &organizations::NodeStatus) -> String {
 }
 
 pub fn compose_brief(input: &BriefInput) -> String {
-    let mut brief = brief_header(input);
+    let mut brief = input.preface.to_string();
+    brief.push_str(&brief_header(input));
     brief.push('\n');
     brief.push_str(
         match input.status {
@@ -630,6 +644,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
     };
     let context = organizations::scoped_context(project, thread)?;
     let protocol = organizations::node_protocol(thread, &command_prefix, &project.slug);
+    let preface = organizations::adopted_preface(thread, &command_prefix, &project.slug);
     let status = organizations::node_status(project, thread)?;
     Ok(compose_brief(&BriefInput {
         project_name: &project_name,
@@ -641,6 +656,7 @@ pub fn brief_for(project: &Project, thread: &Thread, task: &str, restart: bool) 
         instructions: &context.instructions,
         memory_index: &context.memory_index,
         node_protocol: &protocol,
+        preface: &preface,
         memory_files: &context.memory_files,
         task,
         restart,
@@ -1711,6 +1727,7 @@ mod tests {
             instructions: "Always run the tests.",
             memory_index: "# Memory\n- a\n- b\n- c",
             node_protocol: "Node `t-0001`, worker.",
+            preface: "",
             memory_files: &files,
             task: "Do the thing.",
             restart: true,
@@ -1762,6 +1779,7 @@ mod tests {
             instructions: "",
             memory_index: "",
             node_protocol: "node",
+            preface: "",
             memory_files: &[],
             task: "t",
             restart: false,

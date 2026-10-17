@@ -115,6 +115,93 @@ pub fn found(
     })
 }
 
+/// The session a command that may tie the project works in: the recorded
+/// one, else the one `flags` name (the caller's by default). Flags naming
+/// another session than the recorded one are refused, since pane ids repeat
+/// between sessions.
+pub fn session_for(ctx: &Ctx, project: &Project, flags: &SessionFlags) -> Result<paths::Session> {
+    let Some(record) = project.coordinator().filter(|r| !r.socket.is_empty()) else {
+        return paths::resolve_session(flags, ctx.env, ctx.runner);
+    };
+    let recorded = paths::Session {
+        socket: record.socket.clone().into(),
+        name: (!record.session.is_empty()).then(|| record.session.clone()),
+    };
+    if flags == &SessionFlags::default() {
+        return Ok(recorded);
+    }
+    let named = paths::resolve_session(flags, ctx.env, ctx.runner)?;
+    if named.socket != recorded.socket {
+        bail!(
+            "`{}` belongs to the herdr session at {}, not the one at {}",
+            project.slug,
+            record.socket,
+            named.socket.display()
+        );
+    }
+    Ok(recorded)
+}
+
+/// Ties a project with no session record to `session` without starting a
+/// coordinator, so it can organize coordinator nodes with no root one. An
+/// agent already working in the project folder is recorded as `open` would;
+/// otherwise the home Space is a workspace that already has a pane in the
+/// folder, or a new one with only a shell, and the record names no pane.
+/// `open` starts a root coordinator there later. A record written meanwhile
+/// by someone else is kept.
+pub fn bind(ctx: &Ctx, project: &Project, session: &paths::Session) -> Result<Coordinator> {
+    let socket = session.socket.to_string_lossy().into_owned();
+    let herdr = Herdr::new(ctx.env.herdr_bin(), &session.socket, ctx.runner);
+    let reachable = || format!("the herdr session at {socket} is not reachable");
+    let agents = herdr.agent_list().with_context(reachable)?;
+    let name = session.name.clone().unwrap_or_default();
+    let found = match found(project, &socket, &name, &agents) {
+        Some(record) => record,
+        None => {
+            let dir = project.canonical_dir();
+            let panes = herdr.pane_list().with_context(reachable)?;
+            let (workspace_id, tab_id) =
+                match panes.iter().find(|p| Path::new(&p.cwd).starts_with(&dir)) {
+                    Some(pane) => (pane.workspace_id.clone(), pane.tab_id.clone()),
+                    None => {
+                        let (settings, _) = project.read_project_md()?;
+                        let label = crate::project::home_label(&settings.name, &project.slug);
+                        let created = herdr.workspace_create(&dir, &label, false)?;
+                        (created.workspace_id, created.tab_id)
+                    }
+                };
+            Coordinator {
+                socket: socket.clone(),
+                session: name,
+                workspace_id,
+                tab_id,
+                cwd: dir.to_string_lossy().into_owned(),
+                ..Coordinator::default()
+            }
+        }
+    };
+    let record = project.update_coordinator(|c| {
+        if c.socket.is_empty() {
+            *c = found;
+        }
+    })?;
+    eprintln!(
+        "`{}` now belongs to the herdr session at {}; its home Space is workspace {}{}",
+        project.slug,
+        record.socket,
+        record.workspace_id,
+        if record.pane_id.is_empty() {
+            format!(
+                ", with no root coordinator (`open {}` starts one)",
+                project.slug
+            )
+        } else {
+            String::new()
+        }
+    );
+    Ok(record)
+}
+
 /// One live coordinator pane, as the ticker last saw it (`.state/coordinators.json`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]

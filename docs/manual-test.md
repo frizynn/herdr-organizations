@@ -157,6 +157,7 @@ The acceptance checks from the original plan, by stage, with how each was checke
 | 6 | A title with quotes, spaces and `$(...)` reaches the remote `--label` unchanged and runs nothing | Builder |
 | 6 | Always-on recipe: open a project on the second machine, reattach from this Mac with `herdr --remote <target> --session <name>`, answer a blocked prompt through it | Builder |
 | 7 | `thread adopt` gives a thread with a brief; two adopted panes in one directory get separate thread directories; an adopted agent that ends in `done` still gets its pending prompt | Builder (first), unit (all three) |
+| 7 | In a project never opened, `node adopt --role coordinator` and `node adopt --parent <its id>` adopt two running agents as a coordinator and its child: same pane and session id before and after, the coordinator gets its brief line, the home Space has no agent, `node list` shows the tree | Builder (disposable session), unit |
 | 7 | `adopt-workspace` creates a project from the current workspace | Builder: the action's handoff live, then the popup's core through the CLI. The popup itself: client-witnessed |
 | 7 | A paused project refuses `thread start` and is skipped by the ticker; an archived one is hidden and its tokens are gone; `delete` refuses while the coordinator is alive, `--force` moves the folder to `.trash/` and leaves worktrees alone | Builder, unit |
 | 7 | `new ../x`, `open ../x`, `thread list ../x` are refused | Unit (`tests/cli.rs`) |

@@ -757,6 +757,15 @@ pub fn nudge_parent_coordinators(
             state.parent_updates.remove(&parent_id);
             continue;
         }
+        // A child `node move` put under another parent since its update was
+        // queued is no longer this parent's to hear about.
+        if let Some(updates) = state.parent_updates.get_mut(&parent_id) {
+            updates.retain(|child, _| {
+                records.iter().any(|record| {
+                    &record.id == child && crate::organizations::parent_id(record) == parent_id
+                })
+            });
+        }
         let line = state
             .parent_updates
             .get(&parent_id)
@@ -1896,6 +1905,53 @@ pub fn routines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An update queued about a child that `node move` put under another
+    /// parent since is not that parent's any more: nobody is woken for it.
+    #[test]
+    fn a_moved_childs_queued_update_does_not_wake_its_old_parent() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        let parent = world.thread(&project, world.home.path(), |thread| {
+            thread.role = thread::NodeRole::Coordinator;
+            thread.can_spawn = true;
+        });
+        let child = thread::allocate(&project, |thread| {
+            thread.parent_id = parent.id.clone();
+            thread.status = Status::Open;
+        })
+        .unwrap();
+        let mut state = State::default();
+        queue_parent_updates(
+            &project,
+            &mut state,
+            &[Transition {
+                id: child.id.clone(),
+                from: Some(Group::Working),
+                to: Group::ReadyForReview,
+                note: "done".into(),
+            }],
+        );
+        assert!(state.parent_updates.contains_key(&parent.id));
+        crate::organizations::move_node(&world.ctx(), &project, &child.id, "root").unwrap();
+        world
+            .runner
+            .on("agent prompt", crate::runner::fake::ok(r#"{"result":{}}"#));
+        let idle_parent = Agent {
+            pane_id: parent.pane_id.clone(),
+            tab_id: parent.tab_id.clone(),
+            workspace_id: parent.workspace_id.clone(),
+            name: parent.agent_name.clone(),
+            agent_status: "idle".into(),
+            cwd: parent.cwd.clone(),
+            ..Agent::default()
+        };
+        let herdr = Herdr::new(world.ctx().env.herdr_bin(), "socket", &world.runner);
+        nudge_parent_coordinators(&world.ctx(), &project, &mut state, &herdr, &[idle_parent])
+            .unwrap();
+        assert_eq!(world.runner.count("agent prompt"), 0);
+        assert!(state.parent_updates.is_empty());
+    }
 
     #[test]
     fn direct_parent_updates_wait_for_idle_and_are_delivered_once() {

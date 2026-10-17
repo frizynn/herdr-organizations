@@ -1125,6 +1125,11 @@ fn launch_pass(
         if t.status != thread::Status::Open || !t.prompt_pending {
             continue;
         }
+        // An adopted pane is the user's: nothing is ever started in it, and
+        // a brief its agent left before waits for the next agent there.
+        if t.kind == thread::Kind::Adopted {
+            continue;
+        }
         let live = thread::live_state(t, agents, panes, now);
         if live.agent_state.is_some() || !live.pane_exists {
             continue;

@@ -159,8 +159,15 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
         new: false,
         here: false,
     };
-    coordinator::open_quiet(ctx, slug, &options)
-        .context("could not open the project coordinator")?;
+    // A project tied to its session with no root coordinator (its record
+    // names no pane) gets one only when asked for `root`.
+    let organizer = project
+        .coordinator()
+        .is_some_and(|record| !record.has_root() && Path::new(&record.socket).exists());
+    if id == ROOT_ID || !organizer {
+        coordinator::open_quiet(ctx, slug, &options)
+            .context("could not open the project coordinator")?;
+    }
     let project = Project::load(&ctx.root, slug)?;
     let record = project
         .coordinator()
@@ -616,5 +623,34 @@ mod tests {
             preview_node(&node),
             "$ herdr-organizations node start acme --parent t-0001 --role worker --title \"billing ui\" --harness claude --task-file -"
         );
+    }
+
+    /// Going to a node of a project that organizes coordinator nodes with
+    /// no root one focuses the node and starts no root coordinator.
+    #[test]
+    fn going_to_a_node_of_a_project_without_a_root_coordinator_opens_none() {
+        let world = crate::scenarios::World::new();
+        let project = world.project("demo", "a.sock");
+        project.update_coordinator(|c| c.pane_id.clear()).unwrap();
+        let cwd = world.home.path().to_string_lossy().into_owned();
+        let node = world.thread(&project, world.home.path(), |t| {
+            t.kind = Kind::Adopted;
+            t.agent_name = "helper".into();
+        });
+        *world.agents.borrow_mut() = format!(
+            "[{}]",
+            crate::scenarios::agent_json("w2", "w2:t1", "w2:p1", &cwd, "helper", "idle")
+        );
+        world
+            .runner
+            .on("agent focus", crate::runner::fake::ok(r#"{"result":{}}"#));
+
+        let pane = go_to_pane(&world.ctx(), "demo", &node.id).unwrap();
+        assert_eq!(pane, "w2:p1");
+        assert_eq!(world.runner.count("agent focus"), 1);
+        for started in ["agent start", "workspace create", "tab create"] {
+            assert_eq!(world.runner.count(started), 0, "{started}");
+        }
+        assert!(project.coordinator().unwrap().pane_id.is_empty());
     }
 }

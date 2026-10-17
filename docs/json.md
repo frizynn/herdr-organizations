@@ -60,7 +60,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `tone` | string | The colour name the user picked, empty when none was picked. |
 | `status_file` | [Status file](#status-file) or `null` | The root coordinator's `STATUS.md`, in the project's records folder. `null` when it does not exist. |
 | `usage` | [Usage](#usage) or `null` | The root coordinator's token use as last read. |
-| `coordinator` | object | The root coordinator: `pane_id`, `agent` (the Herdr agent kind it started as), `model` (empty for the harness's default) and `state`, the agent state Herdr reported when the ticker last looked at its pane (`working`, `blocked`, `idle`, `done`; empty before it saw the pane). Present only for a project that was opened. |
+| `coordinator` | object | The root coordinator: `pane_id`, `agent` (the Herdr agent kind it started as), `model` (empty for the harness's default) and `state`, the agent state Herdr reported when the ticker last looked at its pane (`working`, `blocked`, `idle`, `done`; empty before it saw the pane). Present only for a project with a root coordinator: left out for one never opened, and for one tied to its session by `node start` or `node adopt` alone (its record names no pane). |
 
 `set <slug> icon <name>` and `set <slug> tone <name>` pick them, and `set <slug> icon ""` clears the pick. A name is lower-case letters, digits and hyphens. Herdr Organizations stores the name and draws nothing with it, so it cannot tell which names a client knows. A client draws its own choice, for example one computed from the slug, when the field is empty or names something it does not have. A project created before these fields has neither. `set` prints text, not JSON: exit status 0 means the pick was saved.
 
@@ -113,7 +113,7 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `resolved_reason` | string | `manual`, `merged`, `auto` or empty. |
 | `auto_fix_ci`, `auto_merge` | bool | The pull request automation flags. See below. |
 | `pr` | object or `null` | `null` when the thread's report has no valid `PR:` line. |
-| `actions` | [string] | What a client may ask of the thread itself: `create-pr` when `thread pr-create` would open its pull request (no pull request, a local worktree branch origin has, a report, and an agent that is idle or in review), as of the ticker's last pull request check and the live group. Otherwise empty. The pull request's own actions are in `pr.actions`. |
+| `actions` | [string] | What a client may ask of the thread itself: `create-pr` when `thread pr-create` would open its pull request (no pull request, a local worktree branch origin has, a report, and an agent that is idle or in review), as of the ticker's last pull request check and the live group; then `move` when [`node move`](#node-move) has another parent for it (it is not resolved, and root or a coordinator node that may spawn, outside its own subtree, is not its parent already). Otherwise empty. The pull request's own actions are in `pr.actions`. More values may come; skip the ones you do not know. |
 | `origin` | string | The repository's remote URL, empty without one. |
 | `state_line` | string | The sidebar's state line as the ticker last computed it (`needs you · ~55%`). |
 | `activity`, `percent` | string, number or `null` | The agent's own last progress report (`report`); local threads only. |
@@ -368,6 +368,20 @@ What `task lint` lists and the `## Drift` section of `context` prints. The binar
 | `profiles` | `[{name, harness, model, reasoning_effort, description, builtin}]` | Every profile the role's allow-list permits: yours, then the listed built-ins. `builtin` is true for a built-in. |
 
 `open <slug>` and `coordinator replace <slug>` take `--profile NAME` or `--harness KIND`, then `--model` and `--reasoning-effort`. A model is a single name (letters, digits and `._-/:@+[]`, not starting with `-`), and an effort is one of the harness's `efforts`. Both replace the profile's own, and a refused choice changes nothing.
+
+## Node move
+
+```sh
+herdr-organizations node move <slug> <id> --parent <root|t-NNNN> [--json]
+```
+
+`--parent=<id>` works too. It puts the node and its subtree under the new parent (see [Operations](operations.md#commands) for the checks) and changes nothing else. With `--json` it prints:
+
+```json
+{"schema_version":1,"id":"t-0003","parent_id":"t-0001"}
+```
+
+`parent_id` is the parent now recorded, `root` for the project root. A refusal exits non-zero with its reason on standard error and prints nothing on standard output. A client tells whether the binary has the command from `node move --help`, which exits 0, and offers it for a node whose `actions` lists `move`.
 
 ## Pull request actions
 

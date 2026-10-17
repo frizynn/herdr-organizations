@@ -136,6 +136,19 @@ Plan the billing API. Delegate implementation tasks to children under your own n
 TASK
 ```
 
+A project organizes one or more coordinators, and the root coordinator is optional. Coordinators and agents that already run in Herdr join a project as nodes without a restart, so they keep their conversation:
+
+```bash
+# the coordinator, under root
+herdr-organizations node adopt billing --pane w3:p1 --title "Billing" --parent root --role coordinator
+# one of its agents, from outside its pane; run from the coordinator's own pane, --parent is not needed
+herdr-organizations node adopt billing --pane w3:p2 --title "Invoices API" --parent t-0001
+# put a node under another parent
+herdr-organizations node move billing t-0002 --parent root
+```
+
+A project that was never opened is tied to the caller's Herdr session by its first `node start` or `node adopt`, with a home Space and no root coordinator. `open` starts a root coordinator when you want one. See [Projects without a root coordinator](docs/operations.md#projects-without-a-root-coordinator).
+
 [Operations](docs/operations.md#commands) lists every command and flag.
 
 ## Configuration
@@ -202,7 +215,7 @@ Herdr Organizations started as a fork of [Herdr Projects](https://github.com/eli
 
 This fork adds, as the git history shows:
 
-- recursive nodes, so a coordinator can start its own coordinators and workers, with instructions and memory scoped to each branch of the tree (`node start`, `node rules`)
+- recursive nodes, so a coordinator can start its own coordinators and workers, with instructions and memory scoped to each branch of the tree (`node start`, `node rules`), adopting coordinators and agents that already run (`node adopt`), moving a node to another parent (`node move`), and projects that organize coordinators with no root one
 - the versioned `--json` contract and guarded pull request actions (`thread merge`, `thread set`)
 - an event-driven ticker, the Organizations popup, the optional dock and organization counts in Herdr's sidebar
 - `coordinator replace`, node templates (`template`) and a History view of resolved work
