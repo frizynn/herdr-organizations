@@ -6957,9 +6957,7 @@ fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
         .collect();
     assert_eq!(
         sent,
-        [
-            "[from the user, answering your STATUS.md line 3: \"Pilot or not : yes or no\"] Yes, pilot it."
-        ]
+        ["[from the user, answering your STATUS.md line 3] Yes, pilot it."]
     );
     let read = || {
         let records = crate::asks::Records::load(&ctx, &project);
@@ -6983,6 +6981,9 @@ fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
         assert!(error.to_string().contains("is no ask"), "{error}");
     }
     assert!(crate::asks::answer(&ctx, "demo", "root", 3, "  \n").is_err());
+    // One line: a line break would be typed into the coordinator's pane.
+    let error = crate::asks::answer(&ctx, "demo", "root", 3, "yes\nand more").unwrap_err();
+    assert!(error.to_string().contains("one line"), "{error}");
 
     std::fs::write(
         &status,

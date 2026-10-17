@@ -342,15 +342,23 @@ fn tracked(with_get: bool) -> Fixture {
             log = fixture.path("calls.log").display(),
         ),
     );
+    fixture.script(
+        "link.sh",
+        &format!(
+            "printf 'link %s %s %s\\n' \"$HP_TASK_ID\" \"$HP_THREAD_ID\" \"$HP_EVENT\" >> {log}\n",
+            log = fixture.path("calls.log").display(),
+        ),
+    );
     let get = if with_get {
         format!("get = [\"{}\"]\n", fixture.path("get.sh").display())
     } else {
         String::new()
     };
     fixture.config(&format!(
-        "[tracker.\"{}\"]\nlist = [\"{}\"]\n{get}",
+        "[tracker.\"{}\"]\nlist = [\"{}\"]\nlink = [\"{}\"]\n{get}",
         fixture.root.join("acme").display(),
         fixture.path("list.sh").display(),
+        fixture.path("link.sh").display(),
     ));
     assert!(fixture.run(&["new", "acme"]).status.success());
     fixture.node(
@@ -447,4 +455,86 @@ fn a_task_no_list_prints_is_found_by_its_id() {
     let asks = fixture.json(&["asks", "--json"]);
     assert_eq!(asks["asks"][0]["links"][0]["state"], "todo");
     assert_eq!(asks["asks"][0]["links"][0]["title"], "An old one");
+}
+
+/// A task a node is on that no list prints is still in the project view,
+/// as unowned, with who works on it.
+#[test]
+fn an_assigned_task_no_list_prints_is_unowned_in_the_project_view() {
+    let fixture = tracked(true);
+    assert!(
+        fixture
+            .run(&["node", "assign", "acme", "t-0002", "--task", "OLD-9"])
+            .status
+            .success()
+    );
+    let listed = fixture.json(&["task", "list", "acme", "--json"]);
+    let unowned = listed["unowned"].as_array().unwrap();
+    assert_eq!(unowned.len(), 1, "{listed}");
+    assert_eq!(
+        (unowned[0]["id"].clone(), unowned[0]["owner_node"].clone()),
+        (json!("OLD-9"), json!(""))
+    );
+    assert_eq!(unowned[0]["assignees"][0]["id"], "t-0002");
+    let text = fixture.text(&["task", "list", "acme"]);
+    assert!(text.contains("## unowned\n"), "{text}");
+    assert!(text.contains("An old one"), "{text}");
+    let shown = fixture.json(&["project", "show", "acme", "--json"]);
+    assert_eq!(shown["project"]["task_owners"]["unowned"][0]["id"], "OLD-9");
+}
+
+/// Without a tracker, a title a node is on that its list no longer has
+/// (renamed or deleted) is unowned under that title.
+#[test]
+fn a_task_title_no_list_has_any_more_is_unowned() {
+    let fixture = two_coordinators();
+    fixture.write("nodes/t-0001/TASKS.md", "## Now\n- [ ] Refunds · t-0004\n");
+    let listed = fixture.json(&["task", "list", "acme", "--json"]);
+    let titles: Vec<&str> = listed["unowned"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Old thing", "Charge cards"], "{listed}");
+    assert_eq!(listed["unowned"][1]["assignees"][0]["id"], "t-0003");
+}
+
+/// `node assign` tells the tracker's `link` the node started on the task, as
+/// a start does, so a resolve later is never the first it hears; `unassign`
+/// takes what `assign` took; a `link` drops every cached list.
+#[test]
+fn node_assign_tells_link_and_unassign_takes_the_same_keys() {
+    let fixture = tracked(false);
+    fixture.json(&["task", "list", "acme", "--node", "t-0001", "--json"]);
+    let lists = |f: &Fixture| {
+        f.calls()
+            .iter()
+            .filter(|c| c.starts_with("list t-0001"))
+            .count()
+    };
+    assert_eq!(lists(&fixture), 1);
+    assert!(
+        fixture
+            .run(&["node", "assign", "acme", "t-0002", "--task", "Hire"])
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .calls()
+            .contains(&"link G-1 t-0002 started".to_string()),
+        "{:?}",
+        fixture.calls()
+    );
+    fixture.json(&["task", "list", "acme", "--node", "t-0001", "--json"]);
+    assert_eq!(lists(&fixture), 2, "the scoped cache was dropped");
+    let off = fixture.run(&["node", "unassign", "acme", "t-0002", "--task", "Hire"]);
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    let shown = fixture.json(&["node", "show", "acme", "t-0002", "--json"]);
+    assert_eq!(shown["thread"]["tasks"], json!(["B-1"]));
 }
