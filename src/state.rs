@@ -188,6 +188,24 @@ pub struct Node {
     /// A coordinator's status file while it exists; `None` for a thread and
     /// in a model written before it.
     pub status_file: Option<StatusCard>,
+    /// A coordinator's tasks (`task_views::node_rows`), once the project
+    /// uses more than the root's list; empty otherwise and for a thread.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskLine>,
+}
+
+/// One task on a coordinator's card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TaskLine {
+    pub title: String,
+    /// The tracker's id, empty for a TASKS.md task.
+    pub id: String,
+    /// `own`, or `assigned` for a task of another list it is on.
+    pub via: String,
+    /// Who works on it: `delegated: t-0001 (t-0003)`, `t-0004`, or empty.
+    pub who: String,
+    pub delegated: bool,
 }
 
 /// A node's verdict in the state file. `issues` is written as `failed` with
@@ -263,6 +281,8 @@ pub struct Card<'a> {
     /// In tree order.
     pub children: Vec<&'a Node>,
     pub prs: Vec<(&'a Node, &'a Pr)>,
+    /// Its tasks, own first.
+    pub tasks: &'a [TaskLine],
 }
 
 impl Card<'_> {
@@ -398,6 +418,7 @@ impl ProjectView {
             asks,
             children,
             prs,
+            tasks: &node.tasks,
         })
     }
 }
@@ -574,6 +595,7 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         }
         let mut view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
         add_status_files(&mut view, &project, &asks::Records::load(ctx, &project));
+        add_tasks(ctx, &mut view, &project);
         for node in view.coordinators.iter().chain(&view.threads) {
             if !node.workspace_id.is_empty() && node.machine.is_empty() {
                 owners.insert(
@@ -822,6 +844,24 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
     }
 }
 
+/// Each coordinator's tasks, from what is cached: the popup runs nothing.
+fn add_tasks(ctx: &Ctx, view: &mut ProjectView, project: &Project) {
+    for (id, rows) in crate::task_views::coordinator_rows(ctx, project) {
+        if let Some(node) = view.coordinators.iter_mut().find(|c| c.id == id) {
+            node.tasks = rows
+                .iter()
+                .map(|row| TaskLine {
+                    title: row.task.title.clone(),
+                    id: row.task.id.clone(),
+                    via: row.via.into(),
+                    who: row.who(),
+                    delegated: row.delegated(),
+                })
+                .collect();
+        }
+    }
+}
+
 /// Each coordinator's status file: its card, and its asks confirmed
 /// against `records`.
 fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::Records) {
@@ -918,9 +958,25 @@ mod tests {
     fn each_coordinator_carries_its_tasks_once_the_project_uses_them() {
         let world = World::new();
         let project = world.project("demo", "a.sock");
-        node_record(&project, "t-0001", "root", NodeRole::Coordinator, Group::Working);
-        node_record(&project, "t-0002", "t-0001", NodeRole::Worker, Group::Working);
-        std::fs::write(project.dir().join("TASKS.md"), "## Now\n- [ ] Ship billing\n").unwrap();
+        node_record(
+            &project,
+            "t-0001",
+            "root",
+            NodeRole::Coordinator,
+            Group::Working,
+        );
+        node_record(
+            &project,
+            "t-0002",
+            "t-0001",
+            NodeRole::Worker,
+            Group::Working,
+        );
+        std::fs::write(
+            project.dir().join("TASKS.md"),
+            "## Now\n- [ ] Ship billing\n",
+        )
+        .unwrap();
         let ctx = world.ctx();
         let view = || {
             let mut view = project_view(&project, &[], &Default::default());
@@ -935,7 +991,11 @@ mod tests {
         let root = &view.node("root").unwrap().tasks;
         assert_eq!(root.len(), 1);
         assert_eq!(
-            (root[0].title.as_str(), root[0].via.as_str(), root[0].who.as_str()),
+            (
+                root[0].title.as_str(),
+                root[0].via.as_str(),
+                root[0].who.as_str()
+            ),
             ("Ship billing", "own", "delegated: t-0001 (t-0002)")
         );
         let node = &view.node("t-0001").unwrap().tasks;
