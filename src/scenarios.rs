@@ -6932,11 +6932,14 @@ fn an_idle_agent_with_its_own_background_command_has_not_stopped() {
 /// anything is created.
 #[test]
 fn a_node_starts_on_several_tasks_with_its_task_scope() {
-    let (world, project) = tracked_world(ok(""));
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    // The first rule that matches answers.
     world.runner.on(
         "tracker-list",
         ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research"},{"id":"TRK-2","title":"Write up"}]}"#),
     );
+    track(&world, &project, ok(""));
     *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
     let folder = project.dir().join("threads/t-0001");
     world.runner.on_fn(
