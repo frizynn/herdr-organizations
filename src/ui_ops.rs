@@ -159,8 +159,15 @@ pub fn go_to_pane(ctx: &Ctx, slug: &str, id: &str) -> Result<String> {
         new: false,
         here: false,
     };
-    coordinator::open_quiet(ctx, slug, &options)
-        .context("could not open the project coordinator")?;
+    // A project tied to its session with no root coordinator (its record
+    // names no pane) gets one only when asked for `root`.
+    let organizer = project
+        .coordinator()
+        .is_some_and(|record| record.pane_id.is_empty() && Path::new(&record.socket).exists());
+    if id == ROOT_ID || !organizer {
+        coordinator::open_quiet(ctx, slug, &options)
+            .context("could not open the project coordinator")?;
+    }
     let project = Project::load(&ctx.root, slug)?;
     let record = project
         .coordinator()
