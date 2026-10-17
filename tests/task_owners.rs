@@ -457,6 +457,20 @@ fn a_task_no_list_prints_is_found_by_its_id() {
     assert_eq!(asks["asks"][0]["links"][0]["title"], "An old one");
 }
 
+/// A decision that links a task no list prints reads its state too.
+#[test]
+fn a_decision_links_a_task_found_by_its_id() {
+    let fixture = tracked(true);
+    fixture.write(
+        "STATUS.md",
+        "# Status\n## Needs your decision\n- Keep the old one? : yes or no (task:OLD-9)\n",
+    );
+    fixture.text(&["context", "acme", "--peek"]);
+    let asks = fixture.json(&["asks", "--json"]);
+    assert_eq!(asks["decisions"][0]["links"][0]["state"], "todo");
+    assert_eq!(asks["decisions"][0]["links"][0]["title"], "An old one");
+}
+
 /// A task a node is on that no list prints is still in the project view,
 /// as unowned, with who works on it.
 #[test]
