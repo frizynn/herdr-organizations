@@ -104,7 +104,7 @@ Every thread is in one group, shown in the sidebar, the popup and the digest, ne
 1. **Waiting on you** (`needs you`): a failed start, a pane that is gone before a report, a launch stuck on a dialog, the agent blocked on a question or permission for 30 seconds, or the agent's own report `Waiting for you` while it is not working.
 2. **Ready for review** (`review`): a report you haven't acknowledged, or a report with an open pull request, while the agent is not working.
 3. **Landing**: an open pull request that is approved.
-4. **Working**: the agent works, a launch is under way, or the agent reported progress under 100% in the last five minutes.
+4. **Working**: the agent works, a launch is under way, or the agent reported progress under 100% in the last five minutes. A local agent that was working and goes idle while a command it started still runs in the background stays Working, so nothing says it stopped without a new report: the ticker asks Herdr for the pane's foreground process group (`pane process-info`, the agent and helpers such as MCP servers) and `ps` for its descendants, and a descendant in a process group of its own, which is how a harness runs a background shell, is that command. The ticker checks this; `thread list` and the other live views show the harness's idle meanwhile. When the command ends the agent usually starts working again, and if it stays idle the stop is named then.
 5. **Idle**, then **Resolved**.
 
 Threads idle for `auto_resolve_days` are resolved (and cleaned) after a final copy home.

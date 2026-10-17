@@ -6898,17 +6898,19 @@ fn an_idle_agent_with_its_own_background_command_has_not_stopped() {
         "90 1 90\n100 90 100\n101 100 100\n200 100 200\n201 200 200\n300 1 300\n".to_string(),
     ));
     let table = ps.clone();
-    world.runner.on_fn(
-        |cmd| cmd.program == "ps",
-        move |_| Ok(ok(&table.borrow())),
-    );
+    world
+        .runner
+        .on_fn(|cmd| cmd.program == "ps", move |_| Ok(ok(&table.borrow())));
     let ctx = world.ctx();
     let mut memory = Memory::new(&ctx);
     for _ in 0..3 {
         ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
         idle_for_a_minute(&project);
     }
-    assert_eq!(thread::load(&project, "t-0001").unwrap().last_group, "working");
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().last_group,
+        "working"
+    );
     assert!(items_about(&project, "t-0001").is_empty());
     assert!(nudges(&world).is_empty());
 

@@ -357,6 +357,26 @@ impl<'a> Herdr<'a> {
         self.call_as(&["pane", "list", "--workspace", workspace], "panes")
     }
 
+    /// The pane's foreground process group and the pids in it: the agent
+    /// and what runs in its group (`pane process-info`, herdr 0.9.3+).
+    pub fn pane_foreground(&self, pane: &str) -> Result<(u32, Vec<u32>), HerdrError> {
+        #[derive(Deserialize)]
+        struct Process {
+            pid: u32,
+        }
+        #[derive(Deserialize)]
+        struct Info {
+            foreground_process_group_id: u32,
+            #[serde(default)]
+            foreground_processes: Vec<Process>,
+        }
+        let info: Info = self.call_as(&["pane", "process-info", "--pane", pane], "process_info")?;
+        Ok((
+            info.foreground_process_group_id,
+            info.foreground_processes.iter().map(|p| p.pid).collect(),
+        ))
+    }
+
     pub fn pane_get(&self, pane: &str) -> Result<Pane, HerdrError> {
         self.call_as(&["pane", "get", pane], "pane")
     }
