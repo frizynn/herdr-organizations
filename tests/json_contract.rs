@@ -1709,3 +1709,45 @@ fn asks_answer_is_available_and_refuses_a_coordinator_that_does_not_run() {
             .exists()
     );
 }
+
+/// The lines under `## Needs your decision` are published with their line
+/// and links, in the grammar of the asks, in the status file documents and
+/// in `asks --json`; `needs_decision` stays the plain lines it was.
+#[test]
+fn decisions_carry_their_line_and_links_like_the_asks() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\n## Asked\n## Needs your decision\n- Pilot : yes or no (t-0001, https://example.com/plan)\n- Budget : A or B\n",
+    );
+    let listed = fixture.json(&["list", "--json"]);
+    let status = &listed["projects"][0]["status_file"];
+    assert_eq!(
+        status["needs_decision"],
+        json!(["Pilot : yes or no (t-0001, https://example.com/plan)", "Budget : A or B"])
+    );
+    let first = &status["decisions"][0];
+    assert_eq!((first["line"].clone(), first["text"].clone()), (json!(4), json!("Pilot : yes or no")));
+    let kinds: Vec<&str> = first["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["thread", "page"]);
+    assert_eq!(first["links"][0]["state"], "ready-for-review");
+    assert_eq!(status["decisions"][1]["links"], json!([]));
+
+    let asks = fixture.json(&["asks", "--project", "demo", "--json"]);
+    assert_eq!(asks["asks"], json!([]));
+    let decisions = asks["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0]["project"], "demo");
+    assert_eq!(decisions[0]["coordinator"], json!({"id": "root", "title": ""}));
+    assert_eq!(decisions[0]["line"], 4);
+    assert_eq!(decisions[0]["text"], "Pilot : yes or no");
+    assert_eq!(decisions[0]["links"][1]["target"], "https://example.com/plan");
+    assert_eq!(decisions[0]["actions"], json!(["answer"]));
+    assert_eq!(asks["coordinators"][0]["counts"]["decisions"], 2);
+}
