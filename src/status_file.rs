@@ -56,17 +56,21 @@ pub struct StatusJson {
     pub asks: Vec<crate::asks::Ask>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs_decision: Vec<String>,
+    /// The same lines with their line and when the user answered them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<crate::asks::Decision>,
 }
 
 impl StatusJson {
     /// With its objective, decisions and asks, each ask confirmed against
-    /// `records`.
-    pub fn confirmed(self, records: &crate::asks::Records) -> StatusJson {
-        let contents = crate::asks::read(&self.text, records);
+    /// `records`; `coordinator` (`root` or a node id) is whose file it is.
+    pub fn confirmed(self, records: &crate::asks::Records, coordinator: &str) -> StatusJson {
+        let contents = crate::asks::read(&self.text, records, coordinator);
         StatusJson {
             objective: contents.objective,
             asks: contents.asks,
             needs_decision: contents.needs_decision,
+            decisions: contents.decisions,
             ..self
         }
     }
@@ -96,6 +100,7 @@ pub fn read(path: &Path) -> Option<StatusJson> {
         objective: String::new(),
         asks: Vec::new(),
         needs_decision: Vec::new(),
+        decisions: Vec::new(),
     })
 }
 

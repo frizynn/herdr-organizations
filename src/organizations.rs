@@ -321,6 +321,18 @@ fn recorded_caller(
         .map(|record| Caller::Node(Box::new(record)))
 }
 
+/// Whether the command runs in the pane of one of the project's coordinators
+/// or local nodes, as `signed` tells them from the user's own terminal.
+pub fn called_by_coordinator(ctx: &Ctx, project: &Project) -> bool {
+    recorded_caller(
+        project,
+        thread::list(project),
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+    )
+    .is_some()
+}
+
 /// Applies the shared pane hierarchy check and returns the parent a recognized
 /// coordinator is authorized to use. `None` means this is not a known project
 /// pane, preserving manually selected parents for terminal callers.

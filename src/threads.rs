@@ -2067,8 +2067,12 @@ fn confirm_status(
     records: &std::cell::OnceCell<crate::asks::Records>,
     mut json: ThreadJson,
 ) -> ThreadJson {
+    let id = json.id.clone();
     json.status_file = json.status_file.map(|status| {
-        status.confirmed(records.get_or_init(|| crate::asks::Records::load(ctx, project)))
+        status.confirmed(
+            records.get_or_init(|| crate::asks::Records::load(ctx, project)),
+            &id,
+        )
     });
     json
 }

@@ -158,9 +158,14 @@ enum Command {
     },
     /// List what you asked every coordinator, with the state it wrote and the one its links confirm
     Asks {
+        #[command(subcommand)]
+        command: Option<AsksCommand>,
         /// Only this project's coordinators; every project that is not archived by default
         #[arg(long, value_name = "SLUG")]
         project: Option<String>,
+        /// Only this coordinator of --project: `root` or a coordinator node's id
+        #[arg(long, value_name = "ID", requires = "project")]
+        node: Option<String>,
         /// Print the versioned JSON contract (docs/json.md)
         #[arg(long)]
         json: bool,
@@ -807,6 +812,25 @@ fn read_text(file: &str) -> Result<String> {
 }
 
 #[derive(Subcommand)]
+enum AsksCommand {
+    /// Answer a line of a coordinator's status file: your text is typed into that coordinator, and the line reads answered until it changes
+    Answer {
+        slug: String,
+        /// `root` or a coordinator node's id
+        coordinator: String,
+        /// The line of its status file: an ask under `## Asked` or a line under `## Needs your decision`
+        #[arg(long)]
+        line: usize,
+        /// Your answer; `-` reads standard input
+        #[arg(long, value_name = "FILE")]
+        text_file: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum RoutineCommand {
     /// Enable or disable a routine
     Toggle {
@@ -1194,7 +1218,37 @@ pub fn run() -> Result<()> {
             refresh,
             check,
         } => crate::assign::run(&ctx, &slug, refresh, check.as_deref()),
-        Command::Asks { project, json } => crate::asks::print(&ctx, project.as_deref(), json),
+        Command::Asks {
+            command: None,
+            project,
+            node,
+            json,
+        } => crate::asks::print(&ctx, project.as_deref(), node.as_deref(), json),
+        Command::Asks {
+            command:
+                Some(AsksCommand::Answer {
+                    slug,
+                    coordinator,
+                    line,
+                    text_file,
+                    json,
+                }),
+            ..
+        } => {
+            let answered =
+                crate::asks::answer(&ctx, &slug, &coordinator, line, &read_text(&text_file)?)?;
+            if json {
+                return threads::print_json(&serde_json::json!({
+                    "schema_version": threads::JSON_SCHEMA_VERSION,
+                    "project": slug,
+                    "coordinator": coordinator,
+                    "line": line,
+                    "answered_at": answered.answered_at,
+                }));
+            }
+            println!("sent your answer to line {line} of {coordinator}'s status file");
+            Ok(())
+        }
         Command::Overview { slug, wait, json } => {
             if json {
                 overview::run_json(&ctx, slug.as_deref())

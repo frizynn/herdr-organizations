@@ -723,6 +723,14 @@ fn sync_label(herdr: &Herdr, workspace_id: &str, label: &str) {
 /// `coordinator prompt`: a sentence to a coordinator (the popup's task keys
 /// use it; the coordinator stays the only writer of TASKS.md).
 pub fn prompt(ctx: &Ctx, slug: &str, text: &str) -> Result<()> {
+    let (pane, state) = send(ctx, slug, text)?;
+    println!("sent to the coordinator in pane {pane} (agent was {state})");
+    Ok(())
+}
+
+/// Types `text` into the project's running coordinator: its pane and the
+/// state its agent was in. Refused while none can take a prompt.
+pub fn send(ctx: &Ctx, slug: &str, text: &str) -> Result<(String, String)> {
     let project = Project::load(&ctx.root, slug)?;
     let text = text.trim();
     if text.is_empty() {
@@ -746,11 +754,7 @@ pub fn prompt(ctx: &Ctx, slug: &str, text: &str) -> Result<()> {
     view.herdr
         .agent_prompt(&target.pane_id, text)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    println!(
-        "sent to the coordinator in pane {} (agent was {})",
-        target.pane_id, target.agent_status
-    );
-    Ok(())
+    Ok((target.pane_id.clone(), target.agent_status.clone()))
 }
 
 pub fn context(ctx: &Ctx, slug: &str, peek: bool) -> Result<()> {

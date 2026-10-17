@@ -1516,9 +1516,7 @@ fn asks_filter_by_coordinator_and_count_each_coordinators_rows() {
         "nodes/t-0001/STATUS.md",
         "# Status\n## Asked\n- [working] Copy fix : landing it (t-0002)\n- [open] Docs : next\n",
     );
-    let counts = |waits: u64, mismatch: u64, progress: u64, done: u64| {
-        json!({"waits_on_you": waits, "does_not_close": mismatch, "in_progress": progress, "done": done, "unknown": 0})
-    };
+    let counts = |waits: u64, mismatch: u64, progress: u64, done: u64| json!({"waits_on_you": waits, "does_not_close": mismatch, "in_progress": progress, "done": done, "unknown": 0});
     let all = fixture.json(&["asks", "--project", "demo", "--json"]);
     assert_eq!(
         all["coordinators"],
@@ -1587,5 +1585,9 @@ fn asks_answer_is_available_and_refuses_a_coordinator_that_does_not_run() {
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
-    assert!(!Path::new(&fixture.dir()).join(".state/answers.json").exists());
+    assert!(
+        !Path::new(&fixture.dir())
+            .join(".state/answers.json")
+            .exists()
+    );
 }

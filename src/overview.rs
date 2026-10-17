@@ -238,8 +238,12 @@ pub fn project_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> ProjectJson {
         icon: settings.icon,
         tone: settings.tone,
         usage: crate::usage::load(project).usage(crate::organizations::ROOT_ID),
-        status_file: crate::status_file::read(&crate::status_file::root(project))
-            .map(|status| status.confirmed(&crate::asks::Records::load(ctx, project))),
+        status_file: crate::status_file::read(&crate::status_file::root(project)).map(|status| {
+            status.confirmed(
+                &crate::asks::Records::load(ctx, project),
+                crate::organizations::ROOT_ID,
+            )
+        }),
         coordinator: coordinator_json(project),
     }
 }

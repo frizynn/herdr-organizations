@@ -6840,7 +6840,9 @@ fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
         .collect();
     assert_eq!(
         sent,
-        ["[from the user, answering your STATUS.md line 3: \"Pilot or not : yes or no\"] Yes, pilot it."]
+        [
+            "[from the user, answering your STATUS.md line 3: \"Pilot or not : yes or no\"] Yes, pilot it."
+        ]
     );
     let read = || {
         let records = crate::asks::Records::load(&ctx, &project);
@@ -6853,7 +6855,10 @@ fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
     crate::asks::answer(&ctx, "demo", "root", 5, "B").unwrap();
     let decisions = read().decisions;
     assert_eq!(decisions.len(), 1);
-    assert_eq!((decisions[0].line, decisions[0].text.as_str()), (5, "Budget : A or B"));
+    assert_eq!(
+        (decisions[0].line, decisions[0].text.as_str()),
+        (5, "Budget : A or B")
+    );
     assert!(!decisions[0].answered_at.is_empty());
 
     for line in [1, 2, 9] {

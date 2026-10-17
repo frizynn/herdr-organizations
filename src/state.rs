@@ -235,7 +235,8 @@ pub struct StatusCard {
     /// RFC 3339 modification time.
     pub updated: String,
     pub objective: String,
-    /// The lines under `## Needs your decision`.
+    /// The lines under `## Needs your decision` the user has not answered
+    /// with `asks answer` since the coordinator wrote them.
     pub needs_decision: Vec<String>,
 }
 
@@ -287,7 +288,7 @@ impl Card<'_> {
             .chain(
                 self.asks
                     .iter()
-                    .filter(|a| a.state == asks::State::NeedsDecision)
+                    .filter(|a| a.state == asks::State::NeedsDecision && a.answered_at.is_empty())
                     .map(|a| a.said()),
             )
             .collect()
@@ -835,7 +836,12 @@ fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::R
                 path: status.path,
                 updated: status.updated,
                 objective: status.objective,
-                needs_decision: status.needs_decision,
+                needs_decision: status
+                    .decisions
+                    .into_iter()
+                    .filter(|d| d.answered_at.is_empty())
+                    .map(|d| d.text)
+                    .collect(),
             });
         }
         view.asks.extend(status.asks.into_iter().map(|ask| AskView {
