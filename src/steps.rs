@@ -757,6 +757,15 @@ pub fn nudge_parent_coordinators(
             state.parent_updates.remove(&parent_id);
             continue;
         }
+        // A child `node move` put under another parent since its update was
+        // queued is no longer this parent's to hear about.
+        if let Some(updates) = state.parent_updates.get_mut(&parent_id) {
+            updates.retain(|child, _| {
+                records.iter().any(|record| {
+                    &record.id == child && crate::organizations::parent_id(record) == parent_id
+                })
+            });
+        }
         let line = state
             .parent_updates
             .get(&parent_id)

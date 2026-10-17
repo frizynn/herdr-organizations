@@ -89,11 +89,13 @@ pub fn adopt(ctx: &Ctx, slug: &str, args: &AdoptArgs) -> Result<Thread> {
         ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
     );
     let parent_id = match &args.parent {
-        Some(parent) => parent.clone(),
+        Some(parent) => {
+            organizations::authorize_creator(&project, caller_pane, caller_socket, parent)?;
+            parent.clone()
+        }
         None => organizations::creator_parent(&project, caller_pane, caller_socket)?
             .unwrap_or_else(|| organizations::ROOT_ID.into()),
     };
-    organizations::authorize_creator(&project, caller_pane, caller_socket, &parent_id)?;
     let request = NodeRequest {
         parent_id,
         role: args.role,
