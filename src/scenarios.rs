@@ -6876,3 +6876,50 @@ fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
     assert_eq!(after.asks[0].answered_at, "", "the line changed");
     assert!(!after.decisions[0].answered_at.is_empty());
 }
+
+// ------------------------------------------------- a stop with work running
+
+/// An agent that goes idle while a command it started still runs in the
+/// background (a descendant of the agent in a process group of its own, as
+/// a harness's background shell is) has not stopped: the thread stays
+/// Working and nothing says it stopped. Once that command ends, the stop
+/// is named as before.
+#[test]
+fn an_idle_agent_with_its_own_background_command_has_not_stopped() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    world.runner.on(
+        "process-info",
+        ok(r#"{"result":{"process_info":{"pane_id":"w2:p1","shell_pid":90,"foreground_process_group_id":100,"foreground_processes":[{"pid":100,"name":"claude"},{"pid":101,"name":"mcp"}]}}}"#),
+    );
+    // pid ppid pgid: the agent, its helper in its own group, a background
+    // shell and what it runs, and an unrelated process.
+    let ps = Rc::new(RefCell::new(
+        "90 1 90\n100 90 100\n101 100 100\n200 100 200\n201 200 200\n300 1 300\n".to_string(),
+    ));
+    let table = ps.clone();
+    world.runner.on_fn(
+        |cmd| cmd.program == "ps",
+        move |_| Ok(ok(&table.borrow())),
+    );
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        idle_for_a_minute(&project);
+    }
+    assert_eq!(thread::load(&project, "t-0001").unwrap().last_group, "working");
+    assert!(items_about(&project, "t-0001").is_empty());
+    assert!(nudges(&world).is_empty());
+
+    *ps.borrow_mut() = "90 1 90\n100 90 100\n101 100 100\n300 1 300\n".to_string();
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(thread::load(&project, "t-0001").unwrap().last_group, "idle");
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [(
+            "stopped without a new report".to_string(),
+            Audience::Coordinator
+        )]
+    );
+}
