@@ -275,15 +275,16 @@ pub fn prepare_node(project: &Project, request: &NodeRequest) -> Result<(bool, A
 }
 
 /// When the caller is a known project pane, keep its child creation beneath
-/// itself. Calls from ordinary terminal sessions remain manually usable.
+/// itself, and return its id. Calls from ordinary terminal sessions remain
+/// manually usable (`None`).
 pub fn authorize_creator(
     project: &Project,
     caller_pane: &str,
     caller_socket: &str,
     requested_parent: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let Some(creator_id) = creator_parent(project, caller_pane, caller_socket)? else {
-        return Ok(());
+        return Ok(None);
     };
     let requested_parent = if requested_parent.is_empty() {
         ROOT_ID
@@ -295,7 +296,7 @@ pub fn authorize_creator(
             "coordinator `{creator_id}` may create children only beneath itself, not `{requested_parent}`"
         );
     }
-    Ok(())
+    Ok(Some(creator_id))
 }
 
 /// A pane this project recorded: its root coordinator's, or a local node's.
@@ -426,21 +427,42 @@ pub fn requested_can_spawn(request: &NodeRequest) -> bool {
         .unwrap_or(request.role == NodeRole::Coordinator)
 }
 
+/// The parent a request names, root when it names none.
+fn requested_parent(request: &NodeRequest) -> &str {
+    if request.parent_id.is_empty() {
+        ROOT_ID
+    } else {
+        &request.parent_id
+    }
+}
+
+/// The checks every new node passes, started or adopted: its parent may
+/// spawn and a worker may not. Returns its spawn permission.
+fn check_placement(records: &[Thread], request: &NodeRequest) -> Result<bool> {
+    validate_parent(records, requested_parent(request))?;
+    let can_spawn = requested_can_spawn(request);
+    if request.role == NodeRole::Worker && can_spawn {
+        bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
+    }
+    Ok(can_spawn)
+}
+
+/// `check_placement` against the records on disk, for refusing an adoption
+/// before anything is asked of Herdr; `adopt_node` checks again under the lock.
+pub fn check_adoption(project: &Project, request: &NodeRequest) -> Result<()> {
+    check_rules_size(&request.rules)?;
+    let records = thread::list(project);
+    validate_tree(&records)?;
+    check_placement(&records, request).map(|_| ())
+}
+
 fn prepare_node_from(
     project: &Project,
     records: &[Thread],
     request: &NodeRequest,
 ) -> Result<(bool, AgentProfile)> {
-    let parent_id = if request.parent_id.is_empty() {
-        ROOT_ID
-    } else {
-        &request.parent_id
-    };
-    validate_parent(records, parent_id)?;
-    let can_spawn = requested_can_spawn(request);
-    if request.role == NodeRole::Worker && can_spawn {
-        bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
-    }
+    let parent_id = requested_parent(request);
+    let can_spawn = check_placement(records, request)?;
 
     let mut profile = if parent_id == ROOT_ID {
         root_profile(project, request.role)?
@@ -547,11 +569,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.repo = args.repo.clone();
         record.machine = args.machine.clone();
         record.base = args.base.clone();
-        record.parent_id = if args.request.parent_id.is_empty() {
-            ROOT_ID.into()
-        } else {
-            args.request.parent_id.clone()
-        };
+        record.parent_id = requested_parent(&args.request).into();
         record.role = args.request.role;
         record.can_spawn = can_spawn;
         record.agent = profile.harness.clone();
@@ -570,7 +588,48 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         }
         .into();
     })?;
+    finish_node(project, &record, &args.request, &args.task, true)?;
+    Ok(record)
+}
 
+/// Records a pane that already runs an agent as a node under the parent
+/// `request` names, with the same checks as `create_node` under the same
+/// lock. `fill` sets what the pane says about itself. The node gets a scope
+/// only when it has rules or coordinates, so a plain adoption writes the
+/// files it always did.
+pub fn adopt_node(
+    project: &Project,
+    request: &NodeRequest,
+    task: &str,
+    fill: impl FnOnce(&mut Thread),
+) -> Result<Thread> {
+    check_rules_size(&request.rules)?;
+    let _lock = project.lock()?;
+    let records = thread::list(project);
+    validate_tree(&records)?;
+    let can_spawn = check_placement(&records, request)?;
+    let record = thread::allocate_locked(project, |record| {
+        fill(record);
+        record.kind = Kind::Adopted;
+        record.parent_id = requested_parent(request).into();
+        record.role = request.role;
+        record.can_spawn = can_spawn;
+    })?;
+    let scoped = !request.rules.trim().is_empty() || request.role == NodeRole::Coordinator;
+    finish_node(project, &record, request, task, scoped)?;
+    Ok(record)
+}
+
+/// What a new node's record comes with, written while the caller holds the
+/// lock: its task file, its scope when `scoped`, the TASKS.md link and its
+/// status file's folder. A failure removes them and the record.
+fn finish_node(
+    project: &Project,
+    record: &Thread,
+    request: &NodeRequest,
+    task: &str,
+    scoped: bool,
+) -> Result<()> {
     let scope = node_scope_dir(project, &record.id);
     let records = project.records_dir();
     let task_path = crate::records::task(&records, &record.id);
@@ -578,25 +637,32 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope, &args.request.rules, &args.request.memory) {
-        Ok(created) => created,
-        Err(error) => {
-            thread::remove_record_locked(project, &record.id);
-            return Err(error)
-                .with_context(|| format!("could not finish creating node `{}`", record.id));
+    let nodes_created = if scoped {
+        match create_node_scope(&scope, &request.rules, &request.memory) {
+            Ok(created) => created,
+            Err(error) => {
+                thread::remove_record_locked(project, &record.id);
+                return Err(error)
+                    .with_context(|| format!("could not finish creating node `{}`", record.id));
+            }
         }
+    } else {
+        false
     };
     // The task line is linked last, still under the lock, so a failure leaves
     // neither a record nor a line naming one.
-    let written = crate::records::write(&records, &task_path, args.task.as_bytes()).and_then(
-        |()| match &args.request.from_task {
-            Some(title) if args.request.task_id.is_empty() => link_task(project, title, &record.id),
+    let written =
+        crate::records::write(&records, &task_path, task.as_bytes()).and_then(|()| match &request
+            .from_task
+        {
+            Some(title) if request.task_id.is_empty() => link_task(project, title, &record.id),
             _ => Ok(()),
-        },
-    );
+        });
     if let Err(error) = written {
         let _ = std::fs::remove_file(&task_path);
-        let _ = std::fs::remove_dir_all(&scope);
+        if scoped {
+            let _ = std::fs::remove_dir_all(&scope);
+        }
         if nodes_created && let Some(nodes) = scope.parent() {
             let _ = std::fs::remove_dir(nodes);
         }
@@ -612,7 +678,82 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
             let _ = crate::records::make_folder(&records, folder);
         }
     }
-    Ok(record)
+    Ok(())
+}
+
+/// `node move`: puts node `id` and its subtree under `parent`, with the
+/// parent checks of `node start`, under the lock. A known pane may only move
+/// nodes beneath itself, and only to itself, as it only creates there. Only
+/// `parent_id` changes: nothing is restarted, and the node's next brief or
+/// restart composes the new ancestors' context.
+pub fn move_node(ctx: &Ctx, project: &Project, id: &str, parent: &str) -> Result<Thread> {
+    let caller = authorize_creator(
+        project,
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+        parent,
+    )?;
+    let parent = if parent.is_empty() { ROOT_ID } else { parent };
+    let _lock = project.lock()?;
+    let records = thread::list(project);
+    let by_id = validate_tree(&records)?;
+    if !by_id.contains_key(id) {
+        bail!("node `{id}` does not exist");
+    }
+    if let Some(caller) = caller
+        && caller != ROOT_ID
+        && (id == caller || !within(&by_id, id, &caller))
+    {
+        bail!("coordinator `{caller}` may move only nodes beneath itself, not `{id}`");
+    }
+    validate_parent(&records, parent)?;
+    if within(&by_id, parent, id) {
+        bail!("`{id}` cannot move beneath itself or its own descendants (`{parent}` is one)");
+    }
+    thread::update_locked(project, id, |record| record.parent_id = parent.into())
+}
+
+/// Whether `node`, or one of its ancestors, is `ancestor`, in a tree
+/// `validate_tree` accepted.
+fn within(by_id: &HashMap<&str, &Thread>, node: &str, ancestor: &str) -> bool {
+    let mut current = node;
+    while current != ROOT_ID {
+        if current == ancestor {
+            return true;
+        }
+        match by_id.get(current) {
+            Some(record) => current = parent_id(record),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The nodes `node move` could put somewhere else: not resolved, and with
+/// root or a coordinator that may spawn, outside their own subtree, as a
+/// parent other than their own. Empty for a tree `validate_tree` refuses.
+pub fn movable(records: &[Thread]) -> BTreeSet<String> {
+    let Ok(by_id) = validate_tree(records) else {
+        return BTreeSet::new();
+    };
+    let parents: Vec<&str> = std::iter::once(ROOT_ID)
+        .chain(
+            records
+                .iter()
+                .filter(|record| record.role == NodeRole::Coordinator && record.can_spawn)
+                .map(|record| record.id.as_str()),
+        )
+        .collect();
+    records
+        .iter()
+        .filter(|record| record.status != Status::Resolved)
+        .filter(|record| {
+            parents
+                .iter()
+                .any(|&parent| parent != parent_id(record) && !within(&by_id, parent, &record.id))
+        })
+        .map(|record| record.id.clone())
+        .collect()
 }
 
 /// Appends ` · <id>` to the TASKS.md task `title`, read again here: the
@@ -1178,6 +1319,20 @@ fn read_memory_files(
         ));
     }
     Ok(output)
+}
+
+/// The first lines of the brief of an adopted coordinator that may spawn:
+/// it was already at work, carries on, and its agents become its children.
+/// Fixed words, so nothing the agent said reaches its brief. Empty for every
+/// other node.
+pub fn adopted_preface(record: &Thread, command_prefix: &str, slug: &str) -> String {
+    if record.kind != Kind::Adopted || !record.is_spawning_coordinator() {
+        return String::new();
+    }
+    format!(
+        "You were already working in this pane before it joined this project as coordinator node `{}`. Carry on with what you had in progress. From now on the agents you run are your child nodes: adopt each one that is already running with `{command_prefix} node adopt {slug} --pane <pane id> --title \"Short title\"`, which places it under you, and start new ones with `node start` as described below. Keep your state in your status file, not in chat.\n\n",
+        record.id
+    )
 }
 
 pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> String {
@@ -2510,5 +2665,242 @@ mod tests {
         assert!(!first.can_spawn);
         assert_eq!(std::fs::read(path).unwrap(), before);
         assert_eq!(tree(&project).unwrap()[0].thread.id, "t-0001");
+    }
+
+    fn tab_node(project: &Project, title: &str, request: NodeRequest) -> Thread {
+        create_node(
+            project,
+            &CreateNode {
+                request,
+                title: title.into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn calling_from<'a>(world: &'a World, env: &'a Env) -> Ctx<'a> {
+        Ctx { env, ..world.ctx() }
+    }
+
+    /// `node move` changes the parent and nothing else; the node's next
+    /// brief composes the new parent's instructions instead of the old one's.
+    #[test]
+    fn moving_a_node_changes_only_its_parent_and_its_next_briefs_context() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let ctx = world.ctx();
+        let area_a = tab_node(&project, "A", request(ROOT_ID, NodeRole::Coordinator));
+        let area_b = tab_node(&project, "B", request(ROOT_ID, NodeRole::Coordinator));
+        let worker = tab_node(&project, "W", request(&area_a.id, NodeRole::Worker));
+        set_node_rules(&project, &area_a.id, "A-RULES").unwrap();
+        set_node_rules(&project, &area_b.id, "B-RULES").unwrap();
+
+        let moved = move_node(&ctx, &project, &worker.id, &area_b.id).unwrap();
+        assert_eq!(moved.parent_id, area_b.id);
+        assert_eq!(
+            Thread {
+                updated: worker.updated.clone(),
+                ..moved.clone()
+            },
+            Thread {
+                parent_id: area_b.id.clone(),
+                ..worker.clone()
+            }
+        );
+        assert_eq!(thread::load(&project, &worker.id).unwrap(), moved);
+        let context = scoped_context(&project, &moved).unwrap();
+        assert!(context.instructions.contains("B-RULES"), "{context:?}");
+        assert!(!context.instructions.contains("A-RULES"), "{context:?}");
+
+        let back = move_node(&ctx, &project, &worker.id, ROOT_ID).unwrap();
+        assert_eq!(back.parent_id, ROOT_ID);
+        // A coordinator moves with its subtree.
+        let child = tab_node(&project, "C", request(&area_a.id, NodeRole::Worker));
+        move_node(&ctx, &project, &area_a.id, &area_b.id).unwrap();
+        let depths: Vec<(String, usize)> = tree(&project)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.thread.id, entry.depth))
+            .collect();
+        assert_eq!(
+            depths,
+            [
+                (area_b.id.clone(), 1),
+                (area_a.id.clone(), 2),
+                (child.id.clone(), 3),
+                (worker.id.clone(), 1)
+            ]
+        );
+        assert_eq!(world.runner.calls.borrow().len(), 0);
+    }
+
+    /// The parent checks of `node start`, a node under itself or one of its
+    /// descendants, and callers that may not create there change nothing.
+    #[test]
+    fn moving_refuses_what_node_start_refuses_and_cycles() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let socket = project.coordinator().unwrap().socket;
+        let area = tab_node(&project, "Area", request(ROOT_ID, NodeRole::Coordinator));
+        let sub = tab_node(&project, "Sub", request(&area.id, NodeRole::Coordinator));
+        let leaf = tab_node(
+            &project,
+            "Leaf",
+            NodeRequest {
+                can_spawn: Some(false),
+                ..request(ROOT_ID, NodeRole::Coordinator)
+            },
+        );
+        let worker = tab_node(&project, "Worker", request(ROOT_ID, NodeRole::Worker));
+        thread::update(&project, &area.id, |t| t.pane_id = "w6:p1".into()).unwrap();
+        thread::update(&project, &worker.id, |t| t.pane_id = "w7:p1".into()).unwrap();
+        let before = thread::list(&project);
+        let plain = Env::for_test(world.home.path(), &[]);
+        let from_area = Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w6:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let from_worker = Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w7:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let cases: [(&Env, &str, &str, &str); 8] = [
+            (
+                &plain,
+                &worker.id,
+                &leaf.id,
+                "does not have permission to spawn children",
+            ),
+            (
+                &plain,
+                &leaf.id,
+                &worker.id,
+                "worker node `t-0004` cannot spawn children",
+            ),
+            (
+                &plain,
+                &worker.id,
+                "t-0099",
+                "parent node `t-0099` does not exist",
+            ),
+            (&plain, "t-0099", ROOT_ID, "t-0099"),
+            (
+                &plain,
+                &area.id,
+                &area.id,
+                "cannot move beneath itself or its own descendants",
+            ),
+            (
+                &plain,
+                &area.id,
+                &sub.id,
+                "cannot move beneath itself or its own descendants",
+            ),
+            (
+                &from_worker,
+                &leaf.id,
+                ROOT_ID,
+                "worker nodes cannot create children",
+            ),
+            (
+                &from_area,
+                &worker.id,
+                &leaf.id,
+                "coordinator `t-0001` may create children only beneath itself, not `t-0003`",
+            ),
+        ];
+        for (env, id, parent, expected) in cases {
+            let error = move_node(&calling_from(&world, env), &project, id, parent)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{id} -> {parent}: {error}");
+        }
+        assert_eq!(thread::list(&project), before);
+
+        // From its own pane a coordinator moves only nodes in its subtree:
+        // not a node under root, not another coordinator or its children.
+        let other = tab_node(&project, "Other", request(ROOT_ID, NodeRole::Coordinator));
+        let theirs = tab_node(&project, "Theirs", request(&other.id, NodeRole::Worker));
+        let grandchild = tab_node(&project, "Grandchild", request(&sub.id, NodeRole::Worker));
+        let before = thread::list(&project);
+        for id in [&worker.id, &other.id, &theirs.id] {
+            let error = move_node(&calling_from(&world, &from_area), &project, id, &area.id)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "coordinator `t-0001` may move only nodes beneath itself, not `{id}`"
+                )),
+                "{error}"
+            );
+        }
+        assert_eq!(thread::list(&project), before);
+        let taken = move_node(
+            &calling_from(&world, &from_area),
+            &project,
+            &grandchild.id,
+            &area.id,
+        )
+        .unwrap();
+        assert_eq!(taken.parent_id, area.id);
+        // The user's terminal moves any node.
+        let moved = move_node(
+            &calling_from(&world, &plain),
+            &project,
+            &theirs.id,
+            &area.id,
+        )
+        .unwrap();
+        assert_eq!(moved.parent_id, area.id);
+    }
+
+    /// A tree that is already broken refuses a move and is left as it was.
+    #[test]
+    fn moving_inside_a_tree_with_a_cycle_is_refused() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let records = [
+            node("t-0001", "t-0002", NodeRole::Coordinator, true),
+            node("t-0002", "t-0001", NodeRole::Coordinator, true),
+            node("t-0003", ROOT_ID, NodeRole::Worker, false),
+        ];
+        for record in &records {
+            std::fs::write(
+                thread::record_path(&project, &record.id),
+                toml::to_string(record).unwrap(),
+            )
+            .unwrap();
+        }
+        let error = move_node(&world.ctx(), &project, "t-0003", "t-0001")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cycle"), "{error}");
+        assert_eq!(thread::load(&project, "t-0003").unwrap().parent_id, ROOT_ID);
+    }
+
+    /// `move` is offered for a node that is not resolved and has another
+    /// parent `node move` would accept.
+    #[test]
+    fn movable_nodes_are_the_ones_with_somewhere_else_to_go() {
+        let records = [
+            node("t-0001", ROOT_ID, NodeRole::Coordinator, true),
+            node("t-0002", "t-0001", NodeRole::Worker, false),
+            node("t-0003", ROOT_ID, NodeRole::Worker, false),
+            Thread {
+                status: Status::Resolved,
+                ..node("t-0004", "t-0001", NodeRole::Worker, false)
+            },
+        ];
+        // t-0001 has only root, where it is, and its own child below it.
+        assert_eq!(
+            movable(&records),
+            BTreeSet::from(["t-0002".to_string(), "t-0003".to_string()])
+        );
+        assert!(movable(&records[..1]).is_empty());
     }
 }

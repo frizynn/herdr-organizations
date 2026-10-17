@@ -1,6 +1,7 @@
 //! The `thread` subcommands. Each is one deterministic mechanic; the
 //! coordinator decides whether, what and where.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use serde::Serialize;
 
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::organizations::{self, CreateNode, NodeRequest};
-use crate::paths::Ctx;
+use crate::paths::{Ctx, SessionFlags};
 use crate::project::{self, Project};
 use crate::runner::{Cmd, Runner};
 use crate::thread::{self, CopyOutcome, Group, Kind, Live, Status, Thread};
@@ -222,7 +223,19 @@ pub fn placement(kind: Option<Kind>, has_repo: bool, remote: bool) -> Result<Kin
 
 /// Creates the workspace or tab, the thread directory and the brief, then
 /// returns. The agent is launched by the ticker, so there is one delivery path.
-pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
+pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
+    start_in(ctx, slug, args, &SessionFlags::default())
+}
+
+/// `start`, tying a project with no session record to the session `session`
+/// names (the caller's by default) once everything is validated, with no
+/// root coordinator (`coordinator::bind`).
+pub fn start_in(
+    ctx: &Ctx,
+    slug: &str,
+    mut args: StartArgs,
+    session: &SessionFlags,
+) -> Result<Thread> {
     let project = Project::load(&ctx.root, slug)?;
     let status = project.status();
     if status != project::Status::Active {
@@ -345,6 +358,10 @@ pub fn start(ctx: &Ctx, slug: &str, mut args: StartArgs) -> Result<Thread> {
     node_profile.argv(&safety.thread_agent_args)?;
     let kind = placement(args.kind, args.repo.is_some(), !machine.is_empty())?;
 
+    let session = coordinator::session_for(ctx, &project, session)?;
+    if project.coordinator().is_none() {
+        coordinator::bind(ctx, &project, &session)?;
+    }
     // Without a running ticker nothing launches.
     ticker::start(ctx)?;
     let view = require_session(ctx, &project)?;
@@ -2100,16 +2117,31 @@ pub fn threads_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> Vec<ThreadJso
     let rule = merge_gate::Rule::load(ctx, project);
     let usage = crate::usage::load(project);
     let records = std::cell::OnceCell::new();
+    let movable = movable_rows(rows);
     rows.iter()
         .map(|row| {
-            confirm_status(
-                ctx,
-                project,
-                &records,
-                thread_json(project, row, &state, &rule, &usage),
-            )
+            let json = thread_json(project, row, &state, &rule, &usage);
+            confirm_status(ctx, project, &records, offer_move(json, &movable))
         })
         .collect()
+}
+
+fn movable_rows(rows: &[Row]) -> BTreeSet<String> {
+    organizations::movable(
+        &rows
+            .iter()
+            .map(|row| row.thread.clone())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Adds `move` to the actions of a node `node move` could put under another
+/// parent (`organizations::movable`), which `thread_json` alone cannot tell.
+fn offer_move(mut json: ThreadJson, movable: &BTreeSet<String>) -> ThreadJson {
+    if movable.contains(&json.id) {
+        json.actions.push("move");
+    }
+    json
 }
 
 pub fn print_json(value: &impl Serialize) -> Result<()> {
@@ -2143,17 +2175,14 @@ pub fn print_node_list_json(ctx: &Ctx, slug: &str) -> Result<()> {
     let rule = merge_gate::Rule::load(ctx, &project);
     let usage = crate::usage::load(&project);
     let records = std::cell::OnceCell::new();
+    let movable = movable_rows(&rows);
     let nodes: Vec<NodeJson> = entries
         .iter()
         .filter_map(|entry| {
             let row = rows.iter().find(|row| row.thread.id == entry.thread.id)?;
+            let json = thread_json(&project, row, &state, &rule, &usage);
             Some(NodeJson {
-                thread: confirm_status(
-                    ctx,
-                    &project,
-                    &records,
-                    thread_json(&project, row, &state, &rule, &usage),
-                ),
+                thread: confirm_status(ctx, &project, &records, offer_move(json, &movable)),
                 depth: entry.depth,
                 tree_order: entry.tree_order,
             })
@@ -2190,7 +2219,10 @@ pub fn row_json(ctx: &Ctx, project: &Project, row: &Row) -> serde_json::Value {
     let state = steps::load_state(project);
     let rule = merge_gate::Rule::load(ctx, project);
     let usage = crate::usage::load(project);
-    let json = thread_json(project, row, &state, &rule, &usage);
+    let json = offer_move(
+        thread_json(project, row, &state, &rule, &usage),
+        &organizations::movable(&thread::list(project)),
+    );
     serde_json::to_value(confirm_status(
         ctx,
         project,

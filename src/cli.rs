@@ -536,16 +536,7 @@ enum ThreadCommand {
         json: bool,
     },
     /// Record an existing local agent pane as a thread of this project
-    Adopt {
-        slug: String,
-        #[arg(long, value_name = "ID")]
-        pane: String,
-        #[arg(long)]
-        title: String,
-        /// Optional task; `-` reads standard input
-        #[arg(long, value_name = "FILE")]
-        task_file: Option<String>,
-    },
+    Adopt(Box<AdoptCliArgs>),
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
     /// Merge the thread's pull request: only when it is open, approved and every check passed, or its project's merge gate passes
@@ -629,6 +620,36 @@ impl Toggle {
 }
 
 #[derive(Args)]
+struct AdoptCliArgs {
+    slug: String,
+    #[arg(long, value_name = "ID")]
+    pane: String,
+    #[arg(long)]
+    title: String,
+    /// Optional task; `-` reads standard input
+    #[arg(long, value_name = "FILE")]
+    task_file: Option<String>,
+    /// Parent node id, or `root` (default: the coordinator node whose pane runs this, else root)
+    #[arg(long)]
+    parent: Option<String>,
+    /// Coordinators can create children; workers cannot (default: worker)
+    #[arg(long, value_enum)]
+    role: Option<NodeRole>,
+    /// Explicitly grant a coordinator permission to create children
+    #[arg(long, conflicts_with = "no_spawn")]
+    can_spawn: bool,
+    /// Adopt a leaf coordinator that cannot create children
+    #[arg(long = "no-spawn", conflicts_with = "can_spawn")]
+    no_spawn: bool,
+    /// Standing instructions for the node and its descendants, kept in its INSTRUCTIONS.md (up to 8 KiB)
+    #[arg(long, value_name = "FILE")]
+    rules_file: Option<String>,
+    /// The session a project that has none recorded is tied to (default: the caller's)
+    #[command(flatten)]
+    session: SessionArgs,
+}
+
+#[derive(Args)]
 struct NodeStartArgs {
     slug: String,
     #[arg(long)]
@@ -687,6 +708,9 @@ struct NodeStartArgs {
     /// A coordinator's task scope: text the tracker's `list` gets as HP_TASK_SCOPE, so it prints this coordinator's tasks
     #[arg(long, value_name = "TEXT")]
     task_scope: Option<String>,
+    /// The session a project that has none recorded is tied to (default: the caller's)
+    #[command(flatten)]
+    session: SessionArgs,
 }
 
 #[derive(Subcommand)]
@@ -736,6 +760,19 @@ enum NodeCommand {
     /// Create and start a child node; `create` is an alias
     #[command(alias = "create")]
     Start(Box<NodeStartArgs>),
+    /// Record an existing local agent pane as a node, as `thread adopt` does
+    Adopt(Box<AdoptCliArgs>),
+    /// Put a node and its subtree under another parent; nothing restarts, and its next brief or restart reads the new parent's context
+    Move {
+        slug: String,
+        id: String,
+        /// The new parent: a coordinator node that may spawn, or `root`
+        #[arg(long)]
+        parent: String,
+        /// Print the versioned JSON contract (docs/json.md)
+        #[arg(long)]
+        json: bool,
+    },
     /// Bring back a node whose pane is gone or whose start failed
     Restart {
         slug: String,
@@ -824,6 +861,56 @@ enum NodeCommand {
         #[arg(long)]
         discard_uncopied: bool,
     },
+}
+
+/// `thread adopt` and `node adopt`; `node` adds the node's place to what
+/// it prints.
+fn adopt_command(ctx: &Ctx, args: AdoptCliArgs, node: bool) -> Result<()> {
+    let AdoptCliArgs {
+        slug,
+        pane,
+        title,
+        task_file,
+        parent,
+        role,
+        can_spawn,
+        no_spawn,
+        rules_file,
+        session,
+    } = args;
+    let rules = match rules_file.as_deref() {
+        Some("-") => bail!("--rules-file does not read standard input; --task-file may"),
+        Some(file) => read_text(file)?,
+        None => String::new(),
+    };
+    let adopted = adopt::adopt(
+        ctx,
+        &slug,
+        &adopt::AdoptArgs {
+            pane,
+            title,
+            task: task_file.map(|file| read_text(&file)).transpose()?,
+            parent,
+            role: role.unwrap_or_default(),
+            can_spawn: if can_spawn {
+                Some(true)
+            } else if no_spawn {
+                Some(false)
+            } else {
+                None
+            },
+            rules,
+            session: session.into(),
+        },
+    )?;
+    let mut printed = serde_json::json!({ "id": adopted.id, "kind": adopted.kind, "pane_id": adopted.pane_id, "prompt_pending": adopted.prompt_pending });
+    if node {
+        printed["parent_id"] = organizations::parent_id(&adopted).into();
+        printed["role"] = serde_json::json!(adopted.role);
+        printed["can_spawn"] = adopted.can_spawn.into();
+    }
+    println!("{printed}");
+    Ok(())
 }
 
 /// `-` is standard input; a relative path is relative to the caller's directory.
@@ -1386,20 +1473,7 @@ pub fn run() -> Result<()> {
                 println!("sent to {id} (agent was {state})");
                 Ok(())
             }
-            ThreadCommand::Adopt {
-                slug,
-                pane,
-                title,
-                task_file,
-            } => {
-                let task = task_file.map(|file| read_text(&file)).transpose()?;
-                let thread = adopt::adopt(&ctx, &slug, &pane, &title, task)?;
-                println!(
-                    "{}",
-                    serde_json::json!({ "id": thread.id, "kind": thread.kind, "pane_id": thread.pane_id, "prompt_pending": thread.prompt_pending })
-                );
-                Ok(())
-            }
+            ThreadCommand::Adopt(args) => adopt_command(&ctx, *args, false),
             ThreadCommand::List { slug, json } => threads::print_list(&ctx, &slug, json),
             ThreadCommand::Merge {
                 slug,
@@ -1557,6 +1631,7 @@ pub fn run() -> Result<()> {
                     from_task,
                     tasks,
                     task_scope,
+                    session,
                 } = *args;
                 let kind = kind
                     .as_deref()
@@ -1608,7 +1683,7 @@ pub fn run() -> Result<()> {
                 if let Some(name) = &template {
                     crate::templates::resolve(&ctx, Some(&slug), name)?.fill(&mut start, role)?;
                 }
-                let node = threads::start(&ctx, &slug, start)?;
+                let node = threads::start_in(&ctx, &slug, start, &session.into())?;
                 println!(
                     "{}",
                     serde_json::json!({
@@ -1628,6 +1703,30 @@ pub fn run() -> Result<()> {
                     })
                 );
                 Ok(())
+            }
+            NodeCommand::Adopt(args) => adopt_command(&ctx, *args, true),
+            NodeCommand::Move {
+                slug,
+                id,
+                parent,
+                json,
+            } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                let node = organizations::move_node(&ctx, &project, &id, &parent)?;
+                if json {
+                    threads::print_json(&serde_json::json!({
+                        "schema_version": threads::JSON_SCHEMA_VERSION,
+                        "id": node.id,
+                        "parent_id": organizations::parent_id(&node),
+                    }))
+                } else {
+                    println!(
+                        "{} is now under {}",
+                        node.id,
+                        organizations::parent_id(&node)
+                    );
+                    Ok(())
+                }
             }
             NodeCommand::Restart { slug, id, profile } => {
                 let node = threads::restart(&ctx, &slug, &id, profile.as_deref())?;

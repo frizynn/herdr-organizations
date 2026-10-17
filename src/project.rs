@@ -285,6 +285,15 @@ pub struct Coordinator {
     pub updated: String,
 }
 
+impl Coordinator {
+    /// Whether it names a root coordinator's pane. A record without one ties
+    /// a project that organizes coordinator nodes to its session
+    /// (`coordinator::bind`); its root coordinator is optional.
+    pub fn has_root(&self) -> bool {
+        !self.pane_id.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Safety {
