@@ -191,6 +191,7 @@ herdr-organizations overview --json
 | `project status <slug> --json` | Tasks and open threads with their state, pull requests, drift and Next lines, computed on every call |
 | `routine list <slug> --json` | Routines with their schedule, command status and last and next run |
 | `node usage <slug> --json` | Each node's token use, read from its transcripts on the call |
+| `asks [--project <slug> [--node <id>]] --json`, `asks answer <slug> <root\|id> --line N --text-file F --json` | Every coordinator's asks with counts per coordinator, and answering one line of a status file |
 
 [docs/json.md](docs/json.md) defines every field.
 

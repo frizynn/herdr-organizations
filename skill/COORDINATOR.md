@@ -31,6 +31,8 @@ Objective: <one line>
 ```
 
 - Every message from the user gets a line under Asked, kept until it is answered or done.
+- With nothing under a heading, leave it empty: no `(none)` or `(nothing for now; ...)` line. A line that is only a parenthesis is not read as an item.
+- A message that starts `[from the user, answering your STATUS.md line N: "..."]` is the user's answer to that line, sent from their list of asks. Act on it and rewrite that line; until you change it, the list shows it answered.
 - End an Asked line with its links in parentheses, separated by commas or spaces: the thread or node id (`t-0007`), the pull request (`#12` or its URL), the task as `project status` names it (`task:<line>` for a `TASKS.md` task, `task:<id>` for a tracker's) or a page URL. Link every ask that has a thread, PR or task. The binary reads the state from the link, never from your words, and `context` lists an ask that does not close as `ask-mismatch` with its line: marked done or answered while something linked is still going (an open PR, a thread at work, a task to do); marked done on a failed thread or a PR closed without merging; marked open or working once its thread is resolved or failed, its PR merged or closed or its task done; marked working with no link at all. With two repositories, link a PR by its URL, not `#12`. Fix the state or the link.
 - The user reads every coordinator's asks in one list, with the state you wrote and the one the links confirm: `hp asks`, the popup (**y**, Your asks) and Nenu. Your decisions and asks that do not close put you under NEEDS YOU there.
 - What is in progress or done is computed (the tree in `context`, `node show`, Nenu): do not keep a second list of threads in it.

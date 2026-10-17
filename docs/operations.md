@@ -80,7 +80,8 @@ The virtual `root` is the project coordinator. A thread record is a node: a new 
 | `list [--json]`, `new ... --json`, `overview [project] [--json]`, `project show <project> [--json]` | The project documents of [docs/json.md](json.md). |
 | `task list <project> [--json]` | The tasks in `TASKS.md`, or the [tracker's](#tasks-from-a-tracker) with each id in a last column. Only the coordinator writes the file; ask it, or send it a sentence with `coordinator prompt`. Fails while the tracker is unavailable. |
 | `task lint <project> [--json]` | Every problem the [drift](#drift) section draws from in the tasks, without its 10-line cap. It changes nothing. |
-| `asks [--project P] [--json]` | What you asked every coordinator, one line each, with the state it wrote and the one its links confirm (see [Your asks](#your-asks)). It only reads. |
+| `asks [--project P [--node ID]] [--json]` | What you asked every coordinator, or one of P's, one line each, with the state it wrote and the one its links confirm (see [Your asks](#your-asks)). It only reads. |
+| `asks answer <project> root\|<id> --line N --text-file F [--json]` | Answer line N of that coordinator's status file, an ask or a decision: your text is typed into it, and the line reads answered until it changes (see [Your asks](#your-asks)). |
 | `project status <project> [--json]` | The project's tasks and open threads with their state, pull requests, drift and Next lines, computed from the files on every call (see [docs/json.md](json.md#project-status)). |
 | `sidebar install [--config PATH] [--dry-run]` | Append the rows that show the organization tokens (`$org_need`, `$org_work`, `$org_review`, `$org_task`) to Herdr's config, keeping your rows. |
 | `sweep <project> [--dry-run] [--yes]` | Remove what nothing uses any more. |
@@ -295,7 +296,9 @@ When the state the coordinator wrote and the links disagree, the ask does not cl
 
 An ask with no link and any other state is not confirmed, and not flagged. A line that does not follow the format is listed as `unknown` with its text.
 
-- `asks` lists every coordinator's asks across projects (`--project` for one), what waits on you first, then what does not close, what is in progress and what is done; `asks --json` is the [document](json.md#asks), and `overview --json` carries each status file's asks too, for Nenu.
+- `asks answer <project> root|<id> --line N --text-file F` answers one line, an ask or a line under `## Needs your decision`, without opening the coordinator: it types `[from the user, answering your STATUS.md line N: "<the line without its links>"] <your text>` into it, refused while it does not run, and keeps the line's text and the time in `.state/answers.json`. While the line stays as it was it is answered: it no longer waits on you (in `asks`, the popup and NEEDS YOU), and `--json` carries `answered_at`. Once the coordinator rewrites the line, it reads as written.
+- A line under `## Asked` or `## Needs your decision` that is only `(none)`, `none` or one parenthesis, such as `(nothing for now; ...)`, is not an item.
+- `asks` lists every coordinator's asks across projects (`--project` for one, and `--node` for one of its coordinators), what waits on you first, then what does not close, what is in progress and what is done; `asks --json` is the [document](json.md#asks), and `overview --json` carries each status file's asks too, for Nenu.
 - In the popup, `y` on the launcher opens **Your asks**, grouped the same way, with each coordinator's `## Needs your decision` lines under what waits on you; `↵` opens the coordinator. A coordinator's detail screen is its card: the objective, what waits on you, its asks, its open children with their state and verdict, and their pull requests; a coordinator or child at a token cap is marked `over cap`. A coordinator, the root included, joins NEEDS YOU while its file has a decision for you or an ask that does not close.
 - `context` lists the root's asks that do not close as [`ask-mismatch`](#drift), by line and the binary's reason, so the coordinator fixes the state or the link. The ask's text never goes into a prompt.
 
