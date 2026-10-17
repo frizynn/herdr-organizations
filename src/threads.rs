@@ -590,37 +590,31 @@ fn place_tab(project: &Project, view: &SessionView, record: &Thread) -> Result<T
         folder
     };
     let folder = std::fs::canonicalize(&folder)?;
-    let created = match workspace {
-        Some(id) => view.herdr.tab_create(&id, &folder, &record.title, false)?,
-        // No pane of the project's workspace is left, or the coordinator runs
-        // in a pane of another workspace: the thread opens the project's own.
+    // No pane of the project's workspace is left, or the coordinator runs in
+    // a pane of another workspace: the project gets its home Space again.
+    let workspace = match workspace {
+        Some(id) => id,
         None => {
-            let (settings, _) = project.read_project_md()?;
-            let created = view.herdr.workspace_create(
-                &folder,
-                &crate::project::home_label(&settings.name, &project.slug),
-                false,
-            )?;
-            let _ = view.herdr.call(
-                &["tab", "rename", &created.tab_id, &record.title],
-                crate::herdr::CALL_TIMEOUT,
-            );
-            // With no coordinator running, the new workspace becomes the
-            // project's home, so later tabs and `open` go there. A running
-            // coordinator's record keeps naming its own pane.
+            let home = coordinator::create_home(&view.herdr, project)?;
+            // With no coordinator running, it becomes the recorded home, so
+            // later tabs and `open` go there. A running coordinator's record
+            // keeps naming its own pane.
             if !view
                 .agents
                 .iter()
                 .any(|a| coordinator::is_coordinator(&coordinator, a))
             {
                 project.update_coordinator(|c| {
-                    c.workspace_id = created.workspace_id.clone();
-                    c.tab_id = created.tab_id.clone();
+                    c.workspace_id = home.workspace_id.clone();
+                    c.tab_id = home.tab_id.clone();
                 })?;
             }
-            created
+            home.workspace_id
         }
     };
+    let created = view
+        .herdr
+        .tab_create(&workspace, &folder, &record.title, false)?;
     let cwd = view.herdr.pane_cwd(&created.pane_id).unwrap_or_default();
     let cwd = if cwd.is_empty() {
         folder.to_string_lossy().into_owned()

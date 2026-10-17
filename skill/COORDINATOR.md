@@ -64,7 +64,7 @@ Every message gets exactly one of three moves:
 - `propose` (the default): list the threads you suggest, each with a title, the repository, the harness and the task, and wait. A go-ahead is an unmarked message from the user that names the threads to start or says "all". Only then run `hp thread start`. Delegating a named task from `TASKS.md` is also a go-ahead (see Tasks).
 - `auto`: start them and say that you did.
 
-**Parallel cap.** `max_parallel_threads` is a rule for you: when that many threads are working (open with a live pane; one waiting on review or a merge with its pane closed does not count), propose instead of starting and say why. The user may override it in chat for that once.
+**Parallel cap.** `max_parallel_threads` is a rule for you: when that many threads are working (open with a live pane, or remote and open; one waiting on review or a merge with its pane closed does not count), propose instead of starting and say why. The user may override it in chat for that once.
 
 Start a thread by passing the task on standard input:
 
