@@ -308,6 +308,19 @@ fn group(t: &Thread) -> &'static str {
     }
 }
 
+/// A coordinator node is on it: the owner handed it to that node.
+fn delegated(assignees: &[Assignee]) -> bool {
+    assignees.iter().any(|a| a.role == "coordinator")
+}
+
+/// `delegated: t-0001 (t-0003)`, `t-0004`, or empty.
+fn who(assignees: &[Assignee]) -> String {
+    match words(assignees) {
+        w if delegated(assignees) => format!("delegated: {w}"),
+        w => w,
+    }
+}
+
 /// `t-0001 (t-0003, t-0004)`.
 fn words(assignees: &[Assignee]) -> String {
     assignees
@@ -339,7 +352,7 @@ struct TaskView<'a> {
 impl TaskView<'_> {
     /// A coordinator node is on it: the owner handed it to that node.
     fn delegated(&self) -> bool {
-        self.assignees.iter().any(|a| a.role == "coordinator")
+        delegated(&self.assignees)
     }
 
     fn json(&self, is_profile: &dyn Fn(&str) -> bool) -> Value {
@@ -358,10 +371,7 @@ impl TaskView<'_> {
         } else {
             format!("\t{}", t.id)
         };
-        let who = match words(&self.assignees) {
-            w if self.delegated() => format!("delegated: {w}"),
-            w => w,
-        };
+        let who = who(&self.assignees);
         format!(
             "{}\t{}\t{}\t{}{id}\t{who}",
             t.list,
@@ -470,16 +480,85 @@ pub fn print_project(ctx: &Ctx, slug: &str, json: bool) -> Result<()> {
 pub fn print_node(ctx: &Ctx, slug: &str, node: &str, json: bool) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let lists = lists(ctx, &project, Read::Run);
+    let threads = thread::list(&project);
+    let rows = node_rows(ctx, &project, &lists, &threads, node, Read::Run)?;
+    let title = threads
+        .iter()
+        .find(|t| t.id == node)
+        .map(|t| t.title.clone())
+        .unwrap_or_default();
+    if json {
+        let is_profile = is_profile(ctx)?;
+        return threads::print_json(&serde_json::json!({
+            "schema_version": threads::JSON_SCHEMA_VERSION,
+            "project": project.slug,
+            "node": {"id": node, "title": title},
+            "tasks": rows.iter().map(|row| {
+                let mut json = row.view().json(&is_profile);
+                json["via"] = row.via.into();
+                json["owner_node"] = row.owner.clone().into();
+                json
+            }).collect::<Vec<_>>(),
+        }));
+    }
+    for row in &rows {
+        println!("{}\t{}", row.via, row.view().line());
+    }
+    Ok(())
+}
+
+/// One task of a coordinator's view.
+pub struct NodeRow {
+    /// `own`: in the coordinator's list; `assigned`: in another's (or found
+    /// by id), with the coordinator on it.
+    pub via: &'static str,
+    /// Whose list it is in: `root`, a node id, or empty when only `get`
+    /// found it.
+    pub owner: String,
+    pub task: Task,
+    /// Who works on it, the coordinator itself left out.
+    pub assignees: Vec<Assignee>,
+}
+
+impl NodeRow {
+    fn view(&self) -> TaskView<'_> {
+        TaskView {
+            task: &self.task,
+            assignees: self.assignees.clone(),
+        }
+    }
+
+    pub fn delegated(&self) -> bool {
+        delegated(&self.assignees)
+    }
+
+    /// `delegated: t-0001 (t-0003)`, `t-0004`, or empty.
+    pub fn who(&self) -> String {
+        who(&self.assignees)
+    }
+}
+
+/// `node`'s view: its own tasks, then the tasks of other lists it is on.
+/// With `Read::Run`, a tracker task it is on that no list printed is asked
+/// for by id.
+pub fn node_rows(
+    ctx: &Ctx,
+    project: &Project,
+    lists: &Lists,
+    threads: &[Thread],
+    node: &str,
+    read: Read,
+) -> Result<Vec<NodeRow>> {
     let Some(owner) = lists.owners.iter().find(|o| o.id == node) else {
         bail!(
-            "`{node}` is no open coordinator of `{slug}`; the root and coordinator nodes own task lists"
+            "`{node}` is no open coordinator of `{}`; the root and coordinator nodes own task lists",
+            project.slug
         );
     };
     let own = match &owner.tasks {
         Ok(list) => list,
         Err(reason) => bail!("{reason}"),
     };
-    let threads = thread::list(&project);
     let record = threads.iter().find(|t| t.id == node);
     let mine = |task: &Task| {
         record.is_some_and(|t| {
@@ -487,73 +566,50 @@ pub fn print_node(ctx: &Ctx, slug: &str, node: &str, json: bool) -> Result<()> {
                 || t.assigned().iter().any(|key| names(task, key))
         })
     };
-    let mut rows: Vec<(&str, &str, TaskView)> = own
-        .iter()
-        .map(|task| {
-            (
-                "own",
-                node,
-                TaskView {
-                    task,
-                    assignees: assignees(&project, &threads, task, node),
-                },
-            )
-        })
-        .collect();
+    let row = |via, owner: &str, task: &Task| NodeRow {
+        via,
+        owner: owner.to_string(),
+        task: task.clone(),
+        assignees: assignees(project, threads, task, node),
+    };
+    let mut rows: Vec<NodeRow> = own.iter().map(|task| row("own", node, task)).collect();
     let catalog = lists.catalog();
     for (owner, task) in &catalog {
-        if *owner != node && mine(task) && !rows.iter().any(|(_, _, r)| same(r.task, task)) {
-            rows.push((
-                "assigned",
-                owner,
-                TaskView {
-                    task,
-                    assignees: assignees(&project, &threads, task, node),
-                },
-            ));
+        if *owner != node && mine(task) && !rows.iter().any(|r| same(&r.task, task)) {
+            rows.push(row("assigned", owner, task));
         }
     }
-    // A tracker task this node is on that no list printed: by its id.
-    let mut fetched = Vec::new();
-    if let (Some(record), Ok(Some(config))) = (record, project.tracker(&ctx.config_dir)) {
+    if let (Some(record), Read::Run, Ok(Some(config))) =
+        (record, read, project.tracker(&ctx.config_dir))
+    {
         for key in record.assigned() {
             if catalog.iter().any(|(_, t)| names(t, key)) {
                 continue;
             }
-            if let Ok(Some(task)) = tracker::get(ctx, &project, &config, key) {
-                fetched.push(task);
+            if let Ok(Some(task)) = tracker::get(ctx, project, &config, key) {
+                rows.push(row("assigned", "", &task));
             }
         }
     }
-    for task in &fetched {
-        rows.push((
-            "assigned",
-            "",
-            TaskView {
-                task,
-                assignees: assignees(&project, &threads, task, node),
-            },
-        ));
+    Ok(rows)
+}
+
+/// Every coordinator's view from what is cached, for the popup: empty for
+/// a project whose only list is the root's (`Lists::grouped`).
+pub fn coordinator_rows(ctx: &Ctx, project: &Project) -> Vec<(String, Vec<NodeRow>)> {
+    let lists = lists(ctx, project, Read::Cached);
+    if !lists.grouped() {
+        return Vec::new();
     }
-    let title = record.map(|t| t.title.clone()).unwrap_or_default();
-    if json {
-        let is_profile = is_profile(ctx)?;
-        return threads::print_json(&serde_json::json!({
-            "schema_version": threads::JSON_SCHEMA_VERSION,
-            "project": project.slug,
-            "node": {"id": node, "title": title},
-            "tasks": rows.iter().map(|(via, owner, row)| {
-                let mut json = row.json(&is_profile);
-                json["via"] = (*via).into();
-                json["owner_node"] = (*owner).into();
-                json
-            }).collect::<Vec<_>>(),
-        }));
-    }
-    for (via, _, row) in &rows {
-        println!("{via}\t{}", row.line());
-    }
-    Ok(())
+    let threads = thread::list(project);
+    lists
+        .owners
+        .iter()
+        .filter_map(|owner| {
+            let rows = node_rows(ctx, project, &lists, &threads, &owner.id, Read::Cached).ok()?;
+            Some((owner.id.clone(), rows))
+        })
+        .collect()
 }
 
 /// The task `key` names, found the way `--from-task` finds one, as a record

@@ -5198,6 +5198,58 @@ mod tests {
         });
     }
 
+    /// A coordinator's card lists its tasks with who works on each, a task
+    /// handed to a coordinator child as delegated; the project tree counts
+    /// each coordinator's tasks.
+    #[test]
+    fn a_coordinators_card_and_the_tree_show_its_tasks() {
+        with_app(|app| {
+            let project = &mut app.snap.projects[0];
+            project.coordinators[0].tasks = vec![
+                state::TaskLine {
+                    title: "Ship billing".into(),
+                    via: "own".into(),
+                    who: "delegated: t-0001 (t-0003)".into(),
+                    delegated: true,
+                    ..state::TaskLine::default()
+                },
+                state::TaskLine {
+                    title: "Plan the quarter".into(),
+                    via: "own".into(),
+                    ..state::TaskLine::default()
+                },
+            ];
+            project.coordinators[1].tasks = vec![state::TaskLine {
+                title: "Ship billing".into(),
+                via: "assigned".into(),
+                who: "t-0003".into(),
+                ..state::TaskLine::default()
+            }];
+            app.open_detail("acme", "root");
+            let text = app.render(84, 40).text();
+            let line = |needle: &str| {
+                text.lines()
+                    .find(|l| l.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle} missing: {text}"))
+                    .to_string()
+            };
+            assert!(line("TASKS").contains('2'), "{text}");
+            assert!(line("Ship billing").contains("delegated: t-0001 (t-0003)"));
+            app.open_detail("acme", "t-0001");
+            let text = app.render(84, 40).text();
+            let row = text.lines().find(|l| l.contains("Ship billing")).unwrap_or_else(|| panic!("{text}"));
+            assert!(row.contains("t-0003") && row.contains('↳'), "{row}");
+
+            app.stack.push(View::Tree {
+                slug: "acme".into(),
+                sel: 0,
+                folded: BTreeSet::new(),
+            });
+            let text = app.render(84, 40).text();
+            assert!(text.contains("2 tasks · 1 delegated"), "{text}");
+        });
+    }
+
     /// A resolved coordinator takes no answer: its card shows nothing under
     /// WAITS ON YOU, and its unanswered decision ask with the other asks.
     #[test]

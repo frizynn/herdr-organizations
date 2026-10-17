@@ -912,6 +912,39 @@ mod tests {
         .unwrap();
     }
 
+    /// Each coordinator carries its view of the tasks (`task_views`), and a
+    /// project that uses nothing but the root's list carries none, as before.
+    #[test]
+    fn each_coordinator_carries_its_tasks_once_the_project_uses_them() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        node_record(&project, "t-0001", "root", NodeRole::Coordinator, Group::Working);
+        node_record(&project, "t-0002", "t-0001", NodeRole::Worker, Group::Working);
+        std::fs::write(project.dir().join("TASKS.md"), "## Now\n- [ ] Ship billing\n").unwrap();
+        let ctx = world.ctx();
+        let view = || {
+            let mut view = project_view(&project, &[], &Default::default());
+            add_tasks(&ctx, &mut view, &project);
+            view
+        };
+        assert!(view().node("root").unwrap().tasks.is_empty());
+        for id in ["t-0001", "t-0002"] {
+            thread::update(&project, id, |t| t.tasks = vec!["Ship billing".into()]).unwrap();
+        }
+        let view = view();
+        let root = &view.node("root").unwrap().tasks;
+        assert_eq!(root.len(), 1);
+        assert_eq!(
+            (root[0].title.as_str(), root[0].via.as_str(), root[0].who.as_str()),
+            ("Ship billing", "own", "delegated: t-0001 (t-0002)")
+        );
+        let node = &view.node("t-0001").unwrap().tasks;
+        assert_eq!(
+            (node[0].via.as_str(), node[0].who.as_str()),
+            ("assigned", "t-0002")
+        );
+    }
+
     #[test]
     fn recorded_view_nests_threads_under_their_coordinators_and_rolls_counts_up() {
         let world = World::new();
