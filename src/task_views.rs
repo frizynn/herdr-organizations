@@ -743,9 +743,8 @@ pub fn set_scope(ctx: &Ctx, slug: &str, id: &str, scope: &str) -> Result<()> {
 }
 
 /// Asks the tracker's `get` for the tasks a status file links (in an ask or a
-/// decision) or a node is
-/// assigned to that no cached list has, so readers that run nothing (asks,
-/// the popup, `overview`) know them. At most 16 per call; each answer is
+/// decision) or a node is assigned to that no cached list has, so readers
+/// that run nothing (asks, the popup, `overview`) know them. At most 16 per call; each answer is
 /// cached for `cache_secs`. Nothing without a `get` command.
 pub fn find_missing(ctx: &Ctx, project: &Project) {
     let Ok(Some(config)) = project.tracker(&ctx.config_dir) else {
