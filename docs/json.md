@@ -34,7 +34,8 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
 | `project show <slug> --json` | `{schema_version, project: Project + the fields of [Project detail](#project-detail)}` |
 | `project status <slug> --json` | `{schema_version, project, generated_at, objective, sources, items: [Status item], drift, problems: [Problem], next}`, see [Project status](#project-status) |
-| `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
+| `task list <slug> --json` | `{schema_version, project, tasks: [Task]}`, with `owners` and `unowned` once coordinators have tasks (see [Task](#task)) |
+| `task list <slug> --node <id> --json` | `{schema_version, project, node: {id, title}, tasks: [Task + assignees, delegated, via, owner_node]}` |
 | `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
 | `asks [--project slug [--node id]] --json` | `{schema_version, asks: [Ask row], coordinators: [Coordinator count]}`, see [Asks](#asks) |
@@ -129,6 +130,8 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `task` | string | The title of the task it was delegated from (`--from-task`), as written in `TASKS.md` or the tracker when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 | `task_id` | string | The [tracker's](operations.md#tasks-from-a-tracker) id of that task. Present only for a thread started from a tracker's task. |
+| `tasks` | [string] | The other tasks the node is on (`--task`, `node assign`): tracker ids or `TASKS.md` titles. Present only when there is one. |
+| `task_scope` | string | A coordinator node's task scope, the text the tracker's `list` gets. Present only when set. |
 | `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md` in the project's records folder. `null` for every other node and while the file is missing. |
 | `usage` | [Usage](#usage) or `null` | Its token use as last read. |
 
@@ -267,6 +270,27 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `profile` | string | An agent's profile. Empty when its machine's coordinator picks one (`(@m1)`), and for an old `(agent → t-0007)`, which runs on the project's `thread_profile`. |
 | `machine` | string | An agent's machine, empty for this machine. |
 | `name` | string | A person's name as written, empty for the other kinds. |
+
+Once a coordinator node has tasks of its own (or its tracker list failed), a node's `nodes/<id>/TASKS.md` belongs to no coordinator, or a node is on a task with `--task` or `node assign`, `task list --json` also carries the project view (see [Tasks per coordinator](operations.md#tasks-per-coordinator)); `tasks` stays the root's whole list as before. `overview --json` and `project show --json` carry the same two fields as `task_owners: {owners, unowned}` on each project, from what is cached. Without any of that, neither appears.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `owners` | [{id, title, tasks: [Task + assignees, delegated], unavailable?}] | Every coordinator that owns a list: `root` (empty title) first, then open coordinator nodes in tree order. With a tracker, the root keeps the tasks no scoped coordinator lists. `unavailable` is present, with the reason, when that list could not be read. |
+| `unowned` | [Task + assignees, delegated, owner_node] | Tasks in `nodes/<id>/TASKS.md` of a node that is resolved or is no coordinator; `owner_node` is that node. |
+
+| Task view field | Type | Meaning |
+| --- | --- | --- |
+| `assignees` | [Assignee] | Who works on it: the thread on its line and the nodes whose record names it, nested so that a node on the task sits under its nearest ancestor that is on it too. In `--node`'s view, that coordinator is left out. |
+| `delegated` | bool | A coordinator node is among the top assignees: the owner handed the task to it. |
+| `via` | `"own"` or `"assigned"` | `--node` only: in the coordinator's own list, or in another list with the coordinator on it. |
+| `owner_node` | string | `--node` and `unowned`: whose list it is in (`root` or a node id), empty for a task only `get` found. |
+
+| Assignee field | Type | Meaning |
+| --- | --- | --- |
+| `id`, `title`, `role` | string | The node. |
+| `group` | string | Its group token as the ticker last recorded it, or `failed`. |
+| `verdict` | string or `null` | The `Status:` line of its report, as in [Thread](#thread). |
+| `assignees` | [Assignee] | Its descendants on the same task. |
 
 Only the coordinator writes `TASKS.md`, with one exception: `thread start` and `node start` with `--from-task` append ` · <thread id>` to the end of that task's line. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
 

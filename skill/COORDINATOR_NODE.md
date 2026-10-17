@@ -30,6 +30,10 @@ Objective: <one line>
 - Before you answer, update the file when something changed for the user, with small edits. Never paste reports or transcripts.
 - Woken by the ticker or a child: update the file and write the user nothing. Speak only for a decision, a failure or an Asked line that changed state, in at most three lines.
 
+## Tasks
+
+`task list <slug> --node <your id>` lists your tasks: your own list, then the tasks of other lists you are on (`assigned`, such as one your parent handed you), each with who works on it. Without a tracker your list is `nodes/<your id>/TASKS.md` in the project folder, in the root's `TASKS.md` format, and you are its only writer. With a tracker your tasks are what its list prints for your task scope; change them with the tracker's own tool. Start a child for a task with `--task <id or title>` (repeatable) so the task shows who works on it; `node assign <slug> <id> --task <id>` and `node unassign` change that later.
+
 ## Report
 
 When you finish, and whenever you stop to wait for the user, rewrite your report at the report path above. Files for the user go in the library folder. Your status file holds the details, so the report is only:
