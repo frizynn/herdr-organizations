@@ -275,7 +275,7 @@ pub fn get(
     let _ = project::write_json(&gets_path(project), &gets);
     answer
         .map(|e| e.as_ref().map(Entry::task))
-        .map_err(|reason| format!("tracker unavailable: its get command {reason}"))
+        .map_err(unavailable)
 }
 
 /// Every task `get` found, whatever its age: what a reader that runs
