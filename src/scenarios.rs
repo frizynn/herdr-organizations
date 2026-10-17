@@ -6925,3 +6925,57 @@ fn an_idle_agent_with_its_own_background_command_has_not_stopped() {
         )]
     );
 }
+
+/// `node start --task` (repeatable) puts the new node on each task, with
+/// `--task-scope` kept on its record, and `link` hears `started` for each
+/// tracker task; a task the tracker does not know is refused before
+/// anything is created.
+#[test]
+fn a_node_starts_on_several_tasks_with_its_task_scope() {
+    let (world, project) = tracked_world(ok(""));
+    world.runner.on(
+        "tracker-list",
+        ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research"},{"id":"TRK-2","title":"Write up"}]}"#),
+    );
+    *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+    let folder = project.dir().join("threads/t-0001");
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("tab create"),
+        move |_| Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","cwd":"{}"}}}}}}"#, folder.display()))),
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    let ctx = world.ctx();
+    let args = |tasks: &[&str]| StartArgs {
+        title: "Area".into(),
+        repo: None,
+        machine: None,
+        profile: None,
+        kind: Some(Kind::Tab),
+        base: None,
+        task: "Run the area.".into(),
+        node: crate::organizations::NodeRequest {
+            tasks: tasks.iter().map(|t| t.to_string()).collect(),
+            task_scope: "research".into(),
+            ..Default::default()
+        },
+    };
+    let error = threads::start(&ctx, "demo", args(&["TRK-1", "TRK-404"])).unwrap_err();
+    assert!(error.to_string().contains("TRK-404"), "{error}");
+    assert!(thread::list(&project).is_empty());
+
+    let t = threads::start(&ctx, "demo", args(&["TRK-1", "write up"])).unwrap();
+    assert_eq!(t.tasks, ["TRK-1", "TRK-2"], "kept by id");
+    assert_eq!(t.task_scope, "research");
+    assert_eq!(t.task_id, "");
+    let started: Vec<String> = world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .map(|c| format!("{} {}", env_of(c, "HP_TASK_ID"), env_of(c, "HP_EVENT")))
+        .collect();
+    assert_eq!(started, ["TRK-1 started", "TRK-2 started"]);
+}
