@@ -877,10 +877,11 @@ fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::R
                 updated: status.updated,
                 objective: status.objective,
                 needs_decision: status
-                    .decisions
+                    .needs_decision
                     .into_iter()
-                    .filter(|d| d.answered_at.is_empty())
-                    .map(|d| d.text)
+                    .zip(&status.decisions)
+                    .filter(|(_, d)| d.answered_at.is_empty())
+                    .map(|(text, _)| text)
                     .collect(),
             });
         }

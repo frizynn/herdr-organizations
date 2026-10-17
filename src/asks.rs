@@ -155,8 +155,11 @@ pub struct Ask {
 pub struct Decision {
     /// Its line in the status file, from 1.
     pub line: usize,
-    /// Without the bullet.
+    /// Without the bullet and the links of its final parenthesis:
+    /// `<decision> : <options>`.
     pub text: String,
+    /// The links of its final parenthesis, read as an ask's are.
+    pub links: Vec<Link>,
     /// As `Ask::answered_at`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub answered_at: String,
@@ -336,11 +339,23 @@ struct CoordinatorRef {
 /// A coordinator's rows, counted in the groups of `Ask::rank`.
 #[derive(Serialize, Default)]
 struct Counts {
+    /// Its `## Needs your decision` lines not answered yet.
+    decisions: usize,
     waits_on_you: usize,
     does_not_close: usize,
     in_progress: usize,
     done: usize,
     unknown: usize,
+}
+
+/// One line under `## Needs your decision` in `asks --json`.
+#[derive(Serialize)]
+struct DecisionRow {
+    project: String,
+    coordinator: CoordinatorRef,
+    #[serde(flatten)]
+    decision: Decision,
+    actions: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -364,6 +379,7 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, node: Option<&str>, json: bool) -> R
         None => crate::overview::visible_slugs(ctx),
     };
     let mut rows = Vec::new();
+    let mut decisions = Vec::new();
     let mut coordinators = Vec::new();
     for slug in slugs {
         let project = Project::load(&ctx.root, &slug)?;
@@ -383,6 +399,18 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, node: Option<&str>, json: bool) -> R
                 title: sheet.title.clone(),
             };
             let mut counts = Counts::default();
+            // A resolved coordinator takes no answer: nothing in it waits.
+            if !sheet.resolved {
+                for decision in sheet.status.decisions {
+                    counts.decisions += usize::from(decision.answered_at.is_empty());
+                    decisions.push(DecisionRow {
+                        project: project.slug.clone(),
+                        coordinator: reference(),
+                        decision,
+                        actions: vec!["answer"],
+                    });
+                }
+            }
             for ask in sheet.status.asks {
                 if !listed(&ask, sheet.resolved) {
                     continue;
@@ -423,7 +451,10 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, node: Option<&str>, json: bool) -> R
             "schema_version": threads::JSON_SCHEMA_VERSION,
             "asks": rows,
         });
-        if !rows.is_empty() {
+        if !decisions.is_empty() {
+            document["decisions"] = serde_json::to_value(&decisions)?;
+        }
+        if !rows.is_empty() || !decisions.is_empty() {
             document["coordinators"] = serde_json::to_value(&coordinators)?;
         }
         return threads::print_json(&document);
@@ -575,12 +606,14 @@ pub fn read(text: &str, records: &Records, coordinator: &str) -> Contents {
             }),
             Section::NeedsDecision => {
                 let text = clean(bullet(line).unwrap_or(line));
-                contents.needs_decision.push(text.clone());
+                let (said, tokens) = split_links(&text);
                 contents.decisions.push(Decision {
                     line: index + 1,
-                    text,
+                    text: said.to_string(),
+                    links: tokens.iter().map(|t| link(t, records)).collect(),
                     answered_at,
                 });
+                contents.needs_decision.push(text);
             }
             Section::Other => {}
         }

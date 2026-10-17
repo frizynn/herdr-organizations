@@ -1634,7 +1634,7 @@ fn asks_filter_by_coordinator_and_count_each_coordinators_rows() {
         "nodes/t-0001/STATUS.md",
         "# Status\n## Asked\n- [working] Copy fix : landing it (t-0002)\n- [open] Docs : next\n",
     );
-    let counts = |waits: u64, mismatch: u64, progress: u64, done: u64| json!({"waits_on_you": waits, "does_not_close": mismatch, "in_progress": progress, "done": done, "unknown": 0});
+    let counts = |waits: u64, mismatch: u64, progress: u64, done: u64| json!({"decisions": 0, "waits_on_you": waits, "does_not_close": mismatch, "in_progress": progress, "done": done, "unknown": 0});
     let all = fixture.json(&["asks", "--project", "demo", "--json"]);
     assert_eq!(
         all["coordinators"],
@@ -1725,10 +1725,16 @@ fn decisions_carry_their_line_and_links_like_the_asks() {
     let status = &listed["projects"][0]["status_file"];
     assert_eq!(
         status["needs_decision"],
-        json!(["Pilot : yes or no (t-0001, https://example.com/plan)", "Budget : A or B"])
+        json!([
+            "Pilot : yes or no (t-0001, https://example.com/plan)",
+            "Budget : A or B"
+        ])
     );
     let first = &status["decisions"][0];
-    assert_eq!((first["line"].clone(), first["text"].clone()), (json!(4), json!("Pilot : yes or no")));
+    assert_eq!(
+        (first["line"].clone(), first["text"].clone()),
+        (json!(4), json!("Pilot : yes or no"))
+    );
     let kinds: Vec<&str> = first["links"]
         .as_array()
         .unwrap()
@@ -1744,10 +1750,16 @@ fn decisions_carry_their_line_and_links_like_the_asks() {
     let decisions = asks["decisions"].as_array().unwrap();
     assert_eq!(decisions.len(), 2);
     assert_eq!(decisions[0]["project"], "demo");
-    assert_eq!(decisions[0]["coordinator"], json!({"id": "root", "title": ""}));
+    assert_eq!(
+        decisions[0]["coordinator"],
+        json!({"id": "root", "title": ""})
+    );
     assert_eq!(decisions[0]["line"], 4);
     assert_eq!(decisions[0]["text"], "Pilot : yes or no");
-    assert_eq!(decisions[0]["links"][1]["target"], "https://example.com/plan");
+    assert_eq!(
+        decisions[0]["links"][1]["target"],
+        "https://example.com/plan"
+    );
     assert_eq!(decisions[0]["actions"], json!(["answer"]));
     assert_eq!(asks["coordinators"][0]["counts"]["decisions"], 2);
 }

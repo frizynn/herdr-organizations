@@ -38,7 +38,7 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `task list <slug> --node <id> --json` | `{schema_version, project, node: {id, title}, tasks: [Task + assignees, delegated, via, owner_node]}` |
 | `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
-| `asks [--project slug [--node id]] --json` | `{schema_version, asks: [Ask row], coordinators: [Coordinator count]}`, see [Asks](#asks) |
+| `asks [--project slug [--node id]] --json` | `{schema_version, asks: [Ask row], decisions: [Decision row], coordinators: [Coordinator count]}`, see [Asks](#asks) |
 | `asks answer <slug> <root\|id> --line N --text-file F --json` | `{schema_version, project, coordinator, line, answered_at}`, see [Answering an ask](#answering-an-ask) |
 | `profile list --project <slug> --json` | `{schema_version, project, coordinator: Choices, thread: Choices}`, see [Profile choices](#profile-choices) |
 
@@ -147,7 +147,14 @@ The plain Markdown file a coordinator writes about its own work, for a person or
 | `objective` | string | Its `Objective:` line. Present only when it has one; the template's `(none)` counts as none. |
 | `asks` | [Ask] | The lines under `## Asked`, in file order. Present only when there is one. |
 | `needs_decision` | [string] | The lines under `## Needs your decision`, without the bullet. Present only when there is one. |
-| `decisions` | [{line, text, answered_at}] | The same lines with their line in the file, and `answered_at` (RFC 3339) once the user answered that line with `asks answer` and until the coordinator changes it; left out while not answered. Present only when there is one. |
+| `decisions` | [Decision] | The same lines, structured: see below. Present only when there is one. |
+
+| Decision field | Type | Meaning |
+| --- | --- | --- |
+| `line` | number | Its line in the status file, from 1: what `asks answer --line` takes. |
+| `text` | string | The line without its bullet and without the links of its final parenthesis: `<decision> : <options>`. |
+| `links` | [Link] | The links of its final parenthesis, read as an [ask's](#asks) are. |
+| `answered_at` | string | RFC 3339, once the user answered the line with `asks answer` and until the coordinator changes it; left out otherwise. |
 
 A symbolic link or anything else that is not a regular file is `null`, like a missing file. These are read from `text`, so a file over 4,000 characters is read as far as that. A line under a heading that is only `(none)`, `none` or one parenthesis, such as `(nothing for now; ...)`, is not an item. A status file without them prints what it printed before they existed.
 
@@ -194,11 +201,13 @@ What the user asked a coordinator, as it wrote under `## Asked` in its status fi
 | the [Ask](#asks) fields | | |
 | `actions` | [string] | What the user can do from the row: `["answer"]` (see [Answering an ask](#answering-an-ask)) while the coordinator is not resolved, else empty. |
 
-`coordinators` has one entry per coordinator whose status file was read, in the order of the list's coordinators, each `{project, id, title, counts}` with `counts` as `{waits_on_you, does_not_close, in_progress, done, unknown}`: its listed rows in the groups above. It is left out when there is no row.
+`decisions` lists every coordinator's `## Needs your decision` lines, in project, coordinator and line order: each `{project, coordinator: {id, title}, actions}` with the [Decision](#status-file) fields (`line`, `text`, `links`, `answered_at`). `actions` is `["answer"]`. A resolved coordinator takes no answer, so its lines are left out. It is left out when there is none.
+
+`coordinators` has one entry per coordinator whose status file was read, in the order of the list's coordinators, each `{project, id, title, counts}` with `counts` as `{decisions, waits_on_you, does_not_close, in_progress, done, unknown}`: `decisions` is its decision lines not answered yet, the rest its listed rows in the groups above. It is left out when there is no row and no decision.
 
 ### Answering an ask
 
-`asks answer <slug> <root|t-NNNN> --line N --text-file <F|-> [--json]` answers line `N` of that coordinator's status file, an ask under `## Asked` or a line under `## Needs your decision`. `-` reads the text from standard input. It types into the coordinator `[from the user, answering your STATUS.md line N: "<ask>"] <text>`, where `<ask>` is the line's text and answer without its links, on one line of at most 120 characters. Then it records in `.state/answers.json` the line's text and when, so that line carries `answered_at` until the coordinator changes it.
+`asks answer <slug> <root|t-NNNN> --line N --text-file <F|-> [--json]` answers line `N` of that coordinator's status file, an ask under `## Asked` or a line under `## Needs your decision`. `-` reads the text from standard input. It types into the coordinator `[from the user, answering your STATUS.md line N: "<ask>"] <text>`, where `<ask>` is the line's text and answer without its links, on one line of at most 120 characters. Then it records in `.state/answers.json` the line's text and when, so that line carries `answered_at` until the coordinator changes it. The answer itself goes to the coordinator, whose skill says where it lands: an `## Asked` line gets its state and answer updated, and a `## Needs your decision` line moves to `## Decisions` as `- <date> <what the user decided>`.
 
 Exit 0 means the answer was typed. Otherwise the error is on standard error, the exit status is not 0 and nothing is recorded: the coordinator does not run or cannot take a prompt, the node is resolved or is no coordinator with a status file, line `N` is no ask or decision, the text is empty, or the command runs in a coordinator's own pane (it is the user's). With `--json` it prints `{"schema_version":1,"project":"<slug>","coordinator":"<root|t-NNNN>","line":N,"answered_at":"<RFC 3339>"}`. `asks answer --help` exits 0, so a client can tell the command is there.
 
