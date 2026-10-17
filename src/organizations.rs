@@ -2490,4 +2490,215 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), before);
         assert_eq!(tree(&project).unwrap()[0].thread.id, "t-0001");
     }
+
+    fn tab_node(project: &Project, title: &str, request: NodeRequest) -> Thread {
+        create_node(
+            project,
+            &CreateNode {
+                request,
+                title: title.into(),
+                kind: Kind::Tab,
+                repo: String::new(),
+                machine: String::new(),
+                base: String::new(),
+                task: "task".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn calling_from<'a>(world: &'a World, env: &'a Env) -> Ctx<'a> {
+        Ctx { env, ..world.ctx() }
+    }
+
+    /// `node move` changes the parent and nothing else; the node's next
+    /// brief composes the new parent's instructions instead of the old one's.
+    #[test]
+    fn moving_a_node_changes_only_its_parent_and_its_next_briefs_context() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let ctx = world.ctx();
+        let area_a = tab_node(&project, "A", request(ROOT_ID, NodeRole::Coordinator));
+        let area_b = tab_node(&project, "B", request(ROOT_ID, NodeRole::Coordinator));
+        let worker = tab_node(&project, "W", request(&area_a.id, NodeRole::Worker));
+        set_node_rules(&project, &area_a.id, "A-RULES").unwrap();
+        set_node_rules(&project, &area_b.id, "B-RULES").unwrap();
+
+        let moved = move_node(&ctx, &project, &worker.id, &area_b.id).unwrap();
+        assert_eq!(moved.parent_id, area_b.id);
+        assert_eq!(
+            Thread {
+                updated: worker.updated.clone(),
+                ..moved.clone()
+            },
+            Thread {
+                parent_id: area_b.id.clone(),
+                ..worker.clone()
+            }
+        );
+        assert_eq!(thread::load(&project, &worker.id).unwrap(), moved);
+        let context = scoped_context(&project, &moved).unwrap();
+        assert!(context.instructions.contains("B-RULES"), "{context:?}");
+        assert!(!context.instructions.contains("A-RULES"), "{context:?}");
+
+        let back = move_node(&ctx, &project, &worker.id, ROOT_ID).unwrap();
+        assert_eq!(back.parent_id, ROOT_ID);
+        // A coordinator moves with its subtree.
+        let child = tab_node(&project, "C", request(&area_a.id, NodeRole::Worker));
+        move_node(&ctx, &project, &area_a.id, &area_b.id).unwrap();
+        let depths: Vec<(String, usize)> = tree(&project)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.thread.id, entry.depth))
+            .collect();
+        assert_eq!(
+            depths,
+            [
+                (area_b.id.clone(), 1),
+                (area_a.id.clone(), 2),
+                (child.id.clone(), 3),
+                (worker.id.clone(), 1)
+            ]
+        );
+        assert_eq!(world.runner.calls.borrow().len(), 0);
+    }
+
+    /// The parent checks of `node start`, a node under itself or one of its
+    /// descendants, and callers that may not create there change nothing.
+    #[test]
+    fn moving_refuses_what_node_start_refuses_and_cycles() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let socket = project.coordinator().unwrap().socket;
+        let area = tab_node(&project, "Area", request(ROOT_ID, NodeRole::Coordinator));
+        let sub = tab_node(&project, "Sub", request(&area.id, NodeRole::Coordinator));
+        let leaf = tab_node(
+            &project,
+            "Leaf",
+            NodeRequest {
+                can_spawn: Some(false),
+                ..request(ROOT_ID, NodeRole::Coordinator)
+            },
+        );
+        let worker = tab_node(&project, "Worker", request(ROOT_ID, NodeRole::Worker));
+        thread::update(&project, &area.id, |t| t.pane_id = "w6:p1".into()).unwrap();
+        thread::update(&project, &worker.id, |t| t.pane_id = "w7:p1".into()).unwrap();
+        let before = thread::list(&project);
+        let plain = Env::for_test(world.home.path(), &[]);
+        let from_area = Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w6:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let from_worker = Env::for_test(
+            world.home.path(),
+            &[("HERDR_PANE_ID", "w7:p1"), ("HERDR_SOCKET_PATH", &socket)],
+        );
+        let cases: [(&Env, &str, &str, &str); 8] = [
+            (
+                &plain,
+                &worker.id,
+                &leaf.id,
+                "does not have permission to spawn children",
+            ),
+            (
+                &plain,
+                &leaf.id,
+                &worker.id,
+                "worker node `t-0004` cannot spawn children",
+            ),
+            (
+                &plain,
+                &worker.id,
+                "t-0099",
+                "parent node `t-0099` does not exist",
+            ),
+            (&plain, "t-0099", ROOT_ID, "t-0099"),
+            (
+                &plain,
+                &area.id,
+                &area.id,
+                "cannot move beneath itself or its own descendants",
+            ),
+            (
+                &plain,
+                &area.id,
+                &sub.id,
+                "cannot move beneath itself or its own descendants",
+            ),
+            (
+                &from_worker,
+                &leaf.id,
+                ROOT_ID,
+                "worker nodes cannot create children",
+            ),
+            (
+                &from_area,
+                &worker.id,
+                &leaf.id,
+                "coordinator `t-0001` may create children only beneath itself, not `t-0003`",
+            ),
+        ];
+        for (env, id, parent, expected) in cases {
+            let error = move_node(&calling_from(&world, env), &project, id, parent)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{id} -> {parent}: {error}");
+        }
+        assert_eq!(thread::list(&project), before);
+
+        // From its own pane a coordinator takes a node under itself.
+        let taken = move_node(
+            &calling_from(&world, &from_area),
+            &project,
+            &worker.id,
+            &area.id,
+        )
+        .unwrap();
+        assert_eq!(taken.parent_id, area.id);
+    }
+
+    /// A tree that is already broken refuses a move and is left as it was.
+    #[test]
+    fn moving_inside_a_tree_with_a_cycle_is_refused() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        let records = [
+            node("t-0001", "t-0002", NodeRole::Coordinator, true),
+            node("t-0002", "t-0001", NodeRole::Coordinator, true),
+            node("t-0003", ROOT_ID, NodeRole::Worker, false),
+        ];
+        for record in &records {
+            std::fs::write(
+                thread::record_path(&project, &record.id),
+                toml::to_string(record).unwrap(),
+            )
+            .unwrap();
+        }
+        let error = move_node(&world.ctx(), &project, "t-0003", "t-0001")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cycle"), "{error}");
+        assert_eq!(thread::load(&project, "t-0003").unwrap().parent_id, ROOT_ID);
+    }
+
+    /// `move` is offered for a node that is not resolved and has another
+    /// parent `node move` would accept.
+    #[test]
+    fn movable_nodes_are_the_ones_with_somewhere_else_to_go() {
+        let records = [
+            node("t-0001", ROOT_ID, NodeRole::Coordinator, true),
+            node("t-0002", "t-0001", NodeRole::Worker, false),
+            node("t-0003", ROOT_ID, NodeRole::Worker, false),
+            Thread {
+                status: Status::Resolved,
+                ..node("t-0004", "t-0001", NodeRole::Worker, false)
+            },
+        ];
+        // t-0001 has only root, where it is, and its own child below it.
+        assert_eq!(
+            movable(&records),
+            BTreeSet::from(["t-0002".to_string(), "t-0003".to_string()])
+        );
+        assert!(movable(&records[..1]).is_empty());
+    }
 }

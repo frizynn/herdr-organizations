@@ -1016,6 +1016,68 @@ mod tests {
         }
     }
 
+    /// A project tied to a session whose record names no root coordinator
+    /// pane organizes its coordinators without one: doctor says so and does
+    /// not warn. One whose root coordinator was opened and is gone still warns.
+    #[test]
+    fn a_project_without_a_root_coordinator_is_not_a_warning() {
+        let home = tempfile::tempdir().unwrap();
+        let env = Env::for_test(home.path(), &[]);
+        let runner = runner_with_herdr("herdr 0.9.1\n");
+        runner.on("agent list", ok(r#"{"result":{"agents":[]}}"#));
+        let root = home.path().join("root");
+        let project = project::create(&root, "demo", "", vec![]).unwrap();
+        let home_space = project.canonical_dir().to_string_lossy().into_owned();
+        runner.on(
+            "pane list",
+            ok(&format!(
+                r#"{{"result":{{"panes":[{{"pane_id":"w7:p1","tab_id":"w7:t1","workspace_id":"w7","cwd":"{home_space}"}}]}}}}"#
+            )),
+        );
+        let socket = home.path().join("a.sock");
+        std::fs::write(&socket, b"").unwrap();
+        project
+            .update_coordinator(|c| {
+                c.socket = socket.to_string_lossy().into_owned();
+                c.workspace_id = "w7".into();
+                c.tab_id = "w7:t1".into();
+                c.cwd = home_space.clone();
+            })
+            .unwrap();
+        let doctor = || {
+            report(
+                &env,
+                &root,
+                &home.path().join("cfg"),
+                &SessionFlags::default(),
+                &runner,
+                false,
+                None,
+            )
+            .0
+        };
+        let text = doctor();
+        assert!(
+            text.contains("[ok  ] project demo: active; socket "),
+            "{text}"
+        );
+        assert!(
+            text.contains("no root coordinator (optional: `open demo` starts one)"),
+            "{text}"
+        );
+        assert!(!text.contains("no coordinator running"), "{text}");
+
+        project
+            .update_coordinator(|c| c.pane_id = "w7:p2".into())
+            .unwrap();
+        let text = doctor();
+        assert!(
+            text.contains("[warn] project demo: active; socket "),
+            "{text}"
+        );
+        assert!(text.contains("no coordinator running"), "{text}");
+    }
+
     #[test]
     fn routines_skipped_for_want_of_a_coordinator_are_named() {
         let home = tempfile::tempdir().unwrap();

@@ -6805,3 +6805,79 @@ fn a_workers_report_that_proposes_what_to_remember_says_remember_in_its_nodes_wa
     );
     assert!(!woken[0].contains("IGNORE"), "{}", woken[0]);
 }
+
+/// `node start` in a project that was never opened ties it to the session
+/// `--socket` names and makes its home Space with only a shell: the node's
+/// tab opens there and no root coordinator starts. A refused start ties
+/// nothing.
+#[test]
+fn node_start_in_a_project_never_opened_makes_its_home_space_without_a_coordinator() {
+    let world = World::new();
+    let project = project::create(&world.root, "demo", "", vec![]).unwrap();
+    let socket = world.home.path().join("a.sock");
+    std::fs::write(&socket, b"").unwrap();
+    let home = project.canonical_dir().to_string_lossy().into_owned();
+    let panes = world.panes.clone();
+    let created_home = home.clone();
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("workspace create"),
+        move |_| {
+            *panes.borrow_mut() = format!(
+                "[{}]",
+                pane_json("w7", "w7:t1", "w7:p1", &created_home)
+            );
+            Ok(ok(
+                r#"{"result":{"root_pane":{"workspace_id":"w7","tab_id":"w7:t1","pane_id":"w7:p1"}}}"#,
+            ))
+        },
+    );
+    world.runner.on(
+        "tab create",
+        ok(r#"{"result":{"root_pane":{"workspace_id":"w7","tab_id":"w7:t2","pane_id":"w7:p2"}}}"#),
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    let ctx = world.ctx();
+    let session = crate::paths::SessionFlags {
+        session: None,
+        socket: Some(socket.clone()),
+    };
+    let area = |parent: &str| StartArgs {
+        title: "Area".into(),
+        repo: None,
+        machine: None,
+        profile: None,
+        kind: None,
+        base: None,
+        task: "Coordinate this area".into(),
+        node: crate::organizations::NodeRequest {
+            parent_id: parent.into(),
+            role: crate::thread::NodeRole::Coordinator,
+            ..crate::organizations::NodeRequest::default()
+        },
+    };
+
+    let refused = threads::start_in(&ctx, "demo", area("t-0042"), &session).unwrap_err();
+    assert!(refused.to_string().contains("does not exist"), "{refused}");
+    assert!(project.coordinator().is_none());
+    assert_eq!(world.runner.calls.borrow().len(), 0);
+
+    let node = threads::start_in(&ctx, "demo", area("root"), &session).unwrap();
+    let record = project.coordinator().unwrap();
+    assert_eq!(
+        (
+            record.socket.as_str(),
+            record.workspace_id.as_str(),
+            record.pane_id.as_str(),
+            record.cwd.as_str()
+        ),
+        (socket.to_str().unwrap(), "w7", "", home.as_str())
+    );
+    assert_eq!(
+        (node.workspace_id.as_str(), node.pane_id.as_str()),
+        ("w7", "w7:p2")
+    );
+    assert_eq!(world.runner.count("workspace create"), 1);
+    assert_eq!(world.runner.count("agent start"), 0);
+}

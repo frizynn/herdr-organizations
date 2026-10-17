@@ -1483,3 +1483,121 @@ fn node_usage_prints_a_row_per_node_and_the_documents_carry_it() {
         root
     );
 }
+
+/// `node move` as clients call it: `--parent <id>` or `--parent=<id>`, one
+/// JSON line with `--json`, and a refusal that exits non-zero with its reason
+/// on standard error and nothing on standard output. A node with another
+/// parent to go to lists `move` among its actions.
+#[test]
+fn node_move_prints_its_document_and_refuses_on_standard_error() {
+    let fixture = fixture();
+    let dir = Path::new(&fixture.root).join("demo");
+    std::fs::write(
+        dir.join("threads/t-0003.toml"),
+        "id = \"t-0003\"\ntitle = \"Research\"\nstatus = \"open\"\nkind = \"tab\"\n",
+    )
+    .unwrap();
+
+    let help = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(["node", "move", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+
+    let actions = |id: &str| {
+        let listed = fixture.json(&["node", "list", "demo", "--json"]);
+        listed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == id)
+            .unwrap()["actions"]
+            .clone()
+    };
+    assert_eq!(actions("t-0003"), json!(["move"]));
+    // Root is where it is and its only child is a worker: nowhere else to go.
+    assert_eq!(actions("t-0001"), json!([]));
+
+    assert_eq!(
+        fixture.json(&[
+            "node",
+            "move",
+            "demo",
+            "t-0003",
+            "--parent=t-0001",
+            "--json"
+        ]),
+        json!({"schema_version": 1, "id": "t-0003", "parent_id": "t-0001"})
+    );
+    assert_eq!(
+        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["parent_id"],
+        "t-0001"
+    );
+    assert_eq!(actions("t-0003"), json!(["move"]));
+    assert_eq!(
+        fixture.json(&[
+            "node", "move", "demo", "t-0003", "--parent", "root", "--json"
+        ]),
+        json!({"schema_version": 1, "id": "t-0003", "parent_id": "root"})
+    );
+    assert!(
+        fixture
+            .text(&["node", "move", "demo", "t-0003", "--parent", "t-0001"])
+            .contains("t-0003")
+    );
+
+    let refused = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(fixture.args(&[
+            "node", "move", "demo", "t-0003", "--parent", "t-0002", "--json",
+        ]))
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    let reason = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        reason.contains("worker node `t-0002` cannot spawn children"),
+        "{reason}"
+    );
+    assert_eq!(
+        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["parent_id"],
+        "t-0001"
+    );
+}
+
+/// A project bound to a session with no root coordinator (its record names
+/// no pane) has no `coordinator` object, as a project never opened, and
+/// `context` reads it as any other project.
+#[test]
+fn a_project_without_a_root_coordinator_has_no_coordinator_object() {
+    let fixture = fixture();
+    let dir = Path::new(&fixture.root).join("demo");
+    let opened = |pane: &str| {
+        std::fs::write(
+            dir.join(".state/coordinator.json"),
+            json!({
+                "socket": "/nonexistent/herdr.sock",
+                "workspace_id": "w7",
+                "tab_id": "w7:t1",
+                "pane_id": pane,
+                "cwd": std::fs::canonicalize(&dir).unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fixture.json(&["project", "show", "demo", "--json"])["project"].clone()
+    };
+    let organizer = opened("");
+    assert!(organizer.get("coordinator").is_none(), "{organizer}");
+    assert_eq!(opened("w7:p1")["coordinator"]["pane_id"], "w7:p1");
+    opened("");
+    assert!(
+        fixture
+            .text(&["context", "demo", "--peek"])
+            .contains("Project: demo (active)")
+    );
+}
