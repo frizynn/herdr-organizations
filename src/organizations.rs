@@ -407,21 +407,42 @@ pub fn requested_can_spawn(request: &NodeRequest) -> bool {
         .unwrap_or(request.role == NodeRole::Coordinator)
 }
 
+/// The parent a request names, root when it names none.
+fn requested_parent(request: &NodeRequest) -> &str {
+    if request.parent_id.is_empty() {
+        ROOT_ID
+    } else {
+        &request.parent_id
+    }
+}
+
+/// The checks every new node passes, started or adopted: its parent may
+/// spawn and a worker may not. Returns its spawn permission.
+fn check_placement(records: &[Thread], request: &NodeRequest) -> Result<bool> {
+    validate_parent(records, requested_parent(request))?;
+    let can_spawn = requested_can_spawn(request);
+    if request.role == NodeRole::Worker && can_spawn {
+        bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
+    }
+    Ok(can_spawn)
+}
+
+/// `check_placement` against the records on disk, for refusing an adoption
+/// before anything is asked of Herdr; `adopt_node` checks again under the lock.
+pub fn check_adoption(project: &Project, request: &NodeRequest) -> Result<()> {
+    check_rules_size(&request.rules)?;
+    let records = thread::list(project);
+    validate_tree(&records)?;
+    check_placement(&records, request).map(|_| ())
+}
+
 fn prepare_node_from(
     project: &Project,
     records: &[Thread],
     request: &NodeRequest,
 ) -> Result<(bool, AgentProfile)> {
-    let parent_id = if request.parent_id.is_empty() {
-        ROOT_ID
-    } else {
-        &request.parent_id
-    };
-    validate_parent(records, parent_id)?;
-    let can_spawn = requested_can_spawn(request);
-    if request.role == NodeRole::Worker && can_spawn {
-        bail!("worker nodes cannot spawn children; omit `--can-spawn` or pass `--can-spawn=false`");
-    }
+    let parent_id = requested_parent(request);
+    let can_spawn = check_placement(records, request)?;
 
     let mut profile = if parent_id == ROOT_ID {
         root_profile(project, request.role)?
@@ -528,11 +549,7 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.repo = args.repo.clone();
         record.machine = args.machine.clone();
         record.base = args.base.clone();
-        record.parent_id = if args.request.parent_id.is_empty() {
-            ROOT_ID.into()
-        } else {
-            args.request.parent_id.clone()
-        };
+        record.parent_id = requested_parent(&args.request).into();
         record.role = args.request.role;
         record.can_spawn = can_spawn;
         record.agent = profile.harness.clone();
@@ -549,7 +566,48 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         }
         .into();
     })?;
+    finish_node(project, &record, &args.request, &args.task, true)?;
+    Ok(record)
+}
 
+/// Records a pane that already runs an agent as a node under the parent
+/// `request` names, with the same checks as `create_node` under the same
+/// lock. `fill` sets what the pane says about itself. The node gets a scope
+/// only when it has rules or coordinates, so a plain adoption writes the
+/// files it always did.
+pub fn adopt_node(
+    project: &Project,
+    request: &NodeRequest,
+    task: &str,
+    fill: impl FnOnce(&mut Thread),
+) -> Result<Thread> {
+    check_rules_size(&request.rules)?;
+    let _lock = project.lock()?;
+    let records = thread::list(project);
+    validate_tree(&records)?;
+    let can_spawn = check_placement(&records, request)?;
+    let record = thread::allocate_locked(project, |record| {
+        fill(record);
+        record.kind = Kind::Adopted;
+        record.parent_id = requested_parent(request).into();
+        record.role = request.role;
+        record.can_spawn = can_spawn;
+    })?;
+    let scoped = !request.rules.trim().is_empty() || request.role == NodeRole::Coordinator;
+    finish_node(project, &record, request, task, scoped)?;
+    Ok(record)
+}
+
+/// What a new node's record comes with, written while the caller holds the
+/// lock: its task file, its scope when `scoped`, the TASKS.md link and its
+/// status file's folder. A failure removes them and the record.
+fn finish_node(
+    project: &Project,
+    record: &Thread,
+    request: &NodeRequest,
+    task: &str,
+    scoped: bool,
+) -> Result<()> {
     let scope = node_scope_dir(project, &record.id);
     let records = project.records_dir();
     let task_path = crate::records::task(&records, &record.id);
@@ -557,25 +615,32 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         thread::remove_record_locked(project, &record.id);
         bail!("task file {} already exists", task_path.display());
     }
-    let nodes_created = match create_node_scope(&scope, &args.request.rules, &args.request.memory) {
-        Ok(created) => created,
-        Err(error) => {
-            thread::remove_record_locked(project, &record.id);
-            return Err(error)
-                .with_context(|| format!("could not finish creating node `{}`", record.id));
+    let nodes_created = if scoped {
+        match create_node_scope(&scope, &request.rules, &request.memory) {
+            Ok(created) => created,
+            Err(error) => {
+                thread::remove_record_locked(project, &record.id);
+                return Err(error)
+                    .with_context(|| format!("could not finish creating node `{}`", record.id));
+            }
         }
+    } else {
+        false
     };
     // The task line is linked last, still under the lock, so a failure leaves
     // neither a record nor a line naming one.
-    let written = crate::records::write(&records, &task_path, args.task.as_bytes()).and_then(
-        |()| match &args.request.from_task {
-            Some(title) if args.request.task_id.is_empty() => link_task(project, title, &record.id),
+    let written =
+        crate::records::write(&records, &task_path, task.as_bytes()).and_then(|()| match &request
+            .from_task
+        {
+            Some(title) if request.task_id.is_empty() => link_task(project, title, &record.id),
             _ => Ok(()),
-        },
-    );
+        });
     if let Err(error) = written {
         let _ = std::fs::remove_file(&task_path);
-        let _ = std::fs::remove_dir_all(&scope);
+        if scoped {
+            let _ = std::fs::remove_dir_all(&scope);
+        }
         if nodes_created && let Some(nodes) = scope.parent() {
             let _ = std::fs::remove_dir(nodes);
         }
@@ -591,7 +656,76 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
             let _ = crate::records::make_folder(&records, folder);
         }
     }
-    Ok(record)
+    Ok(())
+}
+
+/// `node move`: puts node `id` and its subtree under `parent`, with the
+/// parent checks of `node start` and the caller's (a known pane may only
+/// use itself as the parent), under the lock. Only `parent_id` changes:
+/// nothing is restarted, and the node's next brief or restart composes the
+/// new ancestors' context.
+pub fn move_node(ctx: &Ctx, project: &Project, id: &str, parent: &str) -> Result<Thread> {
+    authorize_creator(
+        project,
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+        parent,
+    )?;
+    let parent = if parent.is_empty() { ROOT_ID } else { parent };
+    let _lock = project.lock()?;
+    let records = thread::list(project);
+    let by_id = validate_tree(&records)?;
+    if !by_id.contains_key(id) {
+        bail!("node `{id}` does not exist");
+    }
+    validate_parent(&records, parent)?;
+    if within(&by_id, parent, id) {
+        bail!("`{id}` cannot move beneath itself or its own descendants (`{parent}` is one)");
+    }
+    thread::update_locked(project, id, |record| record.parent_id = parent.into())
+}
+
+/// Whether `node`, or one of its ancestors, is `ancestor`, in a tree
+/// `validate_tree` accepted.
+fn within(by_id: &HashMap<&str, &Thread>, node: &str, ancestor: &str) -> bool {
+    let mut current = node;
+    while current != ROOT_ID {
+        if current == ancestor {
+            return true;
+        }
+        match by_id.get(current) {
+            Some(record) => current = parent_id(record),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The nodes `node move` could put somewhere else: not resolved, and with
+/// root or a coordinator that may spawn, outside their own subtree, as a
+/// parent other than their own. Empty for a tree `validate_tree` refuses.
+pub fn movable(records: &[Thread]) -> BTreeSet<String> {
+    let Ok(by_id) = validate_tree(records) else {
+        return BTreeSet::new();
+    };
+    let parents: Vec<&str> = std::iter::once(ROOT_ID)
+        .chain(
+            records
+                .iter()
+                .filter(|record| record.role == NodeRole::Coordinator && record.can_spawn)
+                .map(|record| record.id.as_str()),
+        )
+        .collect();
+    records
+        .iter()
+        .filter(|record| record.status != Status::Resolved)
+        .filter(|record| {
+            parents
+                .iter()
+                .any(|&parent| parent != parent_id(record) && !within(&by_id, parent, &record.id))
+        })
+        .map(|record| record.id.clone())
+        .collect()
 }
 
 /// Appends ` · <id>` to the TASKS.md task `title`, read again here: the
@@ -1157,6 +1291,20 @@ fn read_memory_files(
         ));
     }
     Ok(output)
+}
+
+/// The first lines of the brief of an adopted coordinator that may spawn:
+/// it was already at work, carries on, and its agents become its children.
+/// Fixed words, so nothing the agent said reaches its brief. Empty for every
+/// other node.
+pub fn adopted_preface(record: &Thread, command_prefix: &str, slug: &str) -> String {
+    if record.kind != Kind::Adopted || !record.is_spawning_coordinator() {
+        return String::new();
+    }
+    format!(
+        "You were already working in this pane before it joined this project as coordinator node `{}`. Carry on with what you had in progress. From now on the agents you run are your child nodes: adopt each one that is already running with `{command_prefix} node adopt {slug} --pane <pane id> --title \"Short title\"`, which places it under you, and start new ones with `node start` as described below. Keep your state in your status file, not in chat.\n\n",
+        record.id
+    )
 }
 
 pub fn node_protocol(record: &Thread, command_prefix: &str, slug: &str) -> String {

@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::herdr::{Agent, Herdr};
-use crate::organizations;
+use crate::organizations::{self, NodeRequest};
 use crate::paths::{self, Ctx, SessionFlags};
 use crate::project::{self, Project};
 use crate::runner::Cmd;
-use crate::thread::{self, Kind, Status, Thread};
+use crate::thread::{self, NodeRole, Status, Thread};
 use crate::{coordinator, threads, ticker};
 
 const DEFAULT_TASK: &str = "Continue the work you were already doing in this pane. It now belongs to the project described above: follow its instructions, and when you finish or stop to wait for the user, write the report.";
@@ -54,13 +54,26 @@ pub fn adoptable_agent(ctx: &Ctx, herdr: &Herdr, socket: &str, pane: &str) -> Re
     Ok(agent)
 }
 
-pub fn adopt(
-    ctx: &Ctx,
-    slug: &str,
-    pane: &str,
-    title: &str,
-    task: Option<String>,
-) -> Result<Thread> {
+/// What `thread adopt` and `node adopt` record about a running pane.
+#[derive(Debug, Clone, Default)]
+pub struct AdoptArgs {
+    pub pane: String,
+    pub title: String,
+    /// The task; none or blank continues the work already in the pane.
+    pub task: Option<String>,
+    /// `--parent`. `None` is the coordinator node whose pane runs the
+    /// command, else root, as before the node flags existed.
+    pub parent: Option<String>,
+    pub role: NodeRole,
+    /// `--can-spawn` or `--no-spawn`; unset, a coordinator may spawn.
+    pub can_spawn: Option<bool>,
+    /// Standing instructions written to the node's `INSTRUCTIONS.md`.
+    pub rules: String,
+    /// The session a project with no session record is tied to.
+    pub session: SessionFlags,
+}
+
+pub fn adopt(ctx: &Ctx, slug: &str, args: &AdoptArgs) -> Result<Thread> {
     let project = Project::load(&ctx.root, slug)?;
     if project.status() != project::Status::Active {
         bail!(
@@ -68,20 +81,34 @@ pub fn adopt(
             project.status()
         );
     }
-    if title.trim().is_empty() {
+    if args.title.trim().is_empty() {
         bail!("--title may not be empty");
     }
-    let record = project
-        .coordinator()
-        .with_context(|| format!("`{slug}` has never been opened; run `open {slug}` first"))?;
-    let parent_id = organizations::creator_parent(
-        &project,
+    let (caller_pane, caller_socket) = (
         ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
         ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
-    )?
-    .unwrap_or_else(|| organizations::ROOT_ID.into());
+    );
+    let parent_id = match &args.parent {
+        Some(parent) => parent.clone(),
+        None => organizations::creator_parent(&project, caller_pane, caller_socket)?
+            .unwrap_or_else(|| organizations::ROOT_ID.into()),
+    };
+    organizations::authorize_creator(&project, caller_pane, caller_socket, &parent_id)?;
+    let request = NodeRequest {
+        parent_id,
+        role: args.role,
+        can_spawn: args.can_spawn,
+        rules: args.rules.clone(),
+        ..NodeRequest::default()
+    };
+    // Refused before Herdr is asked anything; checked again under the lock.
+    organizations::check_adoption(&project, &request)?;
+    let record = match project.coordinator() {
+        Some(record) => record,
+        None => coordinator::bind(ctx, &project, &args.session)?,
+    };
     let herdr = Herdr::new(ctx.env.herdr_bin(), &record.socket, ctx.runner);
-    let agent = adoptable_agent(ctx, &herdr, &record.socket, pane)?;
+    let agent = adoptable_agent(ctx, &herdr, &record.socket, &args.pane)?;
     ticker::start(ctx)?;
 
     // The pane's repository and branch, when it is in one.
@@ -104,12 +131,13 @@ pub fn adopt(
         .unwrap_or_default();
     let origin = git(&["remote", "get-url", "origin"]).unwrap_or_default();
 
-    let created = thread::allocate(&project, |t| {
-        t.title = title.trim().to_string();
-        t.kind = Kind::Adopted;
-        t.parent_id = parent_id;
-        t.role = thread::NodeRole::Worker;
-        t.can_spawn = false;
+    let task = args
+        .task
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_TASK.to_string());
+    let created = organizations::adopt_node(&project, &request, &task, |t| {
+        t.title = args.title.trim().to_string();
         t.repo = repo;
         t.branch = branch;
         t.origin = origin;
@@ -122,20 +150,8 @@ pub fn adopt(
         t.pane_id = agent.pane_id.clone();
     })?;
     let id = created.id.clone();
-    let task = task
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_TASK.to_string());
 
     let briefed = (|| -> Result<()> {
-        {
-            let _lock = project.lock()?;
-            let records = project.records_dir();
-            crate::records::write(
-                &records,
-                &crate::records::task(&records, &id),
-                task.as_bytes(),
-            )?;
-        }
         // Two adopted panes in one directory still get separate thread directories.
         let dir = thread::thread_dir(&agent.cwd, slug, &id);
         let with_dir = Thread {
@@ -253,7 +269,15 @@ pub fn adopt_workspace(ctx: &Ctx, args: &AdoptWorkspace) -> Result<()> {
             here: false,
         },
     )?;
-    let adopted = adopt(ctx, &project.slug, &args.pane, &args.name, None)?;
+    let adopted = adopt(
+        ctx,
+        &project.slug,
+        &AdoptArgs {
+            pane: args.pane.clone(),
+            title: args.name.clone(),
+            ..AdoptArgs::default()
+        },
+    )?;
     println!(
         "adopted pane {} as thread {} of `{}`",
         args.pane, adopted.id, project.slug
@@ -268,7 +292,7 @@ mod tests {
     use crate::paths::Env;
     use crate::runner::fake::{fail, ok};
     use crate::scenarios::{World, agent_json};
-    use crate::thread::NodeRole;
+    use crate::thread::Kind;
 
     fn world_with_agent(state: &str, name: &str) -> (World, Project, String) {
         let world = World::new();
@@ -318,7 +342,7 @@ mod tests {
         (world, project, cwd)
     }
 
-    fn from_pane<'a>(world: &'a World, project: &Project, pane: &str) -> Env {
+    fn from_pane(world: &World, project: &Project, pane: &str) -> Env {
         let socket = project.coordinator().unwrap().socket;
         Env::for_test(
             world.home.path(),
@@ -408,7 +432,7 @@ mod tests {
     /// that its agents are now its children. A worker's brief has none of it.
     #[test]
     fn an_adopted_coordinator_is_told_to_carry_on_with_its_agents_as_children() {
-        let (world, project, _) = world_with_three_agents();
+        let (world, _, _) = world_with_three_agents();
         let ctx = world.ctx();
         let coordinator = adopt(
             &ctx,

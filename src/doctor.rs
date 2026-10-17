@@ -501,7 +501,15 @@ fn report(
                         if workspace { "open" } else { "closed" }
                     ));
                 }
-                if coordinators.is_empty() {
+                // A record that names no pane was tied to its session by
+                // `node start` or `node adopt`: it organizes coordinator
+                // nodes and its root coordinator is optional.
+                let organizer = record.as_ref().is_some_and(|r| r.pane_id.is_empty());
+                if coordinators.is_empty() && organizer {
+                    notes.push(format!(
+                        "no root coordinator (optional: `open {slug}` starts one)"
+                    ));
+                } else if coordinators.is_empty() {
                     notes.push(none);
                 } else {
                     notes.push(format!("coordinator: {}", coordinators.join(", ")));
@@ -511,7 +519,7 @@ fn report(
                 }
                 check(
                     &mut out,
-                    if coordinators.is_empty() && record.is_some() {
+                    if coordinators.is_empty() && record.is_some() && !organizer {
                         None
                     } else {
                         Some(true)

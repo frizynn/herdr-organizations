@@ -1532,7 +1532,7 @@ fn node_move_prints_its_document_and_refuses_on_standard_error() {
         json!({"schema_version": 1, "id": "t-0003", "parent_id": "t-0001"})
     );
     assert_eq!(
-        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["parent_id"],
+        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["thread"]["parent_id"],
         "t-0001"
     );
     assert_eq!(actions("t-0003"), json!(["move"]));
@@ -1564,7 +1564,7 @@ fn node_move_prints_its_document_and_refuses_on_standard_error() {
         "{reason}"
     );
     assert_eq!(
-        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["parent_id"],
+        fixture.json(&["node", "show", "demo", "t-0003", "--json"])["thread"]["parent_id"],
         "t-0001"
     );
 }

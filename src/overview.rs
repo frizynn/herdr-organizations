@@ -188,7 +188,8 @@ pub struct ProjectJson {
     pub usage: Option<crate::usage::Usage>,
     /// The root coordinator's STATUS.md, `null` while it does not exist.
     pub status_file: Option<crate::status_file::StatusJson>,
-    /// Left out for a project that was never opened.
+    /// Left out for a project with no root coordinator: one never opened,
+    /// or tied to its session by `node start` or `node adopt` alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorJson>,
 }
@@ -206,7 +207,7 @@ pub struct CoordinatorJson {
 }
 
 fn coordinator_json(project: &Project) -> Option<CoordinatorJson> {
-    let record = project.coordinator()?;
+    let record = project.coordinator().filter(|r| !r.pane_id.is_empty())?;
     let state = crate::coordinator::live(project)
         .into_iter()
         .find(|pane| pane.pane_id == record.pane_id)
