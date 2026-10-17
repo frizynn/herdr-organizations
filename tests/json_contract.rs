@@ -1483,3 +1483,109 @@ fn node_usage_prints_a_row_per_node_and_the_documents_carry_it() {
         root
     );
 }
+
+/// A line under `## Asked` or `## Needs your decision` that is only a
+/// parenthesis is what a coordinator writes when there is nothing: no item.
+#[test]
+fn a_line_that_is_only_a_parenthesis_is_no_ask_and_no_decision() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\nObjective: Ship it\n## Asked\n- (nothing for now; no unit depends on it)\n(none)\n## Needs your decision\n- (nothing for now; no unit of the first batch depends on what is left to confirm)\n- Pilot (yes or no)\n",
+    );
+    assert_eq!(fixture.json(&["asks", "--json"])["asks"], json!([]));
+    let listed = fixture.json(&["list", "--json"]);
+    let status = &listed["projects"][0]["status_file"];
+    assert_eq!(status["needs_decision"], json!(["Pilot (yes or no)"]));
+    assert_eq!(status.get("asks"), None);
+}
+
+/// `asks --project P --node <id>` keeps one coordinator's rows, and the
+/// document counts each coordinator's rows in the groups of the list.
+#[test]
+fn asks_filter_by_coordinator_and_count_each_coordinators_rows() {
+    let fixture = fixture();
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\n## Asked\n- [needs-decision] Pilot or not : yes or no\n- [answered] Is it fast? : yes\n",
+    );
+    write(
+        &fixture,
+        "nodes/t-0001/STATUS.md",
+        "# Status\n## Asked\n- [working] Copy fix : landing it (t-0002)\n- [open] Docs : next\n",
+    );
+    let counts = |waits: u64, mismatch: u64, progress: u64, done: u64| {
+        json!({"waits_on_you": waits, "does_not_close": mismatch, "in_progress": progress, "done": done, "unknown": 0})
+    };
+    let all = fixture.json(&["asks", "--project", "demo", "--json"]);
+    assert_eq!(
+        all["coordinators"],
+        json!([
+            {"project": "demo", "id": "root", "title": "", "counts": counts(1, 0, 0, 1)},
+            {"project": "demo", "id": "t-0001", "title": "Checkout", "counts": counts(0, 1, 1, 0)},
+        ])
+    );
+    let node = fixture.json(&["asks", "--project", "demo", "--node", "t-0001", "--json"]);
+    let ids: Vec<&str> = node["asks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["coordinator"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["t-0001", "t-0001"]);
+    assert_eq!(node["coordinators"].as_array().unwrap().len(), 1);
+    // Each row of a coordinator that still runs can be answered.
+    assert_eq!(node["asks"][0]["actions"], json!(["answer"]));
+    let text = fixture.text(&["asks", "--project", "demo", "--node", "root"]);
+    assert_eq!(text.lines().count(), 2, "{text}");
+    let out = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(fixture.args(&["asks", "--node", "root"]))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "--node needs --project");
+}
+
+/// `asks answer` is there (`--help` exits 0), and refuses while the
+/// coordinator does not run, recording nothing.
+#[test]
+fn asks_answer_is_available_and_refuses_a_coordinator_that_does_not_run() {
+    let fixture = fixture();
+    let help = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(["asks", "answer", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    write(
+        &fixture,
+        "STATUS.md",
+        "# Status\n## Asked\n- [needs-decision] Pilot or not : yes or no (t-0001)\n",
+    );
+    let answer = fixture.home.path().join("answer.txt");
+    std::fs::write(&answer, "Yes, pilot it.\n").unwrap();
+    let out = Command::new(BIN)
+        .env_clear()
+        .env("HOME", fixture.home.path())
+        .args(fixture.args(&[
+            "asks",
+            "answer",
+            "demo",
+            "root",
+            "--line",
+            "3",
+            "--text-file",
+            answer.to_str().unwrap(),
+            "--json",
+        ]))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
+    assert!(!Path::new(&fixture.dir()).join(".state/answers.json").exists());
+}
