@@ -6,7 +6,9 @@
 //! of an ask is the user's and the coordinator's words: it is shown, and it
 //! never goes into a prompt.
 
-use anyhow::Result;
+use std::collections::BTreeMap;
+
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::organizations::{self, ROOT_ID};
@@ -141,6 +143,26 @@ pub struct Ask {
     /// Why the state the coordinator wrote does not close with what its
     /// links confirm, in this binary's words; empty when it does.
     pub mismatch: String,
+    /// When the user answered this line with `asks answer`, RFC 3339; empty
+    /// when not, or once the coordinator changed the line.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub answered_at: String,
+}
+
+/// One line under `## Needs your decision`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Decision {
+    /// Its line in the status file, from 1.
+    pub line: usize,
+    /// Without the bullet and the links of its final parenthesis:
+    /// `<decision> : <options>`.
+    pub text: String,
+    /// The links of its final parenthesis, read as an ask's are.
+    pub links: Vec<Link>,
+    /// As `Ask::answered_at`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub answered_at: String,
 }
 
 impl Ask {
@@ -159,7 +181,7 @@ impl Ask {
     /// its `needs-decision` asks wait on no one and go with the open ones.
     pub fn rank(&self, coordinator_resolved: bool) -> u8 {
         match self.state {
-            State::NeedsDecision if !coordinator_resolved => 0,
+            State::NeedsDecision if !coordinator_resolved && self.answered_at.is_empty() => 0,
             _ if !self.mismatch.is_empty() => 1,
             State::Open | State::Working | State::NeedsDecision => 2,
             State::Answered | State::Done => 3,
@@ -187,23 +209,51 @@ pub struct Contents {
     pub asks: Vec<Ask>,
     /// The lines under `## Needs your decision`.
     pub needs_decision: Vec<String>,
+    /// The same lines, with their line and whether the user answered them.
+    pub decisions: Vec<Decision>,
 }
 
-/// What an ask is confirmed against: the project's thread records and the
-/// tasks already on disk.
+/// `.state/answers.json`: per coordinator (`root` or a node id), the text of
+/// each status file line the user answered with `asks answer`, and when. A
+/// line the coordinator rewrote is another text, so it reads unanswered.
+type Answers = BTreeMap<String, BTreeMap<String, String>>;
+
+fn answers_path(project: &Project) -> std::path::PathBuf {
+    project.state_dir().join("answers.json")
+}
+
+/// What an ask is confirmed against: the project's thread records, the
+/// tasks already on disk and the user's answers.
 #[derive(Debug, Clone, Default)]
 pub struct Records {
     threads: Vec<Thread>,
     tasks: Vec<Task>,
+    answers: Answers,
 }
 
 impl Records {
     pub fn new(threads: Vec<Thread>, tasks: Vec<Task>) -> Records {
-        Records { threads, tasks }
+        Records {
+            threads,
+            tasks,
+            answers: Answers::new(),
+        }
     }
 
     pub fn load(ctx: &Ctx, project: &Project) -> Records {
-        Records::new(thread::list(project), tasks::on_disk(ctx, project))
+        Records {
+            answers: project::read_json(&answers_path(project)).unwrap_or_default(),
+            ..Records::new(thread::list(project), tasks::on_disk(ctx, project))
+        }
+    }
+
+    /// When the user answered the line `text` of `coordinator`'s file.
+    fn answered(&self, coordinator: &str, text: &str) -> String {
+        self.answers
+            .get(coordinator)
+            .and_then(|lines| lines.get(text))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn thread(&self, id: &str) -> Option<&Thread> {
@@ -262,7 +312,7 @@ pub fn sheets(project: &Project, records: &Records) -> Vec<Sheet> {
     root.into_iter()
         .chain(nodes)
         .map(|sheet| Sheet {
-            status: sheet.status.confirmed(records),
+            status: sheet.status.confirmed(records, &sheet.coordinator),
             ..sheet
         })
         .collect()
@@ -275,6 +325,9 @@ struct Row {
     coordinator: CoordinatorRef,
     #[serde(flatten)]
     ask: Ask,
+    /// What the user can do from the row: `answer` while the coordinator
+    /// takes one.
+    actions: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -283,10 +336,41 @@ struct CoordinatorRef {
     title: String,
 }
 
-/// `asks [--project P] [--json]`: every listed ask of every project that is
-/// not archived, or of one, most pressing first (`Ask::rank`), else in
-/// project, coordinator and line order. It only reads.
-pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
+/// A coordinator's rows, counted in the groups of `Ask::rank`.
+#[derive(Serialize, Default)]
+struct Counts {
+    /// Its `## Needs your decision` lines not answered yet.
+    decisions: usize,
+    waits_on_you: usize,
+    does_not_close: usize,
+    in_progress: usize,
+    done: usize,
+    unknown: usize,
+}
+
+/// One line under `## Needs your decision` in `asks --json`.
+#[derive(Serialize)]
+struct DecisionRow {
+    project: String,
+    coordinator: CoordinatorRef,
+    #[serde(flatten)]
+    decision: Decision,
+    actions: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct CoordinatorCount {
+    project: String,
+    #[serde(flatten)]
+    coordinator: CoordinatorRef,
+    counts: Counts,
+}
+
+/// `asks [--project P [--node ID]] [--json]`: every listed ask of every
+/// project that is not archived, or of one, or of one of its coordinators,
+/// most pressing first (`Ask::rank`), else in project, coordinator and line
+/// order. It only reads.
+pub fn print(ctx: &Ctx, slug: Option<&str>, node: Option<&str>, json: bool) -> Result<()> {
     let slugs = match slug {
         Some(slug) => {
             project::validate_slug(slug)?;
@@ -295,34 +379,85 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
         None => crate::overview::visible_slugs(ctx),
     };
     let mut rows = Vec::new();
+    let mut decisions = Vec::new();
+    let mut coordinators = Vec::new();
     for slug in slugs {
         let project = Project::load(&ctx.root, &slug)?;
         let records = Records::load(ctx, &project);
-        for sheet in sheets(&project, &records) {
-            for ask in sheet.status.asks {
-                if listed(&ask, sheet.resolved) {
-                    rows.push((
-                        ask.rank(sheet.resolved),
-                        Row {
-                            project: project.slug.clone(),
-                            coordinator: CoordinatorRef {
-                                id: sheet.coordinator.clone(),
-                                title: sheet.title.clone(),
-                            },
-                            ask,
-                        },
-                    ));
+        let sheets = sheets(&project, &records);
+        if let Some(node) = node
+            && !sheets.iter().any(|sheet| sheet.coordinator == node)
+        {
+            bail!("`{node}` is no coordinator of `{slug}` with a status file");
+        }
+        for sheet in sheets {
+            if node.is_some_and(|node| node != sheet.coordinator) {
+                continue;
+            }
+            let reference = || CoordinatorRef {
+                id: sheet.coordinator.clone(),
+                title: sheet.title.clone(),
+            };
+            let mut counts = Counts::default();
+            // A resolved coordinator takes no answer: nothing in it waits.
+            if !sheet.resolved {
+                for decision in sheet.status.decisions {
+                    counts.decisions += usize::from(decision.answered_at.is_empty());
+                    decisions.push(DecisionRow {
+                        project: project.slug.clone(),
+                        coordinator: reference(),
+                        decision,
+                        actions: vec!["answer"],
+                    });
                 }
             }
+            for ask in sheet.status.asks {
+                if !listed(&ask, sheet.resolved) {
+                    continue;
+                }
+                let rank = ask.rank(sheet.resolved);
+                *match rank {
+                    0 => &mut counts.waits_on_you,
+                    1 => &mut counts.does_not_close,
+                    2 => &mut counts.in_progress,
+                    3 => &mut counts.done,
+                    _ => &mut counts.unknown,
+                } += 1;
+                rows.push((
+                    rank,
+                    Row {
+                        project: project.slug.clone(),
+                        coordinator: reference(),
+                        ask,
+                        actions: if sheet.resolved {
+                            Vec::new()
+                        } else {
+                            vec!["answer"]
+                        },
+                    },
+                ));
+            }
+            coordinators.push(CoordinatorCount {
+                project: project.slug.clone(),
+                coordinator: reference(),
+                counts,
+            });
         }
     }
     rows.sort_by_key(|(rank, _)| *rank);
     let rows: Vec<Row> = rows.into_iter().map(|(_, row)| row).collect();
     if json {
-        return threads::print_json(&serde_json::json!({
+        let mut document = serde_json::json!({
             "schema_version": threads::JSON_SCHEMA_VERSION,
             "asks": rows,
-        }));
+        });
+        if !decisions.is_empty() {
+            document["decisions"] = serde_json::to_value(&decisions)?;
+        }
+        if !rows.is_empty() || !decisions.is_empty() {
+            document["coordinators"] = serde_json::to_value(&coordinators)?;
+        }
+        return threads::print_json(&document);
     }
     for row in &rows {
         let coordinator = if row.coordinator.title.is_empty() {
@@ -333,10 +468,14 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
         let ask = &row.ask;
         let said = ask.said();
         let links: Vec<String> = ask.links.iter().map(Link::words).collect();
+        let state = if ask.answered_at.is_empty() {
+            ask.state.word().to_string()
+        } else {
+            format!("{} (answered)", ask.state.word())
+        };
         println!(
-            "{}\t{coordinator}\t{}\t{}\t{}\t{said}\t{}",
+            "{}\t{coordinator}\t{state}\t{}\t{}\t{said}\t{}",
             row.project,
-            ask.state.word(),
             ask.confirmed.word(),
             ask.mismatch,
             links.join(", ")
@@ -345,9 +484,87 @@ pub fn print(ctx: &Ctx, slug: Option<&str>, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Reads a status file's text. It never fails: a line under `## Asked` that
-/// does not follow the format is an ask in state `unknown` with its text.
-pub fn read(text: &str, records: &Records) -> Contents {
+/// What `asks answer` recorded.
+#[derive(Debug, Serialize)]
+pub struct Answered {
+    pub answered_at: String,
+}
+
+/// `asks answer`: types the user's `text`, one line, into `coordinator`
+/// (`root` or a coordinator node's id) as their answer to line `line` of
+/// its status file, an ask or a decision, named by its number only. Refused
+/// from a coordinator's own pane, for a resolved node and while the
+/// coordinator does not run; only an answer that was sent is recorded.
+pub fn answer(
+    ctx: &Ctx,
+    slug: &str,
+    coordinator: &str,
+    line: usize,
+    text: &str,
+) -> Result<Answered> {
+    let project = Project::load(&ctx.root, slug)?;
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("the answer is empty");
+    }
+    if text.chars().any(char::is_control) {
+        bail!(
+            "the answer is one line of text; a line break would be typed into the coordinator's pane"
+        );
+    }
+    if organizations::called_by_coordinator(ctx, &project) {
+        bail!(
+            "asks answer is the user's; a coordinator writes to another with `node prompt` or `coordinator prompt`"
+        );
+    }
+    let status = if coordinator == ROOT_ID {
+        status_file::read(&status_file::root(&project))
+    } else {
+        let node = thread::load(&project, coordinator)?;
+        if !node.is_spawning_coordinator() {
+            bail!("{coordinator} is no coordinator node with a status file");
+        }
+        if node.status == thread::Status::Resolved {
+            bail!("{coordinator} is resolved and takes no answer");
+        }
+        organizations::node_status_json(&project, &node)
+    }
+    .with_context(|| format!("{coordinator} of `{slug}` has no status file"))?;
+    let contents = read(&status.text, &Records::default(), coordinator);
+    let item = contents.asks.iter().any(|ask| ask.line == line)
+        || contents.decisions.iter().any(|d| d.line == line);
+    if !item {
+        bail!("line {line} of {} is no ask or decision", status.path);
+    }
+    // The line is named, never quoted: its text is the coordinator's, and
+    // may hold a title from outside, which must not come back as the user's.
+    let prompt = format!(
+        "[from the user, answering your {} line {line}] {text}",
+        status_file::NAME
+    );
+    if coordinator == ROOT_ID {
+        crate::coordinator::send(ctx, slug, &prompt)?;
+    } else {
+        threads::prompt(ctx, slug, coordinator, &prompt)?;
+    }
+    let answered_at = project::now();
+    let _lock = project.lock()?;
+    let path = answers_path(&project);
+    let mut answers: Answers = project::read_json(&path).unwrap_or_default();
+    let lines: Vec<&str> = status.text.lines().map(str::trim).collect();
+    let mine = answers.entry(coordinator.to_string()).or_default();
+    mine.retain(|text, _| lines.contains(&text.as_str()));
+    if let Some(raw) = lines.get(line - 1) {
+        mine.insert(raw.to_string(), answered_at.clone());
+    }
+    project::write_json(&path, &answers)?;
+    Ok(Answered { answered_at })
+}
+
+/// Reads `coordinator`'s status file text. It never fails: a line under
+/// `## Asked` that does not follow the format is an ask in state `unknown`
+/// with its text.
+pub fn read(text: &str, records: &Records, coordinator: &str) -> Contents {
     let mut contents = Contents::default();
     let mut section = Section::Other;
     for (index, line) in text.lines().enumerate() {
@@ -367,11 +584,23 @@ pub fn read(text: &str, records: &Records) -> Contents {
         if line.is_empty() || is_placeholder(line) {
             continue;
         }
+        let answered_at = records.answered(coordinator, line);
         match section {
-            Section::Asked => contents.asks.push(ask(index + 1, line, records)),
-            Section::NeedsDecision => contents
-                .needs_decision
-                .push(clean(bullet(line).unwrap_or(line))),
+            Section::Asked => contents.asks.push(Ask {
+                answered_at,
+                ..ask(index + 1, line, records)
+            }),
+            Section::NeedsDecision => {
+                let text = clean(bullet(line).unwrap_or(line));
+                let (said, tokens) = split_links(&text);
+                contents.decisions.push(Decision {
+                    line: index + 1,
+                    text: said.to_string(),
+                    links: tokens.iter().map(|t| link(t, records)).collect(),
+                    answered_at,
+                });
+                contents.needs_decision.push(text);
+            }
             Section::Other => {}
         }
     }
@@ -405,13 +634,32 @@ fn bullet(line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-/// `- (none)` and the like, which coordinators write under an empty heading.
+/// `- (none)`, `none` or any line that is one parenthesis, such as `(nothing
+/// for now; ...)`: what coordinators write under an empty heading.
 fn is_placeholder(line: &str) -> bool {
-    let text = bullet(line).unwrap_or(line).trim();
-    let text = text.strip_prefix('(').unwrap_or(text);
-    let text = text.trim_end_matches('.');
-    let text = text.strip_suffix(')').unwrap_or(text);
-    text.trim().eq_ignore_ascii_case("none")
+    let text = bullet(line).unwrap_or(line).trim().trim_end_matches('.');
+    text.eq_ignore_ascii_case("none") || is_one_parenthesis(text)
+}
+
+/// `(...)` whose first parenthesis closes at its last character.
+fn is_one_parenthesis(text: &str) -> bool {
+    let Some(inner) = text.strip_prefix('(') else {
+        return false;
+    };
+    let mut depth = 1;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1 == inner.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// One line, without control characters: the text is shown in a terminal.
@@ -458,6 +706,7 @@ fn ask(line: usize, text: &str, records: &Records) -> Ask {
         confirmed: confirmed(&links),
         mismatch: mismatch(state, &links).unwrap_or_default().to_string(),
         links,
+        answered_at: String::new(),
     }
 }
 
@@ -725,23 +974,29 @@ mod tests {
     }
 
     fn one(line: &str) -> Ask {
-        let asks = read(&format!("# Status\n## Asked\n{line}\n"), &records()).asks;
+        let asks = read(
+            &format!("# Status\n## Asked\n{line}\n"),
+            &records(),
+            ROOT_ID,
+        )
+        .asks;
         assert_eq!(asks.len(), 1, "{line}: {asks:?}");
         asks.into_iter().next().unwrap()
     }
 
     #[test]
     fn the_empty_template_a_file_without_asked_and_odd_lines_read_without_error() {
-        let template = read(crate::status_file::TEMPLATE, &records());
+        let template = read(crate::status_file::TEMPLATE, &records(), ROOT_ID);
         assert_eq!(template.objective, "", "the template's (none) is unset");
         assert!(template.asks.is_empty() && template.needs_decision.is_empty());
 
-        let plain = read("Just notes, no sections.\n", &records());
+        let plain = read("Just notes, no sections.\n", &records(), ROOT_ID);
         assert_eq!(plain, Contents::default());
 
         let odd = read(
             "# Status\n## Asked\n- (none)\nsome prose line\n- [blocked] Deploy : later\n- [done]\n\n## Needs your decision\n- none\n- Pilot : yes or no (https://example.com/plan)\n",
             &records(),
+            ROOT_ID,
         );
         let states: Vec<(State, &str)> = odd
             .asks
@@ -922,6 +1177,7 @@ mod tests {
             read(
                 &format!("## Asked\n- [done] Ship : merged ({links})\n"),
                 &records,
+                ROOT_ID,
             )
             .asks[0]
                 .clone()
@@ -960,7 +1216,7 @@ mod tests {
     #[test]
     fn asks_rank_decisions_then_mismatches_then_work_then_done() {
         let file = "## Asked\n- [done] a : b\n- [working] c : d\n- [open] e : f (t-0003)\n- [needs-decision] g : h\n- odd\n- [answered] i : j\n";
-        let mut asks = read(file, &records()).asks;
+        let mut asks = read(file, &records(), ROOT_ID).asks;
         asks.sort_by_key(|a| a.rank(false));
         let texts: Vec<&str> = asks.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(texts, ["g", "c", "e", "a", "i", "odd"]);

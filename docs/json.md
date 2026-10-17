@@ -34,10 +34,12 @@ Every document carries `"schema_version": 1`, except the bare array of `template
 | `template show <name> [--project slug] --json` | `{schema_version, template: Template + rules, memory, memory_files}` |
 | `project show <slug> --json` | `{schema_version, project: Project + the fields of [Project detail](#project-detail)}` |
 | `project status <slug> --json` | `{schema_version, project, generated_at, objective, sources, items: [Status item], drift, problems: [Problem], next}`, see [Project status](#project-status) |
-| `task list <slug> --json` | `{schema_version, project, tasks: [Task]}` |
+| `task list <slug> --json` | `{schema_version, project, tasks: [Task]}`, with `owners` and `unowned` once coordinators have tasks (see [Task](#task)) |
+| `task list <slug> --node <id> --json` | `{schema_version, project, node: {id, title}, tasks: [Task + assignees, delegated, via, owner_node]}` |
 | `task lint <slug> --json` | `{schema_version, project, problems: [Problem]}` |
 | `routine list <slug> --json` | `{schema_version, project, routine_commands, routines: [Routine], broken: [{file, error}]}` |
-| `asks [--project slug] --json` | `{schema_version, asks: [Ask row]}`, see [Asks](#asks) |
+| `asks [--project slug [--node id]] --json` | `{schema_version, asks: [Ask row], decisions: [Decision row], coordinators: [Coordinator count]}`, see [Asks](#asks) |
+| `asks answer <slug> <root\|id> --line N --text-file F --json` | `{schema_version, project, coordinator, line, answered_at}`, see [Answering an ask](#answering-an-ask) |
 | `profile list --project <slug> --json` | `{schema_version, project, coordinator: Choices, thread: Choices}`, see [Profile choices](#profile-choices) |
 
 `overview --json` never prompts. With no slug it uses the project of the current Herdr workspace (`HERDR_WORKSPACE_ID` and `HERDR_SOCKET_PATH`), and if there is none it lists every project that is not archived.
@@ -128,6 +130,8 @@ Threads are listed in id order. Nodes are listed in tree order (preorder, starti
 | `task` | string | The title of the task it was delegated from (`--from-task`), as written in `TASKS.md` or the tracker when it started. Empty for a thread started without one. |
 | `task_origin` | `"task"`, `"chat"` or `""` | `task`: started with `--from-task`. `chat`: started without it, from chat, the popup or a client. Empty: a record from before task links, or an adopted pane. |
 | `task_id` | string | The [tracker's](operations.md#tasks-from-a-tracker) id of that task. Present only for a thread started from a tracker's task. |
+| `tasks` | [string] | The other tasks the node is on (`--task`, `node assign`): tracker ids or `TASKS.md` titles. Present only when there is one. |
+| `task_scope` | string | A coordinator node's task scope, the text the tracker's `list` gets. Present only when set. |
 | `status_file` | [Status file](#status-file) or `null` | A local coordinator node that may spawn: its `nodes/<id>/STATUS.md` in the project's records folder. `null` for every other node and while the file is missing. |
 | `usage` | [Usage](#usage) or `null` | Its token use as last read. |
 
@@ -143,8 +147,16 @@ The plain Markdown file a coordinator writes about its own work, for a person or
 | `objective` | string | Its `Objective:` line. Present only when it has one; the template's `(none)` counts as none. |
 | `asks` | [Ask] | The lines under `## Asked`, in file order. Present only when there is one. |
 | `needs_decision` | [string] | The lines under `## Needs your decision`, without the bullet. Present only when there is one. |
+| `decisions` | [Decision] | The same lines, structured: see below. Present only when there is one. |
 
-A symbolic link or anything else that is not a regular file is `null`, like a missing file. These three are read from `text`, so a file over 4,000 characters is read as far as that. A line that is only `(none)` or `none` under a heading is not an item. A status file without them prints what it printed before they existed.
+| Decision field | Type | Meaning |
+| --- | --- | --- |
+| `line` | number | Its line in the status file, from 1: what `asks answer --line` takes. |
+| `text` | string | The line without its bullet and without the links of its final parenthesis: `<decision> : <options>`. |
+| `links` | [Link] | The links of its final parenthesis, read as an [ask's](#asks) are. |
+| `answered_at` | string | RFC 3339, once the user answered the line with `asks answer` and until the coordinator changes it; left out otherwise. |
+
+A symbolic link or anything else that is not a regular file is `null`, like a missing file. These are read from `text`, so a file over 4,000 characters is read as far as that. A line under a heading that is only `(none)`, `none` or one parenthesis, such as `(nothing for now; ...)`, is not an item. A status file without them prints what it printed before they existed.
 
 ## Asks
 
@@ -158,6 +170,7 @@ What the user asked a coordinator, as it wrote under `## Asked` in its status fi
 | `links` | [Link] | The links of its final parenthesis, in order. Other words in it are dropped; a parenthesis with no link stays part of `answer`. |
 | `confirmed` | string | What the links confirm, the least finished one winning: `in-progress` (a linked thread works or waits on you, a linked pull request is open, a linked task is to do), `stopped` (a linked thread stopped without being resolved, and nothing is in progress), `failed` (nothing in progress or stopped, and a thread failed or a pull request closed without merging), `done` (every linked thread resolved, pull request merged and task done), or empty when no link has a state the records know. |
 | `mismatch` | string | Why `state` does not close with the links, one of the fixed reasons below; empty when it closes. |
+| `answered_at` | string | RFC 3339, when the user answered this line with `asks answer`; it stays while the line's text is the same and is left out otherwise. An answered `needs-decision` ask no longer waits on the user: it sorts with `open` and `working`. `state` stays what the coordinator wrote. |
 
 | Link field | Type | Meaning |
 | --- | --- | --- |
@@ -179,11 +192,24 @@ What the user asked a coordinator, as it wrote under `## Asked` in its status fi
 
 `asks --json` lists every coordinator's asks: of every project that is not archived, or of `--project`. The coordinators are the root (`STATUS.md`) and each local coordinator node that may spawn (`nodes/<id>/STATUS.md`); a resolved node can no longer update its file, so its `answered` and `done` asks that close are left out, and what it left open or does not close stays. They are sorted by what the user does next: `needs-decision` first (a resolved node's goes with `open`, since it takes no answer), then a mismatch, then `open` and `working`, then `answered` and `done`, then `unknown`; in each, by project slug, root first then nodes in tree order, then line. Without `--json`, one tab-separated line per ask: project, coordinator (`root` or `<id> <title>`), state, confirmed, mismatch, `<ask> : <answer>`, and the links as `t-0007 working (PR open), #12 open`.
 
+`--node <id>` (with `--project`; `root` or a coordinator node's id) keeps that coordinator's rows, and is refused for an id with no status file. Without `--json`, an answered row's state reads `needs-decision (answered)`.
+
 | Ask row field | Type | Meaning |
 | --- | --- | --- |
 | `project` | string | The slug. |
 | `coordinator` | object | `{id, title}`: `root` with an empty title, or the node's id and title. |
 | the [Ask](#asks) fields | | |
+| `actions` | [string] | What the user can do from the row: `["answer"]` (see [Answering an ask](#answering-an-ask)) while the coordinator is not resolved, else empty. |
+
+`decisions` lists every coordinator's `## Needs your decision` lines, in project, coordinator and line order: each `{project, coordinator: {id, title}, actions}` with the [Decision](#status-file) fields (`line`, `text`, `links`, `answered_at`). `actions` is `["answer"]`. A resolved coordinator takes no answer, so its lines are left out. It is left out when there is none.
+
+`coordinators` has one entry per coordinator whose status file was read, in the order of the list's coordinators, each `{project, id, title, counts}` with `counts` as `{decisions, waits_on_you, does_not_close, in_progress, done, unknown}`: `decisions` is its decision lines not answered yet, the rest its listed rows in the groups above. It is left out when there is no row and no decision.
+
+### Answering an ask
+
+`asks answer <slug> <root|t-NNNN> --line N --text-file <F|-> [--json]` answers line `N` of that coordinator's status file, an ask under `## Asked` or a line under `## Needs your decision`. `-` reads the text from standard input. The text is one line (a control character, a line break included, is refused). It types into the coordinator `[from the user, answering your STATUS.md line N] <text>`: the line is named by its number, never quoted, because its text is the coordinator's and may carry words from outside (a pull request or issue title) that must not come back as the user's. Then it records in `.state/answers.json` the line's text and when, so that line carries `answered_at` until the coordinator changes it. The answer itself goes to the coordinator, whose skill says where it lands: an `## Asked` line gets its state and answer updated, and a `## Needs your decision` line moves to `## Decisions` as `- <date> <what the user decided>`.
+
+Exit 0 means the answer was typed. Otherwise the error is on standard error, the exit status is not 0 and nothing is recorded: the coordinator does not run or cannot take a prompt, the node is resolved or is no coordinator with a status file, line `N` is no ask or decision, the text is empty or more than one line, or the command runs in a coordinator's own pane (it is the user's). With `--json` it prints `{"schema_version":1,"project":"<slug>","coordinator":"<root|t-NNNN>","line":N,"answered_at":"<RFC 3339>"}`. `asks answer --help` exits 0, so a client can tell the command is there.
 
 ## Usage
 
@@ -253,6 +279,27 @@ A resolved thread keeps the values it had when it was resolved. When its `state`
 | `profile` | string | An agent's profile. Empty when its machine's coordinator picks one (`(@m1)`), and for an old `(agent → t-0007)`, which runs on the project's `thread_profile`. |
 | `machine` | string | An agent's machine, empty for this machine. |
 | `name` | string | A person's name as written, empty for the other kinds. |
+
+Once a coordinator node has tasks of its own (or its tracker list failed), a node's `nodes/<id>/TASKS.md` belongs to no coordinator, or a node is on a task with `--task` or `node assign`, `task list --json` also carries the project view (see [Tasks per coordinator](operations.md#tasks-per-coordinator)); `tasks` stays the root's whole list as before. `overview --json` and `project show --json` carry the same two fields as `task_owners: {owners, unowned}` on each project, from what is cached. Without any of that, neither appears.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `owners` | [{id, title, tasks: [Task + assignees, delegated], unavailable?}] | Every coordinator that owns a list: `root` (empty title) first, then open coordinator nodes in tree order. With a tracker, the root keeps the tasks no scoped coordinator lists. `unavailable` is present, with the reason, when that list could not be read. |
+| `unowned` | [Task + assignees, delegated, owner_node] | Tasks in `nodes/<id>/TASKS.md` of a node that is resolved or is no coordinator (`owner_node` is that node), then each task an open node is on that no list has (`owner_node` empty): a tracker task found with `get`, else named by its id, or a `TASKS.md` title no list has any more. |
+
+| Task view field | Type | Meaning |
+| --- | --- | --- |
+| `assignees` | [Assignee] | Who works on it: the thread on its line and the nodes whose record names it, nested so that a node on the task sits under its nearest ancestor that is on it too. In `--node`'s view, that coordinator is left out. |
+| `delegated` | bool | A coordinator node is among the top assignees: the owner handed the task to it. |
+| `via` | `"own"` or `"assigned"` | `--node` only: in the coordinator's own list, or in another list with the coordinator on it. |
+| `owner_node` | string | `--node` and `unowned`: whose list it is in (`root` or a node id), empty for a task no list has. |
+
+| Assignee field | Type | Meaning |
+| --- | --- | --- |
+| `id`, `title`, `role` | string | The node. |
+| `group` | string | Its group token as the ticker last recorded it, or `failed`. |
+| `verdict` | string or `null` | The `Status:` line of its report, as in [Thread](#thread). |
+| `assignees` | [Assignee] | Its descendants on the same task. |
 
 Only the coordinator writes `TASKS.md`, with one exception: `thread start` and `node start` with `--from-task` append ` · <thread id>` to the end of that task's line. A client changes a task the way the projects popup does, by sending the coordinator a sentence, and the coordinator edits the file on its turn:
 

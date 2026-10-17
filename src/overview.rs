@@ -241,8 +241,12 @@ pub fn project_json(ctx: &Ctx, project: &Project, rows: &[Row]) -> ProjectJson {
         icon: settings.icon,
         tone: settings.tone,
         usage: crate::usage::load(project).usage(crate::organizations::ROOT_ID),
-        status_file: crate::status_file::read(&crate::status_file::root(project))
-            .map(|status| status.confirmed(&crate::asks::Records::load(ctx, project))),
+        status_file: crate::status_file::read(&crate::status_file::root(project)).map(|status| {
+            status.confirmed(
+                &crate::asks::Records::load(ctx, project),
+                crate::organizations::ROOT_ID,
+            )
+        }),
         coordinator: coordinator_json(project),
     }
 }
@@ -271,6 +275,11 @@ struct ProjectShowJson {
     merge_gate: String,
     merge_method: &'static str,
     auto_merge: bool,
+    /// Every coordinator's tasks (`task list --json`'s `owners` and
+    /// `unowned`), from what is cached; left out while the root's list is
+    /// the only one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_owners: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -326,6 +335,11 @@ fn project_show(ctx: &Ctx, slug: &str) -> Result<ProjectShowJson> {
         merge_gate: safety.merge_gate.first().cloned().unwrap_or_default(),
         merge_method: safety.merge_method.word(),
         auto_merge: safety.auto_merge,
+        task_owners: crate::task_views::project_json(
+            ctx,
+            &project,
+            crate::task_views::Read::Cached,
+        )?,
     })
 }
 
@@ -409,6 +423,11 @@ pub fn run_json(ctx: &Ctx, slug: Option<&str>) -> Result<()> {
         let rows = threads::rows(ctx, &project);
         let mut value = serde_json::to_value(project_json(ctx, &project, &rows))?;
         value["threads"] = serde_json::to_value(threads::threads_json(ctx, &project, &rows))?;
+        if let Some(owners) =
+            crate::task_views::project_json(ctx, &project, crate::task_views::Read::Cached)?
+        {
+            value["task_owners"] = owners;
+        }
         projects.push(value);
     }
     threads::print_json(&serde_json::json!({

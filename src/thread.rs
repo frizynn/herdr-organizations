@@ -182,6 +182,14 @@ pub struct Thread {
     pub task_origin: String,
     /// The tracker's id of that task; empty for a TASKS.md task.
     pub task_id: String,
+    /// The other tasks it works on (`node start --task`, `node assign`): a
+    /// tracker task's id, or a TASKS.md task's title as written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<String>,
+    /// A coordinator node's task scope: opaque text the tracker's `list`
+    /// gets as `HP_TASK_SCOPE`, so it prints this coordinator's tasks.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub task_scope: String,
     /// Every native session id Herdr reported for its pane, oldest first and
     /// each once: the transcripts its token use is read from (`usage.rs`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -206,6 +214,16 @@ pub struct Asked {
 }
 
 impl Thread {
+    /// Every task it works on: the one it was started from, then the ones
+    /// it was assigned to.
+    pub fn assigned(&self) -> Vec<&str> {
+        let started = (!self.task_id.is_empty()).then_some(self.task_id.as_str());
+        started
+            .into_iter()
+            .chain(self.tasks.iter().map(String::as_str))
+            .collect()
+    }
+
     pub fn is_remote(&self) -> bool {
         !self.machine.is_empty()
     }

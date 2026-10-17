@@ -296,12 +296,24 @@ pub fn read(project_dir: &Path) -> String {
 /// `task list [--json]`: the JSON document, or one
 /// `list<TAB>title<TAB>owner<TAB>thread` line per task, a tracker's with
 /// `<TAB>id` after them.
+#[cfg(test)]
 pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()> {
     let project = crate::project::Project::load(&ctx.root, slug)?;
     let tasks = match load(ctx, &project, false) {
         Tasks::Unavailable(reason) => bail!("{reason}"),
         tasks => tasks.list().to_vec(),
     };
+    print_tasks(ctx, &project, &tasks, json)
+}
+
+/// `task list`'s flat form, the one a project with only the root's list
+/// prints.
+pub fn print_tasks(
+    ctx: &crate::paths::Ctx,
+    project: &crate::project::Project,
+    tasks: &[Task],
+    json: bool,
+) -> Result<()> {
     if json {
         let config = crate::profiles::load(&ctx.config_dir)?;
         let is_profile = |p: &str| config.get(p).is_some();
@@ -311,7 +323,7 @@ pub fn print_list(ctx: &crate::paths::Ctx, slug: &str, json: bool) -> Result<()>
             "tasks": tasks.iter().map(|t| to_json(t, is_profile)).collect::<Vec<_>>(),
         }));
     }
-    for t in &tasks {
+    for t in tasks {
         let id = if t.id.is_empty() {
             String::new()
         } else {
@@ -517,7 +529,7 @@ fn find_titled(tasks: Vec<Task>, title: &str) -> Result<Task> {
 
 /// The one tracker task whose id is `key`, else whose title is, ignoring
 /// case; a title two tasks share is refused, as in TASKS.md.
-fn find_tracked(tasks: Vec<Task>, key: &str, slug: &str) -> Result<Task> {
+pub fn find_tracked(tasks: Vec<Task>, key: &str, slug: &str) -> Result<Task> {
     let wanted = key.trim().to_lowercase();
     let matching = |field: fn(&Task) -> &str| -> Vec<Task> {
         tasks
@@ -586,14 +598,26 @@ pub fn open_in(tasks: &[Task], id: &str, task_id: &str) -> Vec<Task> {
 }
 
 /// The tasks as they are on disk, without asking a tracker: TASKS.md's, or
-/// the tracker's last cached list (none before its first answer or while
-/// it failed).
+/// the tracker's last cached lists, the project's and each coordinator's,
+/// and the tasks `get` found (none before a first answer or while it
+/// failed), each id once.
 pub fn on_disk(ctx: &crate::paths::Ctx, project: &crate::project::Project) -> Vec<Task> {
     match project.tracker(&ctx.config_dir) {
         Ok(None) => parse(&read(&project.dir())),
-        Ok(Some(config)) => crate::tracker::cached(project, &config)
-            .and_then(Result::ok)
-            .unwrap_or_default(),
+        Ok(Some(config)) => {
+            let mut all = crate::tracker::cached(project, &config)
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            for task in crate::tracker::cached_scopes(project, &config)
+                .into_iter()
+                .chain(crate::tracker::cached_gets(project))
+            {
+                if !all.iter().any(|t| t.id == task.id) {
+                    all.push(task);
+                }
+            }
+            all
+        }
         Err(_) => Vec::new(),
     }
 }

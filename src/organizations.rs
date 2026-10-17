@@ -38,6 +38,11 @@ pub struct NodeRequest {
     /// That task's tracker id, empty for TASKS.md: the record keeps it and
     /// the tracker's `link` is told instead of TASKS.md.
     pub task_id: String,
+    /// The tasks it is assigned to (`--task`), by tracker id or TASKS.md
+    /// title, already found.
+    pub tasks: Vec<String>,
+    /// A coordinator node's task scope (`--task-scope`).
+    pub task_scope: String,
     /// The profile of the template it starts from, used when neither a flag
     /// nor the task's owner names one.
     pub template_profile: Option<String>,
@@ -54,6 +59,8 @@ impl Default for NodeRequest {
             memory: Memory::default(),
             from_task: None,
             task_id: String::new(),
+            tasks: Vec::new(),
+            task_scope: String::new(),
             template_profile: None,
         }
     }
@@ -322,6 +329,18 @@ fn recorded_caller(
         .map(|record| Caller::Node(Box::new(record)))
 }
 
+/// Whether the command runs in the pane of one of the project's coordinators
+/// or local nodes, as `signed` tells them from the user's own terminal.
+pub fn called_by_coordinator(ctx: &Ctx, project: &Project) -> bool {
+    recorded_caller(
+        project,
+        thread::list(project),
+        ctx.env.var("HERDR_PANE_ID").unwrap_or(""),
+        ctx.env.var("HERDR_SOCKET_PATH").unwrap_or(""),
+    )
+    .is_some()
+}
+
 /// Applies the shared pane hierarchy check and returns the parent a recognized
 /// coordinator is authorized to use. `None` means this is not a known project
 /// pane, preserving manually selected parents for terminal callers.
@@ -560,6 +579,8 @@ pub fn create_node(project: &Project, args: &CreateNode) -> Result<Thread> {
         record.raw_agent_args = profile.raw_agent_args.clone();
         record.task = args.request.from_task.clone().unwrap_or_default();
         record.task_id = args.request.task_id.clone();
+        record.tasks = args.request.tasks.clone();
+        record.task_scope = args.request.task_scope.clone();
         record.task_origin = if args.request.from_task.is_some() {
             "task"
         } else {

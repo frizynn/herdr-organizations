@@ -197,7 +197,11 @@ pub fn context_problems(project: &Project, tasks: &Tasks) -> Vec<Problem> {
     let mut found = problems(project, tasks);
     let records = crate::asks::Records::new(thread::list(project), tasks.list().to_vec());
     let asks = status_file::read(&status_file::root(project))
-        .map(|status| status.confirmed(&records).asks)
+        .map(|status| {
+            status
+                .confirmed(&records, crate::organizations::ROOT_ID)
+                .asks
+        })
         .unwrap_or_default();
     found.extend(
         asks.iter()

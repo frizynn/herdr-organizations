@@ -188,6 +188,24 @@ pub struct Node {
     /// A coordinator's status file while it exists; `None` for a thread and
     /// in a model written before it.
     pub status_file: Option<StatusCard>,
+    /// A coordinator's tasks (`task_views::node_rows`), once the project
+    /// uses more than the root's list; empty otherwise and for a thread.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskLine>,
+}
+
+/// One task on a coordinator's card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TaskLine {
+    pub title: String,
+    /// The tracker's id, empty for a TASKS.md task.
+    pub id: String,
+    /// `own`, or `assigned` for a task of another list it is on.
+    pub via: String,
+    /// Who works on it: `delegated: t-0001 (t-0003)`, `t-0004`, or empty.
+    pub who: String,
+    pub delegated: bool,
 }
 
 /// A node's verdict in the state file. `issues` is written as `failed` with
@@ -235,7 +253,8 @@ pub struct StatusCard {
     /// RFC 3339 modification time.
     pub updated: String,
     pub objective: String,
-    /// The lines under `## Needs your decision`.
+    /// The lines under `## Needs your decision` the user has not answered
+    /// with `asks answer` since the coordinator wrote them.
     pub needs_decision: Vec<String>,
 }
 
@@ -262,6 +281,8 @@ pub struct Card<'a> {
     /// In tree order.
     pub children: Vec<&'a Node>,
     pub prs: Vec<(&'a Node, &'a Pr)>,
+    /// Its tasks, own first.
+    pub tasks: &'a [TaskLine],
 }
 
 impl Card<'_> {
@@ -287,7 +308,7 @@ impl Card<'_> {
             .chain(
                 self.asks
                     .iter()
-                    .filter(|a| a.state == asks::State::NeedsDecision)
+                    .filter(|a| a.state == asks::State::NeedsDecision && a.answered_at.is_empty())
                     .map(|a| a.said()),
             )
             .collect()
@@ -397,6 +418,7 @@ impl ProjectView {
             asks,
             children,
             prs,
+            tasks: &node.tasks,
         })
     }
 }
@@ -573,6 +595,7 @@ pub fn build(ctx: &Ctx, lives: &[Live]) -> Snapshot {
         }
         let mut view = project_view(&project, lives, &merge_gate::Rule::load(ctx, &project));
         add_status_files(&mut view, &project, &asks::Records::load(ctx, &project));
+        add_tasks(ctx, &mut view, &project);
         for node in view.coordinators.iter().chain(&view.threads) {
             if !node.workspace_id.is_empty() && node.machine.is_empty() {
                 owners.insert(
@@ -821,6 +844,24 @@ pub fn project_view(project: &Project, lives: &[Live], rule: &merge_gate::Rule) 
     }
 }
 
+/// Each coordinator's tasks, from what is cached: the popup runs nothing.
+fn add_tasks(ctx: &Ctx, view: &mut ProjectView, project: &Project) {
+    for (id, rows) in crate::task_views::coordinator_rows(ctx, project) {
+        if let Some(node) = view.coordinators.iter_mut().find(|c| c.id == id) {
+            node.tasks = rows
+                .iter()
+                .map(|row| TaskLine {
+                    title: row.task.title.clone(),
+                    id: row.task.id.clone(),
+                    via: row.via.into(),
+                    who: row.who(),
+                    delegated: row.delegated(),
+                })
+                .collect();
+        }
+    }
+}
+
 /// Each coordinator's status file: its card, and its asks confirmed
 /// against `records`.
 fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::Records) {
@@ -835,7 +876,13 @@ fn add_status_files(view: &mut ProjectView, project: &Project, records: &asks::R
                 path: status.path,
                 updated: status.updated,
                 objective: status.objective,
-                needs_decision: status.needs_decision,
+                needs_decision: status
+                    .needs_decision
+                    .into_iter()
+                    .zip(&status.decisions)
+                    .filter(|(_, d)| d.answered_at.is_empty())
+                    .map(|(text, _)| text)
+                    .collect(),
             });
         }
         view.asks.extend(status.asks.into_iter().map(|ask| AskView {
@@ -904,6 +951,59 @@ mod tests {
             toml::to_string(&t).unwrap(),
         )
         .unwrap();
+    }
+
+    /// Each coordinator carries its view of the tasks (`task_views`), and a
+    /// project that uses nothing but the root's list carries none, as before.
+    #[test]
+    fn each_coordinator_carries_its_tasks_once_the_project_uses_them() {
+        let world = World::new();
+        let project = world.project("demo", "a.sock");
+        node_record(
+            &project,
+            "t-0001",
+            "root",
+            NodeRole::Coordinator,
+            Group::Working,
+        );
+        node_record(
+            &project,
+            "t-0002",
+            "t-0001",
+            NodeRole::Worker,
+            Group::Working,
+        );
+        std::fs::write(
+            project.dir().join("TASKS.md"),
+            "## Now\n- [ ] Ship billing\n",
+        )
+        .unwrap();
+        let ctx = world.ctx();
+        let view = || {
+            let mut view = project_view(&project, &[], &Default::default());
+            add_tasks(&ctx, &mut view, &project);
+            view
+        };
+        assert!(view().node("root").unwrap().tasks.is_empty());
+        for id in ["t-0001", "t-0002"] {
+            thread::update(&project, id, |t| t.tasks = vec!["Ship billing".into()]).unwrap();
+        }
+        let view = view();
+        let root = &view.node("root").unwrap().tasks;
+        assert_eq!(root.len(), 1);
+        assert_eq!(
+            (
+                root[0].title.as_str(),
+                root[0].via.as_str(),
+                root[0].who.as_str()
+            ),
+            ("Ship billing", "own", "delegated: t-0001 (t-0002)")
+        );
+        let node = &view.node("t-0001").unwrap().tasks;
+        assert_eq!(
+            (node[0].via.as_str(), node[0].who.as_str()),
+            ("assigned", "t-0002")
+        );
     }
 
     #[test]

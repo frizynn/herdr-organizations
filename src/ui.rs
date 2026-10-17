@@ -1313,6 +1313,39 @@ impl<'a> App<'a> {
             line = text_column(line, node).at(-2, state::age(&node.since), DIM);
             lines.push(line.target(Target::Node(project.slug.clone(), node.id.clone())));
         }
+        // Each coordinator's tasks, counted; its card lists them.
+        let owners: Vec<&state::Node> = project
+            .coordinators
+            .iter()
+            .filter(|c| !c.tasks.is_empty())
+            .collect();
+        if !owners.is_empty() {
+            lines.push(Line::new());
+            lines.push(Line::new().at(1, "TASKS", HEAD));
+        }
+        for owner in owners {
+            let own = owner.tasks.iter().filter(|t| t.via == "own");
+            let mut words = vec![format!("{} tasks", own.clone().count())];
+            let delegated = own.filter(|t| t.delegated).count();
+            if delegated > 0 {
+                words.push(format!("{delegated} delegated"));
+            }
+            let handed = owner.tasks.iter().filter(|t| t.via == "assigned").count();
+            if handed > 0 {
+                words.push(format!("{handed} handed to it"));
+            }
+            let title = if owner.id == ROOT_ID {
+                "Coordinator"
+            } else {
+                owner.title.as_str()
+            };
+            lines.push(
+                Line::new()
+                    .at(3, term::fit(title, 26), BOLD)
+                    .at(30, words.join(" · "), DIM)
+                    .target(Target::Node(project.slug.clone(), owner.id.clone())),
+            );
+        }
         lines.push(Line::new());
         self.history_lines(project, 3, Some(folded), &mut lines);
         lines
@@ -1815,8 +1848,10 @@ impl<'a> App<'a> {
             .filter(|i| i.subject == node.id)
             .collect();
         // A model written before cards has no status file on its nodes: the
-        // file itself is shown then, as before.
-        let card = project.card(&node.id).filter(|c| c.status.is_some());
+        // file itself is shown then, as before. Tasks alone make a card too.
+        let card = project
+            .card(&node.id)
+            .filter(|c| c.status.is_some() || !c.tasks.is_empty());
         let status = match &card {
             Some(_) => None,
             None => status_path(&project, &node).and_then(|p| crate::status_file::read(&p)),
@@ -2091,6 +2126,30 @@ impl<'a> App<'a> {
                 );
             }
             more(&mut lines, asks.len());
+        }
+        if !card.tasks.is_empty() {
+            lines.push(Line::new());
+            lines.push(
+                Line::new()
+                    .at(1, "TASKS", HEAD)
+                    .at(7, card.tasks.len().to_string(), DIM),
+            );
+            for task in card.tasks.iter().take(MOST) {
+                // A task of another list this coordinator was handed.
+                let glyph = if task.via == "assigned" { "↳" } else { "·" };
+                let title = if task.id.is_empty() {
+                    task.title.clone()
+                } else {
+                    format!("{} {}", task.id, task.title)
+                };
+                lines.push(
+                    Line::new()
+                        .at(3, glyph, DIM)
+                        .at(5, term::fit(&title, 28), Style::PLAIN)
+                        .at(35, fit(&task.who, 37), DIM),
+                );
+            }
+            more(&mut lines, card.tasks.len());
         }
         if !card.children.is_empty() {
             lines.push(Line::new());
@@ -5195,6 +5254,61 @@ mod tests {
             assert!(child.contains("over cap"), "{child}");
             assert!(text.contains("PULL REQUESTS"), "{text}");
             assert!(text.contains("#1342"), "{text}");
+        });
+    }
+
+    /// A coordinator's card lists its tasks with who works on each, a task
+    /// handed to a coordinator child as delegated; the project tree counts
+    /// each coordinator's tasks.
+    #[test]
+    fn a_coordinators_card_and_the_tree_show_its_tasks() {
+        with_app(|app| {
+            let project = &mut app.snap.projects[0];
+            project.coordinators[0].tasks = vec![
+                state::TaskLine {
+                    title: "Ship billing".into(),
+                    via: "own".into(),
+                    who: "delegated: t-0001 (t-0003)".into(),
+                    delegated: true,
+                    ..state::TaskLine::default()
+                },
+                state::TaskLine {
+                    title: "Plan the quarter".into(),
+                    via: "own".into(),
+                    ..state::TaskLine::default()
+                },
+            ];
+            project.coordinators[1].tasks = vec![state::TaskLine {
+                title: "Ship billing".into(),
+                via: "assigned".into(),
+                who: "t-0003".into(),
+                ..state::TaskLine::default()
+            }];
+            app.open_detail("acme", "root");
+            let text = app.render(84, 40).text();
+            let line = |needle: &str| {
+                text.lines()
+                    .find(|l| l.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle} missing: {text}"))
+                    .to_string()
+            };
+            assert!(line("TASKS").contains('2'), "{text}");
+            assert!(line("Ship billing").contains("delegated: t-0001 (t-0003)"));
+            app.open_detail("acme", "t-0001");
+            let text = app.render(84, 40).text();
+            let row = text
+                .lines()
+                .find(|l| l.contains("Ship billing"))
+                .unwrap_or_else(|| panic!("{text}"));
+            assert!(row.contains("t-0003") && row.contains('↳'), "{row}");
+
+            app.stack.push(View::Tree {
+                slug: "acme".into(),
+                sel: 0,
+                folded: BTreeSet::new(),
+            });
+            let text = app.render(84, 40).text();
+            assert!(text.contains("2 tasks · 1 delegated"), "{text}");
         });
     }
 

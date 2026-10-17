@@ -268,6 +268,15 @@ pub fn start_in(
         args.node.from_task = Some(delegation.task.title);
         args.node.task_id = delegation.task.id;
     }
+    // Each task found before anything is created, kept as a record keeps it.
+    let mut assigned: Vec<String> = Vec::new();
+    for key in std::mem::take(&mut args.node.tasks) {
+        let found = crate::task_views::find_key(ctx, &project, &key)?;
+        if !assigned.contains(&found) && found != args.node.task_id {
+            assigned.push(found);
+        }
+    }
+    args.node.tasks = assigned;
     if args.title.trim().is_empty() {
         bail!("--title may not be empty");
     }
@@ -1895,6 +1904,12 @@ pub struct ThreadJson {
     /// project without a tracker prints what it printed before.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub task_id: String,
+    /// The other tasks it works on, and a coordinator's task scope; each
+    /// left out while empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub task_scope: String,
     /// Its token use as last read from its transcripts; `null` before that
     /// and on another machine.
     pub usage: Option<crate::usage::Usage>,
@@ -2070,6 +2085,8 @@ pub fn thread_json(
         task: t.task.clone(),
         task_origin: t.task_origin.clone(),
         task_id: t.task_id.clone(),
+        tasks: t.tasks.clone(),
+        task_scope: t.task_scope.clone(),
         usage: usage.usage(&t.id),
         status_file: organizations::node_status_json(project, t),
     }
@@ -2084,8 +2101,12 @@ fn confirm_status(
     records: &std::cell::OnceCell<crate::asks::Records>,
     mut json: ThreadJson,
 ) -> ThreadJson {
+    let id = json.id.clone();
     json.status_file = json.status_file.map(|status| {
-        status.confirmed(records.get_or_init(|| crate::asks::Records::load(ctx, project)))
+        status.confirmed(
+            records.get_or_init(|| crate::asks::Records::load(ctx, project)),
+            &id,
+        )
     });
     json
 }

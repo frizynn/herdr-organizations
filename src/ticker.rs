@@ -1024,6 +1024,17 @@ fn thread_pass(
         } else {
             thread::group(&after, &live, now)
         };
+        // An agent that went idle while a command it started still runs has
+        // not stopped: it is waiting on that command, which wakes it.
+        let group = if group == thread::Group::Idle
+            && t.last_group == thread::Group::Working.token()
+            && !t.is_remote()
+            && runs_in_background(context.ctx.runner, herdr, &t.pane_id)
+        {
+            thread::Group::Working
+        } else {
+            group
+        };
         if !t.last_group.is_empty() && group.token() != t.last_group {
             let note = if !live.pane_exists {
                 "pane closed".to_string()
@@ -1095,6 +1106,49 @@ fn thread_pass(
         }
     }
     Ok(pass)
+}
+
+/// Whether the agent in `pane` has a command of its own running in the
+/// background: a descendant of the pane's foreground processes (the agent
+/// and its helpers, such as MCP servers, which share its group) in another
+/// process group, as a harness's background shell is. Herdr names the
+/// foreground group; `ps` gives the descendants. Either failing reads as no.
+fn runs_in_background(runner: &dyn crate::runner::Runner, herdr: &Herdr, pane: &str) -> bool {
+    let Ok((group, foreground)) = herdr.pane_foreground(pane) else {
+        return false;
+    };
+    let cmd = crate::runner::Cmd::new("ps", std::time::Duration::from_secs(5)).args([
+        "-A",
+        "-o",
+        "pid=,ppid=,pgid=",
+    ]);
+    let Ok(out) = runner.run(&cmd) else {
+        return false;
+    };
+    if out.code != Some(0) {
+        return false;
+    }
+    let table: Vec<[u32; 3]> = out
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(|f| f.parse::<u32>().ok());
+            Some([fields.next()??, fields.next()??, fields.next()??])
+        })
+        .collect();
+    let mut seen: std::collections::HashSet<u32> = foreground.iter().copied().collect();
+    let mut queue: Vec<u32> = foreground;
+    while let Some(parent) = queue.pop() {
+        for [pid, ppid, pgid] in &table {
+            if *ppid == parent && seen.insert(*pid) {
+                if *pgid != group {
+                    return true;
+                }
+                queue.push(*pid);
+            }
+        }
+    }
+    false
 }
 
 struct PassContext<'a, 'ctx, 'runner> {
@@ -1613,6 +1667,16 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
     errors.extend(steps::pull_requests(ctx, project, &mut state, memory, now));
     errors.extend(steps::resolve_merged(ctx, project, &mut state, now));
     errors.extend(routine_pass(ctx, project, &mut state, seen.coordinator));
+    // Coordinators' tracker lists and tasks found by id, kept within their
+    // cache for the readers that run nothing (`overview`, the popup). Only
+    // a project with a task scope or a `get` command is asked.
+    if thread::list(project)
+        .iter()
+        .any(|t| !t.task_scope.is_empty())
+    {
+        let _ = crate::task_views::lists(ctx, project, crate::task_views::Read::Run);
+    }
+    crate::task_views::find_missing(ctx, project);
     if let Ok((settings, _)) = project.read_project_md() {
         errors.extend(steps::auto_resolve(ctx, project, &settings, memory, now));
     }

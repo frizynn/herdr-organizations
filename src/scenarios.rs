@@ -6922,3 +6922,181 @@ fn node_start_refuses_a_session_flag_naming_another_session() {
     assert!(thread::list(&project).is_empty());
     assert_eq!(world.runner.calls.borrow().len(), 0);
 }
+
+// ------------------------------------------------------------ answering asks
+
+/// `asks answer` types the user's answer into the coordinator, naming the
+/// line it answers without its links, and the line reads answered until the
+/// coordinator changes it. A line that is no ask or decision is refused.
+#[test]
+fn asks_answer_sends_the_answer_and_marks_the_line_until_it_changes() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    let dir = project.canonical_dir().to_string_lossy().into_owned();
+    *world.agents.borrow_mut() = format!(
+        "[{}]",
+        agent_json("w1", "w1:t1", "w1:p1", &dir, "hp-demo-coordinator", "idle")
+    );
+    world.runner.on("agent prompt", ok(r#"{"result":{}}"#));
+    let status = crate::status_file::root(&project);
+    std::fs::write(
+        &status,
+        "# Status\n## Asked\n- [needs-decision] Pilot or not : yes or no (t-0001, https://example.com/x)\n## Needs your decision\n- Budget : A or B\n",
+    )
+    .unwrap();
+    let ctx = world.ctx();
+    let answered = crate::asks::answer(&ctx, "demo", "root", 3, "Yes, pilot it.\n").unwrap();
+    assert!(!answered.answered_at.is_empty());
+    let sent: Vec<String> = world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.display().contains("agent prompt"))
+        .map(|c| prompt_text(c).to_string())
+        .collect();
+    assert_eq!(
+        sent,
+        ["[from the user, answering your STATUS.md line 3] Yes, pilot it."]
+    );
+    let read = || {
+        let records = crate::asks::Records::load(&ctx, &project);
+        crate::asks::sheets(&project, &records).remove(0).status
+    };
+    let ask = read().asks.remove(0);
+    assert_eq!(ask.answered_at, answered.answered_at);
+    assert_eq!(ask.rank(false), 2, "an answered decision waits on no one");
+
+    crate::asks::answer(&ctx, "demo", "root", 5, "B").unwrap();
+    let decisions = read().decisions;
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        (decisions[0].line, decisions[0].text.as_str()),
+        (5, "Budget : A or B")
+    );
+    assert!(!decisions[0].answered_at.is_empty());
+
+    for line in [1, 2, 9] {
+        let error = crate::asks::answer(&ctx, "demo", "root", line, "x").unwrap_err();
+        assert!(error.to_string().contains("is no ask"), "{error}");
+    }
+    assert!(crate::asks::answer(&ctx, "demo", "root", 3, "  \n").is_err());
+    // One line: a line break would be typed into the coordinator's pane.
+    let error = crate::asks::answer(&ctx, "demo", "root", 3, "yes\nand more").unwrap_err();
+    assert!(error.to_string().contains("one line"), "{error}");
+
+    std::fs::write(
+        &status,
+        "# Status\n## Asked\n- [needs-decision] Pilot or not : yes, no or later (t-0001)\n## Needs your decision\n- Budget : A or B\n",
+    )
+    .unwrap();
+    let after = read();
+    assert_eq!(after.asks[0].answered_at, "", "the line changed");
+    assert!(!after.decisions[0].answered_at.is_empty());
+}
+
+// ------------------------------------------------- a stop with work running
+
+/// An agent that goes idle while a command it started still runs in the
+/// background (a descendant of the agent in a process group of its own, as
+/// a harness's background shell is) has not stopped: the thread stays
+/// Working and nothing says it stopped. Once that command ends, the stop
+/// is named as before.
+#[test]
+fn an_idle_agent_with_its_own_background_command_has_not_stopped() {
+    let (world, project, _) = finished_world("idle");
+    set_front_matter(&project, "nudge = true");
+    world.runner.on(
+        "process-info",
+        ok(r#"{"result":{"process_info":{"pane_id":"w2:p1","shell_pid":90,"foreground_process_group_id":100,"foreground_processes":[{"pid":100,"name":"claude"},{"pid":101,"name":"mcp"}]}}}"#),
+    );
+    // pid ppid pgid: the agent, its helper in its own group, a background
+    // shell and what it runs, and an unrelated process.
+    let ps = Rc::new(RefCell::new(
+        "90 1 90\n100 90 100\n101 100 100\n200 100 200\n201 200 200\n300 1 300\n".to_string(),
+    ));
+    let table = ps.clone();
+    world
+        .runner
+        .on_fn(|cmd| cmd.program == "ps", move |_| Ok(ok(&table.borrow())));
+    let ctx = world.ctx();
+    let mut memory = Memory::new(&ctx);
+    for _ in 0..3 {
+        ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+        idle_for_a_minute(&project);
+    }
+    assert_eq!(
+        thread::load(&project, "t-0001").unwrap().last_group,
+        "working"
+    );
+    assert!(items_about(&project, "t-0001").is_empty());
+    assert!(nudges(&world).is_empty());
+
+    *ps.borrow_mut() = "90 1 90\n100 90 100\n101 100 100\n300 1 300\n".to_string();
+    ticker::tick_project_with(&ctx, &project, &mut memory).unwrap();
+    assert_eq!(thread::load(&project, "t-0001").unwrap().last_group, "idle");
+    assert_eq!(
+        events_and_audiences(&items_about(&project, "t-0001")),
+        [(
+            "stopped without a new report".to_string(),
+            Audience::Coordinator
+        )]
+    );
+}
+
+/// `node start --task` (repeatable) puts the new node on each task, with
+/// `--task-scope` kept on its record, and `link` hears `started` for each
+/// tracker task; a task the tracker does not know is refused before
+/// anything is created.
+#[test]
+fn a_node_starts_on_several_tasks_with_its_task_scope() {
+    let world = World::new();
+    let project = world.project("demo", "a.sock");
+    // The first rule that matches answers.
+    world.runner.on(
+        "tracker-list",
+        ok(r#"{"schema_version":1,"tasks":[{"id":"TRK-1","title":"Research"},{"id":"TRK-2","title":"Write up"}]}"#),
+    );
+    track(&world, &project, ok(""));
+    *world.panes.borrow_mut() = format!("[{}]", world.coordinator_pane(&project));
+    let folder = project.dir().join("threads/t-0001");
+    world.runner.on_fn(
+        |cmd| cmd.display().contains("tab create"),
+        move |_| Ok(ok(&format!(r#"{{"result":{{"root_pane":{{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","cwd":"{}"}}}}}}"#, folder.display()))),
+    );
+    world
+        .runner
+        .on("pane get", ok(r#"{"result":{"pane":{"cwd":""}}}"#));
+    let ctx = world.ctx();
+    let args = |tasks: &[&str]| StartArgs {
+        title: "Area".into(),
+        repo: None,
+        machine: None,
+        profile: None,
+        kind: Some(Kind::Tab),
+        base: None,
+        task: "Run the area.".into(),
+        node: crate::organizations::NodeRequest {
+            tasks: tasks.iter().map(|t| t.to_string()).collect(),
+            task_scope: "research".into(),
+            ..Default::default()
+        },
+    };
+    let error = threads::start(&ctx, "demo", args(&["TRK-1", "TRK-404"])).unwrap_err();
+    assert!(error.to_string().contains("TRK-404"), "{error}");
+    assert!(thread::list(&project).is_empty());
+
+    let t = threads::start(&ctx, "demo", args(&["TRK-1", "write up"])).unwrap();
+    assert_eq!(t.tasks, ["TRK-1", "TRK-2"], "kept by id");
+    assert_eq!(t.task_scope, "research");
+    assert_eq!(t.task_id, "");
+    let started: Vec<String> = world
+        .runner
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.program == "tracker-link")
+        .map(|c| format!("{} {}", env_of(c, "HP_TASK_ID"), env_of(c, "HP_EVENT")))
+        .collect();
+    assert_eq!(started, ["TRK-1 started", "TRK-2 started"]);
+}
